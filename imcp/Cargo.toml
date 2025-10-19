@@ -1,0 +1,7 @@
+[package]
+name = "imcp"
+version = "0.1.0"
+edition = "2024"
+description = "Inter-microcontroller communication protocol"
+
+[dependencies]
