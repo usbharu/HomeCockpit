@@ -27,14 +27,14 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
     }
 
     /// rx_buffer の末尾に新しいデータを追加（書き込み）する
-    pub fn write_data(&mut self, new_data: &[u8]) -> Result<usize, EncodeError> {
+    pub fn write_data(&mut self, new_data: &[u8]) -> Result<usize, DecodeError> {
         // 1. バッファを整理 (もし rx_scan_pos > 0 ならデータを詰める)
         self.consume_rx_buffer();
 
         // 2. 空き容量を計算
         let free_space = self.rx_buffer.len() - self.rx_len;
         if new_data.len() > free_space {
-            return Err(EncodeError::BufferTooSmall);
+            return Err(DecodeError::FrameBufferTooSmall);
         }
 
         // 3. データをバッファの末尾にコピー

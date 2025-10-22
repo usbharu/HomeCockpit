@@ -1,1 +1,5 @@
 imcp/target
+*/production/**
+*/fp-info-cache
+*/fp-lib-table
+*/**-backups/*.zip

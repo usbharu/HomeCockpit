@@ -1,3 +1,5 @@
+use crate::frame::{FramePayload, FrameType};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodeError {
     /// 書き込み先バッファのサイズが不足している
@@ -16,4 +18,9 @@ pub enum DecodeError {
     FrameBufferTooSmall,
     /// エスケープシーケンスが不正 (例: ESC の直後に EOF/SOF が来た)
     InvalidEscapeSequence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolError{
+    InvalidFrameType(FrameType)
 }
