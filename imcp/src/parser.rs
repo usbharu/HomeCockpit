@@ -66,12 +66,12 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
 
                 ParserState::Receiving => {
                     match byte {
-                        // SOF => {
-                        //     // 予期せぬ SOF。フレームの再開とみなす
-                        //     self.frame_len = 0;
-                        //     self.is_escaping = false;
-                        //     // (継続)
-                        // }
+                        SOF => {
+                            // 予期せぬ SOF。フレームの再開とみなす
+                            self.frame_len = 0;
+                            self.is_escaping = false;
+                            // (継続)
+                        }
                         EOF => {
                             // EOF受信。フレーム終端
                             self.state = ParserState::WaitingForSof;

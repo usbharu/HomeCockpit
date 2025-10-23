@@ -78,11 +78,10 @@ impl<'a> FramePayload<'a> {
     }
     pub fn len(&self) -> u16 {
         match self {
-            FramePayload::Ping | FramePayload::Pong | FramePayload::Join(_) => {
-                0
-            },
-             FramePayload::Ack(_) => 1,
-            FramePayload::Set(data) => data.len() as u16 ,
+            FramePayload::Ping | FramePayload::Pong => 0,
+            FramePayload::Join(_) => 4,
+            FramePayload::Ack(_) => 1,
+            FramePayload::Set(data) => data.len() as u16,
 
             FramePayload::SetAddress { .. } => 5,
 
@@ -122,7 +121,7 @@ impl<'a> FramePayload<'a> {
             }
             FrameType::Ack => {
                 if payload_len != 1 {
-                    // return Err(DecodeError::InvalidPayloadLength);
+                    return Err(DecodeError::InvalidPayloadLength);
                 }
                 Ok(FramePayload::Ack(payload_slice[0]))
             }
@@ -134,9 +133,7 @@ impl<'a> FramePayload<'a> {
                 bytes.copy_from_slice(payload_slice);
                 Ok(FramePayload::Join(u32::from_le_bytes(bytes)))
             }
-            FrameType::Set => {
-                Ok(FramePayload::Set(payload_slice))
-            }
+            FrameType::Set => Ok(FramePayload::Set(payload_slice)),
 
             FrameType::SetAddress => {
                 if payload_len != 5 {
@@ -251,21 +248,39 @@ impl<'a> Frame<'a> {
             write_idx = write_stuffed_byte(byte, write_idx, buffer)?;
         }
 
-        // 3. Payload (P)
-        if payload_len > 0 {
-            // (SetAddress のペイロードもスライスとして扱えるように修正)
-            let payload_data: &[u8] = match &self.payload {
-                FramePayload::SetAddress {
-                    address: addr,
-                    id: _,
-                } => core::slice::from_ref(addr),
-                FramePayload::Data(data) => data,
-                _ => &[],
-            };
-            for &byte in payload_data {
-                checksum ^= byte;
-                write_idx = write_stuffed_byte(byte, write_idx, buffer)?;
+        match &self.payload {
+            FramePayload::Join(id) => {
+                for &byte in &id.to_le_bytes() {
+                    checksum ^= byte;
+                    write_idx = write_stuffed_byte(byte, write_idx, buffer)?;
+                }
             }
+            FramePayload::SetAddress { address, id } => {
+                checksum ^= *address;
+                write_idx = write_stuffed_byte(*address, write_idx, buffer)?;
+
+                for &byte in &id.to_le_bytes() {
+                    checksum ^= byte;
+                    write_idx = write_stuffed_byte(byte, write_idx, buffer)?;
+                }
+            }
+            FramePayload::Data(slice) => {
+                for &byte in *slice {
+                    checksum ^= byte;
+                    write_idx = write_stuffed_byte(byte, write_idx, buffer)?;
+                }
+            }
+            FramePayload::Set(slice) => {
+                for &byte in *slice {
+                    checksum ^= byte;
+                    write_idx = write_stuffed_byte(byte, write_idx, buffer)?;
+                }
+            }
+            FramePayload::Ack(address) => {
+                checksum ^= address;
+                write_idx = write_stuffed_byte(*address, write_idx, buffer)?;
+            }
+            _ => {}
         }
 
         // 4. Checksum (C)
@@ -307,7 +322,6 @@ impl<'a> Frame<'a> {
         // 4. ヘッダーのペイロード長と実際のペイロード長が一致するか検証
         let actual_payload_len = data_len - Self::HEADER_LEN;
         if (payload_len as usize) != actual_payload_len {
-
             return Err(DecodeError::InvalidPayloadLength);
         }
 

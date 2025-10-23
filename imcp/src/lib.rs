@@ -120,7 +120,7 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
                                 return Ok(None);
                             }
                             self.address = *address;
-                            return Ok(Some(frame));
+                            self.node_type = NodeType::Client(ClientState::Ready);
                         }
                         ClientState::Ready => {
                             return Err(ImcpError::ProtocolError(ProtocolError::InvalidFrameType(
