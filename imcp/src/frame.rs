@@ -39,11 +39,11 @@ pub enum FrameType {
 pub enum FramePayload<'a> {
     Ping,
     Pong,
-    Ack,
+    Ack(u8),
     Join(u32),
     SetAddress { address: u8, id: u32 },
     Data(&'a [u8]),
-    Set(u8),
+    Set(&'a [u8]),
 }
 
 impl FrameType {
@@ -69,7 +69,7 @@ impl<'a> FramePayload<'a> {
         match self {
             FramePayload::Ping => FrameType::Ping,
             FramePayload::Pong => FrameType::Pong,
-            FramePayload::Ack => FrameType::Ack,
+            FramePayload::Ack(_) => FrameType::Ack,
             FramePayload::Join(_) => FrameType::Join,
             FramePayload::SetAddress { .. } => FrameType::SetAddress,
             FramePayload::Data(_) => FrameType::Data,
@@ -78,10 +78,11 @@ impl<'a> FramePayload<'a> {
     }
     pub fn len(&self) -> u16 {
         match self {
-            FramePayload::Ping | FramePayload::Pong | FramePayload::Ack | FramePayload::Join(_) => {
+            FramePayload::Ping | FramePayload::Pong | FramePayload::Join(_) => {
                 0
-            }
-            FramePayload::Set(_) => 4,
+            },
+             FramePayload::Ack(_) => 1,
+            FramePayload::Set(data) => data.len() as u16 ,
 
             FramePayload::SetAddress { .. } => 5,
 
@@ -120,10 +121,10 @@ impl<'a> FramePayload<'a> {
                 Ok(FramePayload::Pong)
             }
             FrameType::Ack => {
-                if payload_len != 0 {
-                    return Err(DecodeError::InvalidPayloadLength);
+                if payload_len != 1 {
+                    // return Err(DecodeError::InvalidPayloadLength);
                 }
-                Ok(FramePayload::Ack)
+                Ok(FramePayload::Ack(payload_slice[0]))
             }
             FrameType::Join => {
                 if payload_len != 4 {
@@ -134,10 +135,7 @@ impl<'a> FramePayload<'a> {
                 Ok(FramePayload::Join(u32::from_le_bytes(bytes)))
             }
             FrameType::Set => {
-                if payload_len != 1 {
-                    return Err(DecodeError::InvalidPayloadLength);
-                }
-                Ok(FramePayload::Set(payload_slice[0]))
+                Ok(FramePayload::Set(payload_slice))
             }
 
             FrameType::SetAddress => {
@@ -309,6 +307,7 @@ impl<'a> Frame<'a> {
         // 4. ヘッダーのペイロード長と実際のペイロード長が一致するか検証
         let actual_payload_len = data_len - Self::HEADER_LEN;
         if (payload_len as usize) != actual_payload_len {
+
             return Err(DecodeError::InvalidPayloadLength);
         }
 

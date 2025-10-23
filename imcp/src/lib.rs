@@ -100,8 +100,8 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
         }
 
         match frame.payload_mut() {
-            FramePayload::Ack => {
-                if self.pending_frame.is_none() {
+            FramePayload::Ack(data) => {
+                if self.pending_frame.is_none() && data != &0xFF {
                     return Err(ImcpError::ProtocolError(ProtocolError::UnexpectedAck));
                 }
                 self.pending_frame = None;
@@ -135,7 +135,7 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
             }
             _ => {}
         };
-        Ok(None)
+        Ok(Some(frame))
     }
 }
 
@@ -143,6 +143,23 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
 mod tests {
     use super::*;
     use crate::parser::FrameParser;
+
+    #[test]
+    fn test_read_tick_ignore_broadcast_ack() {
+        let mut tx_buffer = [0u8; 128];
+        let mut rx_buffer = [0u8; 128];
+        let mut parser_frame_buffer = [0u8; 128];
+        let mut imcp = Imcp::new_client(&mut tx_buffer, &mut rx_buffer, &mut parser_frame_buffer);
+
+        imcp.address = 0x02;
+
+        let data: &[u8] = &[SOF, 0x02, 0x01, 0x02, 0x01, 0x00,ESC, ESC_XOR^EOF, ESC,ESC_XOR^EOF, EOF];
+
+        let result = imcp.read_tick(data);
+
+        let _frame = result.unwrap().unwrap();
+
+    }
 
     #[test]
     fn test_read_tick_unexpected_ack() {
@@ -153,11 +170,11 @@ mod tests {
 
         imcp.address = 0x02;
 
-        let data: &[u8] = &[SOF, 0x02, 0x01, 0x02, 0x00, 0x00, 0x02, 0x01, EOF];
+        let data: &[u8] = &[SOF, 0x02, 0x01, 0x02, 0x01, 0x00, 0x01, 0x01, EOF];
 
         let result = imcp.read_tick(data);
 
-        assert_ne!(
+        assert_eq!(
             Err(ImcpError::ProtocolError(ProtocolError::UnexpectedAck)),
             result
         )
