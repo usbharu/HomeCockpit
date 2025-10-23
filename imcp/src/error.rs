@@ -22,7 +22,10 @@ pub enum DecodeError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError{
-    InvalidFrameType(FrameType)
+    InvalidFrameType(FrameType),
+    UnexpectedAck,
+    NodeNotReady,
+
 }
 
 #[derive(Debug,Copy,Clone,PartialEq,Eq)]

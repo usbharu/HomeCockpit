@@ -15,6 +15,7 @@ const ESC_XOR: u8 = 0x20;
 
 #[derive(PartialEq)]
 enum ClientState {
+    NotReady,
     Joining(u32),
     Ready,
 }
@@ -56,7 +57,6 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
         tx_buffer: &'tx_buf mut [u8],
         rx_buffer: &'rx_buf mut [u8],
         parser_frame_buffer: &'parser_frame_buffer mut [u8],
-        id: u32,
     ) -> Self {
         let frame_parser = FrameParser::new(rx_buffer, parser_frame_buffer);
         Self {
@@ -64,7 +64,13 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
             address: 0x00,
             pending_frame: None,
             frame_parser,
-            node_type: NodeType::Client(ClientState::Joining(id)),
+            node_type: NodeType::Client(ClientState::NotReady),
+        }
+    }
+
+    pub fn join(&mut self, id: u32) {
+        if let NodeType::Client(_state) = &self.node_type {
+            self.node_type = NodeType::Client(ClientState::Joining(id))
         }
     }
 
@@ -95,6 +101,9 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
 
         match frame.payload_mut() {
             FramePayload::Ack => {
+                if self.pending_frame.is_none() {
+                    return Err(ImcpError::ProtocolError(ProtocolError::UnexpectedAck));
+                }
                 self.pending_frame = None;
             }
             FramePayload::SetAddress { address, id } => {
@@ -118,6 +127,9 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
                                 FrameType::SetAddress,
                             )));
                         }
+                        ClientState::NotReady => {
+                            return Err(ImcpError::ProtocolError(ProtocolError::NodeNotReady));
+                        }
                     }
                 }
             }
@@ -133,16 +145,53 @@ mod tests {
     use crate::parser::FrameParser;
 
     #[test]
-    fn test_read_tick_set_address_client() {
+    fn test_read_tick_unexpected_ack() {
         let mut tx_buffer = [0u8; 128];
         let mut rx_buffer = [0u8; 128];
         let mut parser_frame_buffer = [0u8; 128];
-        let mut imcp =
-            Imcp::new_client(&mut tx_buffer, &mut rx_buffer, &mut parser_frame_buffer, 12);
+        let mut imcp = Imcp::new_client(&mut tx_buffer, &mut rx_buffer, &mut parser_frame_buffer);
+
+        imcp.address = 0x02;
+
+        let data: &[u8] = &[SOF, 0x02, 0x01, 0x02, 0x00, 0x00, 0x02, 0x01, EOF];
+
+        let result = imcp.read_tick(data);
+
+        assert_ne!(
+            Err(ImcpError::ProtocolError(ProtocolError::UnexpectedAck)),
+            result
+        )
+    }
+    #[test]
+    fn test_read_tick_other_set_address_client() {
+        let mut tx_buffer = [0u8; 128];
+        let mut rx_buffer = [0u8; 128];
+        let mut parser_frame_buffer = [0u8; 128];
+        let mut imcp = Imcp::new_client(&mut tx_buffer, &mut rx_buffer, &mut parser_frame_buffer);
 
         let data: &[u8] = &[
             SOF, 0x00, 0x01, 0x04, 0x05, 0x00, 0x02, 12, 0x00, 0x00, 0x00, 0x0e, EOF,
         ];
+
+        imcp.join(11);
+
+        let result = imcp.read_tick(data);
+
+        assert_eq!(Ok(None), result)
+    }
+
+    #[test]
+    fn test_read_tick_set_address_client() {
+        let mut tx_buffer = [0u8; 128];
+        let mut rx_buffer = [0u8; 128];
+        let mut parser_frame_buffer = [0u8; 128];
+        let mut imcp = Imcp::new_client(&mut tx_buffer, &mut rx_buffer, &mut parser_frame_buffer);
+
+        let data: &[u8] = &[
+            SOF, 0x00, 0x01, 0x04, 0x05, 0x00, 0x02, 12, 0x00, 0x00, 0x00, 0x0e, EOF,
+        ];
+
+        imcp.join(12);
 
         let result = imcp.read_tick(data);
 
