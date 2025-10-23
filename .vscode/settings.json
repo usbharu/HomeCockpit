@@ -4,5 +4,9 @@
     "editor.formatOnSaveMode": "modificationsIfAvailable",
     "cSpell.words": [
         "Imcp"
+    ],
+    "rust-analyzer.linkedProjects": [
+        "imcp/Cargo.toml",
+        "manager/src-tauri/Cargo.toml"
     ]
 }
