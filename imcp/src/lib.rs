@@ -14,69 +14,114 @@ pub const ESC: u8 = 0xFD;
 const ESC_XOR: u8 = 0x20;
 
 #[derive(PartialEq)]
-enum ClientState{
+enum ClientState {
     Joining(u32),
-    Ready
+    Ready,
 }
 
 #[derive(PartialEq)]
-enum NodeType{
+enum NodeType {
     Client(ClientState),
-    Master
+    Master,
 }
 
-struct Imcp<'tx_buf,'rx_buf,'frame_buf,'parser_frame_buffer> {
+struct Imcp<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer> {
     tx_buffer: &'tx_buf mut [u8],
     address: u8,
     pending_frame: Option<Frame<'frame_buf>>,
-    frame_parser: FrameParser<'rx_buf,'parser_frame_buffer>,
-    node_type:NodeType
+    frame_parser: FrameParser<'rx_buf, 'parser_frame_buffer>,
+    node_type: NodeType,
 }
 
-impl<'tx_buf,'rx_buf,'frame_buf,'parser_frame_buffer> Imcp<'tx_buf,'rx_buf,'frame_buf,'parser_frame_buffer> {
-    pub fn new_master(tx_buffer: &'tx_buf mut [u8],rx_buffer: &'rx_buf mut [u8],parser_frame_buffer: &'parser_frame_buffer mut [u8]) -> Self{
+impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
+    Imcp<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
+{
+    pub fn new_master(
+        tx_buffer: &'tx_buf mut [u8],
+        rx_buffer: &'rx_buf mut [u8],
+        parser_frame_buffer: &'parser_frame_buffer mut [u8],
+    ) -> Self {
         let frame_parser = FrameParser::new(rx_buffer, parser_frame_buffer);
 
-        Self {  tx_buffer, address: 0x01, pending_frame: None,frame_parser }
+        Self {
+            tx_buffer,
+            address: 0x01,
+            pending_frame: None,
+            frame_parser,
+            node_type: NodeType::Master,
+        }
     }
 
-    pub fn new_client(tx_buffer: &'tx_buf mut [u8],rx_buffer: &'rx_buf mut [u8],parser_frame_buffer: &'parser_frame_buffer mut [u8]) -> Self{
-
+    pub fn new_client(
+        tx_buffer: &'tx_buf mut [u8],
+        rx_buffer: &'rx_buf mut [u8],
+        parser_frame_buffer: &'parser_frame_buffer mut [u8],
+        id: u32,
+    ) -> Self {
         let frame_parser = FrameParser::new(rx_buffer, parser_frame_buffer);
-        Self { tx_buffer, address: 0x00, pending_frame: None,frame_parser }
+        Self {
+            tx_buffer,
+            address: 0x00,
+            pending_frame: None,
+            frame_parser,
+            node_type: NodeType::Client(ClientState::Joining(id)),
+        }
     }
 
-    pub fn read_tick<'b>(&'b mut self,new_data: &[u8]) -> Result<Option<Frame<'b>>,error::DecodeError>
-    where 'parser_frame_buffer: 'b
-     {
-        self.frame_parser.write_data(new_data)?;
-        let frame = match self.frame_parser.next_frame() {
-                    Some(Ok(f)) => f,
-                    Some(Err(e)) => return Err(e),
-                    None => return Ok(None),
-                };
-
-
+    pub fn read_tick<'b>(
+        &'b mut self,
+        new_data: &[u8],
+    ) -> Result<Option<Frame<'b>>, error::ImcpError>
+    where
+        'parser_frame_buffer: 'b,
+    {
+        self.frame_parser
+            .write_data(new_data)
+            .map_err(ImcpError::DecodeError)?;
+        let mut frame = match self.frame_parser.next_frame() {
+            Some(Ok(f)) => f,
+            Some(Err(e)) => return Err(ImcpError::DecodeError(e)),
+            None => return Ok(None),
+        };
 
         match frame.to_address() {
             Address::Unicast(a) => {
                 if a != self.address {
-                    return Ok(None)
+                    return Ok(None);
                 }
-            },
+            }
             Address::Broadcast => (),
         }
 
-        match frame.into_payload() {
-            FramePayload::Ack =>{
+        match frame.payload_mut() {
+            FramePayload::Ack => {
                 self.pending_frame = None;
-            },
+            }
             FramePayload::SetAddress { address, id } => {
-            if self.node_type == NodeType::Master{
-                
+                if self.node_type == NodeType::Master {
+                    return Err(ImcpError::ProtocolError(ProtocolError::InvalidFrameType(
+                        FrameType::SetAddress,
+                    )));
+                }
+
+                if let NodeType::Client(state) = &self.node_type {
+                    match state {
+                        ClientState::Joining(own_id) => {
+                            if id != own_id {
+                                return Ok(None);
+                            }
+                            self.address = *address;
+                            return Ok(Some(frame));
+                        }
+                        ClientState::Ready => {
+                            return Err(ImcpError::ProtocolError(ProtocolError::InvalidFrameType(
+                                FrameType::SetAddress,
+                            )));
+                        }
+                    }
+                }
             }
-            }
-            _ => {},
+            _ => {}
         };
         Ok(None)
     }
@@ -86,6 +131,29 @@ impl<'tx_buf,'rx_buf,'frame_buf,'parser_frame_buffer> Imcp<'tx_buf,'rx_buf,'fram
 mod tests {
     use super::*;
     use crate::parser::FrameParser;
+
+    #[test]
+    fn test_read_tick_set_address_client() {
+        let mut tx_buffer = [0u8; 128];
+        let mut rx_buffer = [0u8; 128];
+        let mut parser_frame_buffer = [0u8; 128];
+        let mut imcp =
+            Imcp::new_client(&mut tx_buffer, &mut rx_buffer, &mut parser_frame_buffer, 12);
+
+        let data: &[u8] = &[
+            SOF, 0x00, 0x01, 0x04, 0x05, 0x00, 0x02, 12, 0x00, 0x00, 0x00, 0x0e, EOF,
+        ];
+
+        let result = imcp.read_tick(data);
+
+        {
+            let frame = result.unwrap().unwrap();
+
+            assert_eq!(frame.payload().frame_type(), FrameType::SetAddress);
+            println!("{:?}", frame);
+        }
+        assert_eq!(imcp.address, 2);
+    }
 
     #[test]
     fn test_encode_buffer_too_small() {

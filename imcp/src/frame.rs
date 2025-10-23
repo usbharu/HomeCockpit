@@ -145,7 +145,7 @@ impl<'a> FramePayload<'a> {
                     return Err(DecodeError::InvalidPayloadLength);
                 }
                 let mut bytes = [0u8; 4];
-                bytes.copy_from_slice(payload_slice);
+                bytes.copy_from_slice(&payload_slice[1..5]);
                 Ok(FramePayload::SetAddress {
                     address: payload_slice[0],
                     id: u32::from_le_bytes(bytes),

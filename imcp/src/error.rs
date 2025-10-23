@@ -1,4 +1,4 @@
-use crate::frame::{FramePayload, FrameType};
+use crate::frame::FrameType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodeError {
@@ -23,4 +23,11 @@ pub enum DecodeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError{
     InvalidFrameType(FrameType)
+}
+
+#[derive(Debug,Copy,Clone,PartialEq,Eq)]
+pub enum ImcpError {
+    ProtocolError(ProtocolError),
+    DecodeError(DecodeError),
+    EncodeError(EncodeError)
 }
