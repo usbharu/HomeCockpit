@@ -21,9 +21,14 @@ enum ClientState {
 }
 
 #[derive(PartialEq)]
+struct MasterState {
+    next_address: u8,
+}
+
+#[derive(PartialEq)]
 enum NodeType {
     Client(ClientState),
-    Master,
+    Master(MasterState),
 }
 
 struct Imcp<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer> {
@@ -49,7 +54,7 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
             address: 0x01,
             pending_frame: None,
             frame_parser,
-            node_type: NodeType::Master,
+            node_type: NodeType::Master(MasterState { next_address: 0x02 }),
         }
     }
 
@@ -68,9 +73,24 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
         }
     }
 
-    pub fn join(&mut self, id: u32) {
+    pub fn send_join(&mut self, id: u32) {
         if let NodeType::Client(_state) = &self.node_type {
-            self.node_type = NodeType::Client(ClientState::Joining(id))
+            self.node_type = NodeType::Client(ClientState::Joining(id));
+            let _frame = Frame::new(Address::Unicast(0x00), 0x01, FramePayload::Join(id));
+        }
+    }
+
+    pub fn send_set_address(&mut self, id: u32) {
+        if let NodeType::Master(state) = &mut self.node_type {
+            let _frame = Frame::new(
+                Address::Unicast(0x00),
+                0x01,
+                FramePayload::SetAddress {
+                    address: state.next_address,
+                    id,
+                },
+            );
+            state.next_address = state.next_address.wrapping_add(1);
         }
     }
 
@@ -107,7 +127,7 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
                 self.pending_frame = None;
             }
             FramePayload::SetAddress { address, id } => {
-                if self.node_type == NodeType::Master {
+                if let NodeType::Master(_) = self.node_type {
                     return Err(ImcpError::ProtocolError(ProtocolError::InvalidFrameType(
                         FrameType::SetAddress,
                     )));
@@ -153,12 +173,23 @@ mod tests {
 
         imcp.address = 0x02;
 
-        let data: &[u8] = &[SOF, 0x02, 0x01, 0x02, 0x01, 0x00,ESC, ESC_XOR^EOF, ESC,ESC_XOR^EOF, EOF];
+        let data: &[u8] = &[
+            SOF,
+            0x02,
+            0x01,
+            0x02,
+            0x01,
+            0x00,
+            ESC,
+            ESC_XOR ^ EOF,
+            ESC,
+            ESC_XOR ^ EOF,
+            EOF,
+        ];
 
         let result = imcp.read_tick(data);
 
         let _frame = result.unwrap().unwrap();
-
     }
 
     #[test]
@@ -190,7 +221,7 @@ mod tests {
             SOF, 0x00, 0x01, 0x04, 0x05, 0x00, 0x02, 12, 0x00, 0x00, 0x00, 0x0e, EOF,
         ];
 
-        imcp.join(11);
+        imcp.send_join(11);
 
         let result = imcp.read_tick(data);
 
@@ -208,7 +239,7 @@ mod tests {
             SOF, 0x00, 0x01, 0x04, 0x05, 0x00, 0x02, 12, 0x00, 0x00, 0x00, 0x0e, EOF,
         ];
 
-        imcp.join(12);
+        imcp.send_join(12);
 
         let result = imcp.read_tick(data);
 
