@@ -1,0 +1,6 @@
+[submodule "firmware/lib/embassy"]
+	path = firmware/lib/embassy
+	url = https://github.com/embassy-rs/embassy.git
+[submodule "firmware/lib/trouble"]
+	path = firmware/lib/trouble
+	url = https://github.com/embassy-rs/trouble.git

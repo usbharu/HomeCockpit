@@ -1,0 +1,65 @@
+[package]
+name = "upper_panel_ddi"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+embassy-sync = { version = "0.7.2", path = "../lib/embassy/embassy-sync", features = [
+    "defmt",
+] }
+embassy-executor = { version = "0.9.1", path = "../lib/embassy/embassy-executor", default-features = false, features = [
+    "arch-cortex-m",
+    "executor-thread",
+    "defmt",
+    "executor-interrupt",
+] }
+embassy-time = { version = "0.5.0", path = "../lib/embassy/embassy-time", default-features = false, features = [
+    "defmt",
+    "defmt-timestamp-uptime",
+] }
+embassy-rp = { version = "0.8.0", path = "../lib/embassy/embassy-rp", features = [
+    "defmt",
+    "unstable-pac",
+    "time-driver",
+    "critical-section-impl",
+    "rp2040",
+] }
+embassy-usb = { version = "0.5.1", path = "../lib/embassy/embassy-usb", features = [
+    "defmt",
+] }
+embassy-usb-logger = { version = "0.5.1", path = "../lib/embassy/embassy-usb-logger" }
+embassy-futures = { version = "0.1.1", path = "../lib/embassy/embassy-futures" }
+
+trouble-host = { path = "../lib/trouble/host", features = ["scan"] }
+bt-hci = { version = "0.2", default-features = false, features = ["defmt"] }
+
+futures = { version = "0.3", default-features = false, features = [
+    "async-await",
+] }
+cyw43 = { version = "0.5.0", path = "../lib/embassy/cyw43", features = [
+    "defmt",
+    "firmware-logs",
+    "bluetooth",
+] }
+cyw43-pio = { version = "0.8.0", path = "../lib/embassy/cyw43-pio", features = [
+    "defmt",
+] }
+
+defmt = "0.3"
+defmt-rtt = "0.4.2"
+
+cortex-m = { version = "0.7.7" }
+cortex-m-rt = "0.7.5"
+panic-probe = { version = "0.3", features = ["print-defmt"] }
+static_cell = "2"
+portable-atomic = { version = "1.11", features = ["critical-section"] }
+log = "0.4"
+
+
+[patch.crates-io]
+embassy-time-driver = { path = "../lib/embassy/embassy-time-driver" }
+
+[[bin]]
+name = "upper_panel_ddi"
+test = false
+bench = false

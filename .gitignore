@@ -1,4 +1,4 @@
-imcp/target
+**/target
 */production/**
 */fp-info-cache
 */fp-lib-table
