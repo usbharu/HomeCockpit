@@ -5,9 +5,9 @@ edition = "2024"
 description = "Inter-microcontroller communication protocol"
 
 [dependencies]
-embassy-sync = { version = "0.7.2"}
 heapless = {version = "0.9.1"}
-[dev-dependencies]
-embassy-sync = { version = "0.7.2",features = ["std"]}
-embassy-executor ={ version = "0.9.1",features = ["arch-std"] }
-critical-section = { version = "1.1", features = ["std"]}
+
+[workspace]
+members = [
+    "imcp-embassy"
+]
