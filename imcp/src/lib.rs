@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 
+use embassy_sync::blocking_mutex::raw::RawMutex;
+
 use crate::error::*;
 use crate::frame::*;
 use crate::parser::FrameParser;
@@ -31,45 +33,51 @@ enum NodeType {
     Master(MasterState),
 }
 
-struct Imcp<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer> {
-    tx_buffer: &'tx_buf mut [u8],
+pub struct Imcp<'rx_buf, 'parser_frame_buffer,'ch,M,const N: usize>
+where
+    M: RawMutex,
+{
+    tx_receiver: embassy_sync::channel::Receiver<'ch,M,Frame,N>,
     address: u8,
-    pending_frame: Option<Frame<'frame_buf>>,
+    pending_frame: Option<Frame>,
     frame_parser: FrameParser<'rx_buf, 'parser_frame_buffer>,
     node_type: NodeType,
 }
 
-impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
-    Imcp<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
+impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer,'ch,M,const N: usize>
+   Imcp<'rx_buf, 'parser_frame_buffer,'ch,M,N>
+   where
+    M: RawMutex,
 {
     pub fn new_master(
-        tx_buffer: &'tx_buf mut [u8],
+        tx_receiver:  embassy_sync::channel::Receiver<'ch,M,Frame,N>,
         rx_buffer: &'rx_buf mut [u8],
         parser_frame_buffer: &'parser_frame_buffer mut [u8],
     ) -> Self {
         let frame_parser = FrameParser::new(rx_buffer, parser_frame_buffer);
 
         Self {
-            tx_buffer,
+            
             address: 0x01,
             pending_frame: None,
             frame_parser,
             node_type: NodeType::Master(MasterState { next_address: 0x02 }),
+            tx_receiver,
         }
     }
 
     pub fn new_client(
-        tx_buffer: &'tx_buf mut [u8],
+        tx_receiver:  embassy_sync::channel::Receiver<'ch,M,Frame,N>,
         rx_buffer: &'rx_buf mut [u8],
         parser_frame_buffer: &'parser_frame_buffer mut [u8],
     ) -> Self {
         let frame_parser = FrameParser::new(rx_buffer, parser_frame_buffer);
         Self {
-            tx_buffer,
             address: 0x00,
             pending_frame: None,
             frame_parser,
             node_type: NodeType::Client(ClientState::NotReady),
+            tx_receiver,
         }
     }
 
@@ -97,7 +105,7 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
     pub fn read_tick<'b>(
         &'b mut self,
         new_data: &[u8],
-    ) -> Result<Option<Frame<'b>>, error::ImcpError>
+    ) -> Result<Option<Frame>, error::ImcpError>
     where
         'parser_frame_buffer: 'b,
     {
@@ -161,15 +169,20 @@ impl<'tx_buf, 'rx_buf, 'frame_buf, 'parser_frame_buffer>
 
 #[cfg(test)]
 mod tests {
+    use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+    use heapless::Vec;
+
     use super::*;
     use crate::parser::FrameParser;
 
     #[test]
     fn test_read_tick_ignore_broadcast_ack() {
-        let mut tx_buffer = [0u8; 128];
+
+        static FRAME_CHANNEL: Channel<CriticalSectionRawMutex, Frame, 5> = Channel::new();
+        
         let mut rx_buffer = [0u8; 128];
         let mut parser_frame_buffer = [0u8; 128];
-        let mut imcp = Imcp::new_client(&mut tx_buffer, &mut rx_buffer, &mut parser_frame_buffer);
+        let mut imcp = Imcp::new_client(FRAME_CHANNEL.receiver(), &mut rx_buffer, &mut parser_frame_buffer);
 
         imcp.address = 0x02;
 
@@ -194,10 +207,11 @@ mod tests {
 
     #[test]
     fn test_read_tick_unexpected_ack() {
-        let mut tx_buffer = [0u8; 128];
+       static FRAME_CHANNEL: Channel<CriticalSectionRawMutex, Frame, 5> = Channel::new();
+        
         let mut rx_buffer = [0u8; 128];
         let mut parser_frame_buffer = [0u8; 128];
-        let mut imcp = Imcp::new_client(&mut tx_buffer, &mut rx_buffer, &mut parser_frame_buffer);
+        let mut imcp = Imcp::new_client(FRAME_CHANNEL.receiver(), &mut rx_buffer, &mut parser_frame_buffer);
 
         imcp.address = 0x02;
 
@@ -212,10 +226,11 @@ mod tests {
     }
     #[test]
     fn test_read_tick_other_set_address_client() {
-        let mut tx_buffer = [0u8; 128];
+        static FRAME_CHANNEL: Channel<CriticalSectionRawMutex, Frame, 5> = Channel::new();
+        
         let mut rx_buffer = [0u8; 128];
         let mut parser_frame_buffer = [0u8; 128];
-        let mut imcp = Imcp::new_client(&mut tx_buffer, &mut rx_buffer, &mut parser_frame_buffer);
+        let mut imcp = Imcp::new_client(FRAME_CHANNEL.receiver(), &mut rx_buffer, &mut parser_frame_buffer);
 
         let data: &[u8] = &[
             SOF, 0x00, 0x01, 0x04, 0x05, 0x00, 0x02, 12, 0x00, 0x00, 0x00, 0x0e, EOF,
@@ -230,10 +245,11 @@ mod tests {
 
     #[test]
     fn test_read_tick_set_address_client() {
-        let mut tx_buffer = [0u8; 128];
+        static FRAME_CHANNEL: Channel<CriticalSectionRawMutex, Frame, 5> = Channel::new();
+        
         let mut rx_buffer = [0u8; 128];
         let mut parser_frame_buffer = [0u8; 128];
-        let mut imcp = Imcp::new_client(&mut tx_buffer, &mut rx_buffer, &mut parser_frame_buffer);
+        let mut imcp = Imcp::new_client(FRAME_CHANNEL.receiver(), &mut rx_buffer, &mut parser_frame_buffer);
 
         let data: &[u8] = &[
             SOF, 0x00, 0x01, 0x04, 0x05, 0x00, 0x02, 12, 0x00, 0x00, 0x00, 0x0e, EOF,
@@ -255,7 +271,7 @@ mod tests {
     #[test]
     fn test_encode_buffer_too_small() {
         let data: &[u8] = &[0x01, 0x02];
-        let payload = FramePayload::Data(data);
+        let payload = FramePayload::Data(Vec::from_slice(data).unwrap());
         let frame = Frame::new(Address::Unicast(0x01), 0x02, payload);
 
         let mut buffer = [0u8; 7];
@@ -285,7 +301,7 @@ mod tests {
     fn test_encode_with_stuffing() {
         // わざとエスケープ対象 (0xFE) をペイロードに入れる
         let data: &[u8] = &[0x01, SOF, 0x03]; // 01 FE 03
-        let frame = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Data(data));
+        let frame = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Data(Vec::from_slice(data).unwrap()));
 
         // H = 01 02 05 03 00 (Type=Data, Len=3)
         // P = 01 FE 03
@@ -365,7 +381,7 @@ mod tests {
         let frame = frame_res.unwrap();
 
         let expected_data: &[u8] = &[0x01, SOF, 0x03];
-        assert_eq!(frame.payload(), &FramePayload::Data(expected_data));
+        assert_eq!(frame.payload(), &FramePayload::Data(Vec::from_slice(expected_data).unwrap()));
         assert!(parser.next_frame().is_none());
     }
 
@@ -414,7 +430,7 @@ mod tests {
         // 今度は完成する
         let frame = parser.next_frame().unwrap().unwrap();
         let expected_data: &[u8] = &[0x01, SOF, 0x03];
-        assert_eq!(frame.payload(), &FramePayload::Data(expected_data));
+        assert_eq!(frame.payload(), &FramePayload::Data(Vec::from_slice(expected_data).unwrap()));
         assert!(parser.next_frame().is_none());
     }
 
@@ -424,7 +440,7 @@ mod tests {
 
         // エスケープ対象バイトをすべて含むペイロードを作成
         let test_data: &[u8] = &[0x01, SOF, 0x03, EOF, 0x05, ESC, 0x07];
-        let original_frame = Frame::new(Address::Broadcast, 0x42, FramePayload::Data(test_data));
+        let original_frame = Frame::new(Address::Broadcast, 0x42, FramePayload::Data(Vec::from_slice(test_data).unwrap()));
 
         // エンコード用バッファ (最大長を確保)
         let mut encode_buffer = [0u8; 128];

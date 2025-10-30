@@ -1,4 +1,8 @@
+use heapless::Vec;
+
 use crate::*;
+
+const MAX_PAYLOAD_SIZE: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Address {
@@ -36,14 +40,14 @@ pub enum FrameType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FramePayload<'a> {
+pub enum FramePayload {
     Ping,
     Pong,
     Ack(u8),
     Join(u32),
     SetAddress { address: u8, id: u32 },
-    Data(&'a [u8]),
-    Set(&'a [u8]),
+    Data(Vec<u8,MAX_PAYLOAD_SIZE>) ,
+    Set(Vec<u8,MAX_PAYLOAD_SIZE>),
 }
 
 impl FrameType {
@@ -64,7 +68,7 @@ impl FrameType {
     }
 }
 
-impl<'a> FramePayload<'a> {
+impl<'a> FramePayload {
     pub fn frame_type(&self) -> FrameType {
         match self {
             FramePayload::Ping => FrameType::Ping,
@@ -133,7 +137,7 @@ impl<'a> FramePayload<'a> {
                 bytes.copy_from_slice(payload_slice);
                 Ok(FramePayload::Join(u32::from_le_bytes(bytes)))
             }
-            FrameType::Set => Ok(FramePayload::Set(payload_slice)),
+            FrameType::Set => Ok(FramePayload::Set(Vec::from_slice(payload_slice).unwrap())),
 
             FrameType::SetAddress => {
                 if payload_len != 5 {
@@ -150,21 +154,21 @@ impl<'a> FramePayload<'a> {
             // --- 任意のペイロード長を許可するタイプ ---
             FrameType::Data => {
                 // 任意の長さ (0 も含む) を許可
-                Ok(FramePayload::Data(payload_slice))
+                Ok(FramePayload::Data(Vec::from_slice(payload_slice).unwrap()))
             }
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Frame<'a> {
+pub struct Frame {
     to_address: Address,
     from_address: u8,
-    payload: FramePayload<'a>,
+    payload: FramePayload,
 }
 
-impl<'a> Frame<'a> {
-    pub fn new(to: Address, from: u8, payload: FramePayload<'a>) -> Self {
+impl<'a> Frame {
+    pub fn new(to: Address, from: u8, payload: FramePayload) -> Self {
         Self {
             to_address: to,
             from_address: from,
@@ -180,15 +184,15 @@ impl<'a> Frame<'a> {
         self.from_address
     }
 
-    pub fn payload(&self) -> &FramePayload<'a> {
+    pub fn payload(&self) -> &FramePayload {
         &self.payload
     }
 
-    pub fn payload_mut(&mut self) -> &mut FramePayload<'a> {
+    pub fn payload_mut(&mut self) -> &mut FramePayload {
         &mut self.payload
     }
 
-    pub fn into_payload(self) -> FramePayload<'a> {
+    pub fn into_payload(self) -> FramePayload {
         self.payload
     }
 
@@ -265,13 +269,13 @@ impl<'a> Frame<'a> {
                 }
             }
             FramePayload::Data(slice) => {
-                for &byte in *slice {
+                for &byte in slice {
                     checksum ^= byte;
                     write_idx = write_stuffed_byte(byte, write_idx, buffer)?;
                 }
             }
             FramePayload::Set(slice) => {
-                for &byte in *slice {
+                for &byte in slice {
                     checksum ^= byte;
                     write_idx = write_stuffed_byte(byte, write_idx, buffer)?;
                 }
@@ -294,7 +298,7 @@ impl<'a> Frame<'a> {
 
     /// バイトスライス（スタッフィング解除済み）からフレームをデコードする
     /// (戻り値から消費バイト数 usize を削除)
-    pub fn decode(buffer: &'a [u8]) -> Result<Frame<'a>, DecodeError> {
+    pub fn decode(buffer: &'a [u8]) -> Result<Frame, DecodeError> {
         // 1. 最小長チェック (Header + Checksum)
         let min_len = Self::HEADER_LEN + Self::CHECKSUM_LEN;
         if buffer.len() < min_len {

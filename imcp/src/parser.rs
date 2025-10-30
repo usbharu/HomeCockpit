@@ -45,7 +45,7 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
 
     /// rx_buffer を解析し、次の有効なフレームを返す
     /// (ライフタイム 'b は 'frame_buf に依存)
-    pub fn next_frame<'b>(&'b mut self) -> Option<Result<Frame<'b>, DecodeError>>
+    pub fn next_frame<'b>(&'b mut self) -> Option<Result<Frame, DecodeError>>
     where
         'frame_buf: 'b,
     {
