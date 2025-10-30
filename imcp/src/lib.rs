@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 
+use heapless::Vec;
+
 use crate::channel::Receiver;
 use crate::channel::Sender;
 use crate::error::*;
@@ -89,22 +91,30 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         }
     }
 
-    pub async fn send_set_address(&mut self, id: u32) {
-        if let NodeType::Master(state) = &mut self.node_type {
-            let frame = Frame::new(
-                Address::Unicast(0x00),
-                0x01,
-                FramePayload::SetAddress {
-                    address: state.next_address,
-                    id,
-                },
-            );
-            self.tx_sender.send(frame).await;
-            state.next_address = state.next_address.wrapping_add(1);
+    pub async fn write_tick(&mut self) -> Result<Vec<u8,MAX_PAYLOAD_SIZE>,EncodeError> {
+        let next_frame = if let Some(frame) = self.pending_frame.take() {
+            frame
+        } else {
+            self.tx_receiver.receive().await
+        };
+        let mut buf: Vec<u8, MAX_PAYLOAD_SIZE> = Vec::new();
+        next_frame.encode(&mut buf)?;
+        match next_frame.payload() {
+            FramePayload::SetAddress { address: _, id: _ } => {
+                self.pending_frame = Some(next_frame);
+            }
+            FramePayload::Set(_vec_inner) => {
+                self.pending_frame = Some(next_frame);
+            }
+            _ => {}
         }
+        Ok(buf)
     }
 
-    pub fn read_tick<'b>(&'b mut self, new_data: &[u8]) -> Result<Option<Frame>, error::ImcpError>
+    pub async fn read_tick<'b>(
+        &'b mut self,
+        new_data: &[u8],
+    ) -> Result<Option<Frame>, error::ImcpError>
     where
         'parser_frame_buffer: 'b,
     {
@@ -160,6 +170,42 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
                     }
                 }
             }
+            FramePayload::Join(id) => {
+                if let NodeType::Master(state) = &mut self.node_type {
+                    let frame = Frame::new(
+                        Address::Unicast(0x00),
+                        0x01,
+                        FramePayload::SetAddress {
+                            address: state.next_address,
+                            id: *id,
+                        },
+                    );
+                    self.tx_sender.send(frame).await;
+                    state.next_address = state.next_address.wrapping_add(1);
+                } else {
+                    return Err(ImcpError::ProtocolError(ProtocolError::InvalidFrameType(
+                        FrameType::Join,
+                    )));
+                }
+            }
+            FramePayload::Set(_data) => {
+                self.tx_sender
+                    .send(Frame::new(
+                        Address::Unicast(frame.from_address()),
+                        self.address,
+                        FramePayload::Ack(frame.to_address().as_byte()),
+                    ))
+                    .await;
+            }
+            FramePayload::Ping => {
+                self.tx_sender
+                    .send(Frame::new(
+                        Address::Unicast(frame.from_address()),
+                        self.address,
+                        FramePayload::Pong,
+                    ))
+                    .await;
+            }
             _ => {}
         };
         Ok(Some(frame))
@@ -168,7 +214,7 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
 
 #[cfg(test)]
 mod tests {
-    
+
     use heapless::Vec;
 
     use super::*;

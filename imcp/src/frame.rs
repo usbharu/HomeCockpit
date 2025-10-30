@@ -2,7 +2,7 @@ use heapless::Vec;
 
 use crate::*;
 
-const MAX_PAYLOAD_SIZE: usize = 128;
+pub const MAX_PAYLOAD_SIZE: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Address {
