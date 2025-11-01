@@ -11,3 +11,6 @@ heapless = {version = "0.9.1"}
 members = [
     "imcp-embassy"
 ]
+
+[features]
+test-utils = []

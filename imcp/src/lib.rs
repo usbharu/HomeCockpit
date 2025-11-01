@@ -16,22 +16,22 @@ pub const SOF: u8 = 0xFE;
 pub const EOF: u8 = 0xFF;
 pub const ESC: u8 = 0xFD;
 
-const ESC_XOR: u8 = 0x20;
+pub const ESC_XOR: u8 = 0x20;
 
 #[derive(PartialEq)]
-enum ClientState {
+pub enum ClientState {
     NotReady,
     Joining(u32),
     Ready,
 }
 
 #[derive(PartialEq)]
-struct MasterState {
+pub struct MasterState {
     next_address: u8,
 }
 
 #[derive(PartialEq)]
-enum NodeType {
+pub enum NodeType {
     Client(ClientState),
     Master(MasterState),
 }
@@ -91,14 +91,14 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         }
     }
 
-    pub async fn write_tick(&mut self) -> Result<Vec<u8,MAX_PAYLOAD_SIZE>,EncodeError> {
+    pub async fn write_tick(&mut self) -> Result<Vec<u8, MAX_PAYLOAD_SIZE>, EncodeError> {
         let next_frame = if let Some(frame) = self.pending_frame.take() {
             frame
         } else {
             self.tx_receiver.receive().await
         };
-        let mut buf: Vec<u8, MAX_PAYLOAD_SIZE> = Vec::new();
-        next_frame.encode(&mut buf)?;
+        let mut buf: Vec<u8, MAX_PAYLOAD_SIZE> = Vec::from([0;MAX_PAYLOAD_SIZE]);
+        let size = next_frame.encode(&mut buf)?;
         match next_frame.payload() {
             FramePayload::SetAddress { address: _, id: _ } => {
                 self.pending_frame = Some(next_frame);
@@ -108,6 +108,7 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
             }
             _ => {}
         }
+        buf.truncate(size);
         Ok(buf)
     }
 
@@ -209,6 +210,38 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
             _ => {}
         };
         Ok(Some(frame))
+    }
+}
+
+
+#[cfg(feature = "test-utils")]
+pub mod imcp_test {
+    use crate::{Imcp, NodeType, channel::*, frame::Frame, parser::FrameParser};
+
+    impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
+        Imcp<'rx_buf, 'parser_frame_buffer, R, S>
+    {
+        pub fn new(
+            tx_receiver: R,
+            tx_sender: S,
+            address: u8,
+            pending_frame: Option<Frame>,
+            frame_parser: FrameParser<'rx_buf,'parser_frame_buffer>,
+            node_type: NodeType,
+        ) -> Imcp<'rx_buf, 'parser_frame_buffer, R, S> {
+            Imcp{
+                tx_receiver,
+                tx_sender,
+                address,
+                pending_frame,
+                frame_parser,
+                node_type,
+            }
+        }
+
+        pub fn address(&self) -> u8 {
+            self.address
+        }
     }
 }
 
