@@ -6,11 +6,29 @@ description = "Inter-microcontroller communication protocol"
 
 [dependencies]
 heapless = {version = "0.9.1"}
+defmt = { version = "1.0.1", optional = true }
+
+
+[features]
+default = []
+defmt = ["dep:defmt"]
+test-utils = []
 
 [workspace]
 members = [
     "imcp-embassy"
 ]
 
-[features]
-test-utils = []
+
+[lints.clippy]
+unwrap_used = "forbid"
+expect_used = "warn"
+panic = "forbid"
+
+large_stack_arrays = "forbid"
+
+float_arithmetic = "forbid"
+float_cmp = "forbid"
+cast_possible_truncation = "forbid"
+cast_sign_loss = "forbid"
+cast_possible_wrap = "warn"

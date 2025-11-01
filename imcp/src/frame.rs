@@ -1,6 +1,10 @@
+
 use heapless::Vec;
 
 use crate::*;
+#[cfg(feature = "defmt")]
+use defmt::Format;
+
 
 pub const MAX_PAYLOAD_SIZE: usize = 128;
 
@@ -8,6 +12,17 @@ pub const MAX_PAYLOAD_SIZE: usize = 128;
 pub enum Address {
     Unicast(u8),
     Broadcast,
+}
+
+#[cfg(feature = "defmt")]
+impl Format for Address {
+    fn format(&self, fmt: defmt::Formatter) {
+        
+        match self {
+             Address::Unicast(address) => defmt::write!(fmt,"{}",address),
+             Address::Broadcast => defmt::write!(fmt,"Broadcast(0x00)")
+        }
+    }
 }
 
 impl Address {
@@ -46,8 +61,24 @@ pub enum FramePayload {
     Ack(u8),
     Join(u32),
     SetAddress { address: u8, id: u32 },
-    Data(Vec<u8,MAX_PAYLOAD_SIZE>) ,
-    Set(Vec<u8,MAX_PAYLOAD_SIZE>),
+    Data(Vec<u8, MAX_PAYLOAD_SIZE>),
+    Set(Vec<u8, MAX_PAYLOAD_SIZE>),
+}
+
+#[cfg(feature = "defmt")]
+impl Format for FramePayload {
+    fn format(&self, fmt: defmt::Formatter) {
+        match self {
+            FramePayload::Ping | FramePayload::Pong => defmt::write!(fmt, "{0}", self),
+            FramePayload::Ack(a) => defmt::write!(fmt, "Ack address: {0}", a),
+            FramePayload::Join(a) => defmt::write!(fmt, "Join id: {0}", a),
+            FramePayload::SetAddress { address, id } => {
+                defmt::write!(fmt, "SetAddress address: {0} id: {1} ", address, id)
+            }
+            FramePayload::Data(vec_inner) => defmt::write!(fmt,"Data vec: {0}",vec_inner.as_slice()),
+            FramePayload::Set(vec_inner) => defmt::write!(fmt,"Set vec: {0}",vec_inner.as_slice()),
+        }
+    }
 }
 
 impl FrameType {
@@ -165,6 +196,13 @@ pub struct Frame {
     to_address: Address,
     from_address: u8,
     payload: FramePayload,
+}
+
+#[cfg(feature = "defmt")]
+impl Format for Frame {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt,"Frame to: {} from: {} payload: {}",self.to_address,self.from_address,self.payload)
+    }
 }
 
 impl<'a> Frame {

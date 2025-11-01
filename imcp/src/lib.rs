@@ -1,4 +1,4 @@
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(all(not(test),not(feature="test-utils")), no_std)]
 
 use heapless::Vec;
 
@@ -17,6 +17,47 @@ pub const EOF: u8 = 0xFF;
 pub const ESC: u8 = 0xFD;
 
 pub const ESC_XOR: u8 = 0x20;
+
+#[cfg(feature = "defmt")]
+use defmt::{info, trace}; // Format トレイトもインポート
+
+// "defmt" フィーチャーが無効な場合 (ログを出力しない)
+#[cfg(not(feature = "defmt"))]
+mod defmt_dummy {
+    // defmt::Format を実装できるようにダミーのトレイトを定義
+    pub trait Format {}
+    impl<T> Format for &T {}
+    impl<T> Format for &mut T {}
+    // 他、必要な型に対してもダミー実装を追加
+    impl Format for u32 {}
+    impl Format for bool {}
+    // ...
+
+    // ログマクロを「何もしない」ものとして定義
+    #[macro_export]
+    macro_rules! info {
+        ($($arg:tt)*) => {
+            #[cfg(feature="test-utils")]
+            println!("[INFO] {}", format_args!($($arg)*));
+        };
+    }
+    #[macro_export]
+    macro_rules! warn {
+        ($($arg:tt)*) => {
+            #[cfg(feature="test-utils")]
+            println!("[WARN] {}", format_args!($($arg)*));
+        };
+    }
+    #[macro_export]
+    macro_rules! trace {
+        ($($arg:tt)*) => {
+            #[cfg(feature="test-utils")]
+             println!("[TRACE] {}", format_args!($($arg)*));
+        };
+    }
+
+}
+
 
 #[derive(PartialEq)]
 pub enum ClientState {
@@ -55,7 +96,7 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         parser_frame_buffer: &'parser_frame_buffer mut [u8],
     ) -> Self {
         let frame_parser = FrameParser::new(rx_buffer, parser_frame_buffer);
-
+        info!("new master registered");
         Self {
             address: 0x01,
             pending_frame: None,
@@ -73,6 +114,7 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         parser_frame_buffer: &'parser_frame_buffer mut [u8],
     ) -> Self {
         let frame_parser = FrameParser::new(rx_buffer, parser_frame_buffer);
+        info!("new client registered");
         Self {
             address: 0x00,
             pending_frame: None,
@@ -93,17 +135,21 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
 
     pub async fn write_tick(&mut self) -> Result<Vec<u8, MAX_PAYLOAD_SIZE>, EncodeError> {
         let next_frame = if let Some(frame) = self.pending_frame.take() {
+            trace!("rewrite pending_frame: {:?}",frame);
             frame
         } else {
+            trace!("wait for write new frame");
             self.tx_receiver.receive().await
         };
-        let mut buf: Vec<u8, MAX_PAYLOAD_SIZE> = Vec::from([0;MAX_PAYLOAD_SIZE]);
+        let mut buf: Vec<u8, MAX_PAYLOAD_SIZE> = Vec::from([0; MAX_PAYLOAD_SIZE]);
         let size = next_frame.encode(&mut buf)?;
         match next_frame.payload() {
             FramePayload::SetAddress { address: _, id: _ } => {
+                trace!("set pending_frame to {:?}",next_frame);
                 self.pending_frame = Some(next_frame);
             }
             FramePayload::Set(_vec_inner) => {
+                trace!("set pending_frame to {:?}",next_frame);
                 self.pending_frame = Some(next_frame);
             }
             _ => {}
@@ -213,7 +259,6 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
     }
 }
 
-
 #[cfg(feature = "test-utils")]
 pub mod imcp_test {
     use crate::{Imcp, NodeType, channel::*, frame::Frame, parser::FrameParser};
@@ -226,10 +271,10 @@ pub mod imcp_test {
             tx_sender: S,
             address: u8,
             pending_frame: Option<Frame>,
-            frame_parser: FrameParser<'rx_buf,'parser_frame_buffer>,
+            frame_parser: FrameParser<'rx_buf, 'parser_frame_buffer>,
             node_type: NodeType,
         ) -> Imcp<'rx_buf, 'parser_frame_buffer, R, S> {
-            Imcp{
+            Imcp {
                 tx_receiver,
                 tx_sender,
                 address,
