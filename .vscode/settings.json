@@ -3,12 +3,14 @@
     "editor.formatOnPaste": true,
     "editor.formatOnSaveMode": "modificationsIfAvailable",
     "cSpell.words": [
-        "Imcp"
+        "heapless",
+        "Imcp",
+        "microcontroller"
     ],
     "rust-analyzer.linkedProjects": [
         "imcp/Cargo.toml",
         "manager/src-tauri/Cargo.toml",
-        "firmware/upper_panel_ddi/Cargo.toml",
+        "firmware/upper_panel_ddi/Cargo.toml"
     ],
     "git.ignoreLimitWarning": true,
 }
