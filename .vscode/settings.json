@@ -3,9 +3,12 @@
     "editor.formatOnPaste": true,
     "editor.formatOnSaveMode": "modificationsIfAvailable",
     "cSpell.words": [
+        "clippy",
+        "defmt",
         "heapless",
         "Imcp",
-        "microcontroller"
+        "microcontroller",
+        "repr"
     ],
     "rust-analyzer.linkedProjects": [
         "imcp/Cargo.toml",
