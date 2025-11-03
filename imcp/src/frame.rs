@@ -1,10 +1,8 @@
-
 use heapless::Vec;
 
 use crate::*;
 #[cfg(feature = "defmt")]
 use defmt::Format;
-
 
 pub const MAX_PAYLOAD_SIZE: usize = 128;
 
@@ -17,10 +15,9 @@ pub enum Address {
 #[cfg(feature = "defmt")]
 impl Format for Address {
     fn format(&self, fmt: defmt::Formatter) {
-        
         match self {
-             Address::Unicast(address) => defmt::write!(fmt,"{}",address),
-             Address::Broadcast => defmt::write!(fmt,"Broadcast(0x00)")
+            Address::Unicast(address) => defmt::write!(fmt, "{}", address),
+            Address::Broadcast => defmt::write!(fmt, "Broadcast(0x00)"),
         }
     }
 }
@@ -75,8 +72,12 @@ impl Format for FramePayload {
             FramePayload::SetAddress { address, id } => {
                 defmt::write!(fmt, "SetAddress address: {0} id: {1} ", address, id)
             }
-            FramePayload::Data(vec_inner) => defmt::write!(fmt,"Data vec: {0}",vec_inner.as_slice()),
-            FramePayload::Set(vec_inner) => defmt::write!(fmt,"Set vec: {0}",vec_inner.as_slice()),
+            FramePayload::Data(vec_inner) => {
+                defmt::write!(fmt, "Data vec: {0}", vec_inner.as_slice())
+            }
+            FramePayload::Set(vec_inner) => {
+                defmt::write!(fmt, "Set vec: {0}", vec_inner.as_slice())
+            }
         }
     }
 }
@@ -112,15 +113,22 @@ impl<'a> FramePayload {
         }
     }
     pub fn len(&self) -> u16 {
+        #[allow(clippy::expect_used)]
         match self {
             FramePayload::Ping | FramePayload::Pong => 0,
             FramePayload::Join(_) => 4,
             FramePayload::Ack(_) => 1,
-            FramePayload::Set(data) => data.len() as u16,
+            FramePayload::Set(data) => data
+                .len()
+                .try_into()
+                .expect("FramePayload::Set data.len() is too large."),
 
             FramePayload::SetAddress { .. } => 5,
 
-            FramePayload::Data(data) => data.len() as u16,
+            FramePayload::Data(data) => data
+                .len()
+                .try_into()
+                .expect("FramePayload::Set data.len() is too large"),
         }
     }
 
@@ -168,7 +176,9 @@ impl<'a> FramePayload {
                 bytes.copy_from_slice(payload_slice);
                 Ok(FramePayload::Join(u32::from_le_bytes(bytes)))
             }
-            FrameType::Set => Ok(FramePayload::Set(Vec::from_slice(payload_slice).unwrap())),
+            FrameType::Set => heapless::Vec::from_slice(payload_slice)
+                .map_err(|_| DecodeError::FrameBufferTooSmall)
+                .map(FramePayload::Set),
 
             FrameType::SetAddress => {
                 if payload_len != 5 {
@@ -183,10 +193,9 @@ impl<'a> FramePayload {
             }
 
             // --- 任意のペイロード長を許可するタイプ ---
-            FrameType::Data => {
-                // 任意の長さ (0 も含む) を許可
-                Ok(FramePayload::Data(Vec::from_slice(payload_slice).unwrap()))
-            }
+            FrameType::Data => heapless::Vec::from_slice(payload_slice)
+                .map_err(|_| DecodeError::FrameBufferTooSmall)
+                .map(FramePayload::Data),
         }
     }
 }
@@ -201,7 +210,13 @@ pub struct Frame {
 #[cfg(feature = "defmt")]
 impl Format for Frame {
     fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt,"Frame to: {} from: {} payload: {}",self.to_address,self.from_address,self.payload)
+        defmt::write!(
+            fmt,
+            "Frame to: {} from: {} payload: {}",
+            self.to_address,
+            self.from_address,
+            self.payload
+        )
     }
 }
 

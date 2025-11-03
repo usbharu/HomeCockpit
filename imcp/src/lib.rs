@@ -1,4 +1,4 @@
-#![cfg_attr(all(not(test),not(feature="test-utils")), no_std)]
+#![cfg_attr(all(not(test), not(feature = "test-utils")), no_std)]
 
 use heapless::Vec;
 
@@ -25,6 +25,7 @@ use defmt::{info, trace}; // Format トレイトもインポート
 #[cfg(not(feature = "defmt"))]
 mod defmt_dummy {
     // defmt::Format を実装できるようにダミーのトレイトを定義
+    #[allow(dead_code)]
     pub trait Format {}
     impl<T> Format for &T {}
     impl<T> Format for &mut T {}
@@ -55,9 +56,7 @@ mod defmt_dummy {
              println!("[TRACE] {}", format_args!($($arg)*));
         };
     }
-
 }
-
 
 #[derive(PartialEq)]
 pub enum ClientState {
@@ -135,7 +134,7 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
 
     pub async fn write_tick(&mut self) -> Result<Vec<u8, MAX_PAYLOAD_SIZE>, EncodeError> {
         let next_frame = if let Some(frame) = self.pending_frame.take() {
-            trace!("rewrite pending_frame: {:?}",frame);
+            trace!("rewrite pending_frame: {:?}", frame);
             frame
         } else {
             trace!("wait for write new frame");
@@ -145,11 +144,11 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         let size = next_frame.encode(&mut buf)?;
         match next_frame.payload() {
             FramePayload::SetAddress { address: _, id: _ } => {
-                trace!("set pending_frame to {:?}",next_frame);
+                trace!("set pending_frame to {:?}", next_frame);
                 self.pending_frame = Some(next_frame);
             }
             FramePayload::Set(_vec_inner) => {
-                trace!("set pending_frame to {:?}",next_frame);
+                trace!("set pending_frame to {:?}", next_frame);
                 self.pending_frame = Some(next_frame);
             }
             _ => {}
@@ -291,6 +290,7 @@ pub mod imcp_test {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used,clippy::expect_used)]
 mod tests {
 
     use heapless::Vec;
