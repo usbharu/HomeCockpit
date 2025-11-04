@@ -63,3 +63,16 @@ embassy-time-driver = { path = "../lib/embassy/embassy-time-driver" }
 name = "upper_panel_ddi"
 test = false
 bench = false
+
+
+[lints.clippy]
+unwrap_used = "forbid"
+panic = "forbid"
+
+large_stack_arrays = "forbid"
+
+float_arithmetic = "forbid"
+float_cmp = "forbid"
+cast_possible_truncation = "forbid"
+cast_sign_loss = "forbid"
+cast_possible_wrap = "warn"

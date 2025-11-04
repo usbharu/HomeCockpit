@@ -17,7 +17,7 @@ test-utils = []
 [workspace]
 members = [
     "imcp-embassy"
-]
+, "imcp-embedded"]
 
 
 [lints.clippy]

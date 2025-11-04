@@ -29,7 +29,7 @@ async fn main(spawner: Spawner) {
         Input::new(p.PIN_10, embassy_rp::gpio::Pull::Down),
     ];
 
-    spawner.spawn(scan_matrix(inputs, outputs).unwrap());
+    spawner.spawn(scan_matrix(inputs, outputs).expect("failed spawn scan_matrix"));
 
     let mut old: [[Level; 5]; 4] = [[Level::Low; 5]; 4];
 
