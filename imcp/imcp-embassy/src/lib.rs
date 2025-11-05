@@ -17,6 +17,13 @@ pub struct EmbassyReceiver<'ch, M: RawMutex, const N: usize> {
     receiver: embassy_sync::channel::Receiver<'ch, M, Frame, N>,
 }
 
+pub fn new<'ch, M: RawMutex, const N: usize>(
+    sender: embassy_sync::channel::Sender<'ch, M, Frame, N>,
+    receiver: embassy_sync::channel::Receiver<'ch, M, Frame, N>,
+) -> (EmbassySender<'ch, M, N>, EmbassyReceiver<'ch, M, N>) {
+    (EmbassySender { sender }, EmbassyReceiver { receiver })
+}
+
 impl<'ch, M: RawMutex, const N: usize> Sender for EmbassySender<'ch, M, N> {
     async fn send(&mut self, frame: Frame) {
         self.sender.send(frame).await;
@@ -204,9 +211,7 @@ mod tests {
 
             imcp.send_join(12).await;
 
-
-
-             {
+            {
                 imcp.write_tick().await.unwrap();
             }
 

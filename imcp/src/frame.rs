@@ -41,6 +41,7 @@ impl Address {
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum FrameType {
     Ping = 0,
     Pong = 1,

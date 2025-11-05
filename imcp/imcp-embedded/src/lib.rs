@@ -118,7 +118,12 @@ where
 
 /// UARTエラーとPinエラーを統合するカスタムエラー型
 #[derive(Debug)]
-pub enum ImcpEmbeddedError<UE, PE> {
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum ImcpEmbeddedError<UE, PE>
+where
+    UE: core::fmt::Debug, // エラーはデバッグ表示できる必要がある
+    PE: core::fmt::Debug,
+{
     /// 内部のUART (Read/Write) からのエラー
     Uart(UE),
     /// DE/REピン (OutputPin) からのエラー

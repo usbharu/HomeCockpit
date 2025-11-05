@@ -1,6 +1,7 @@
 use crate::frame::FrameType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum EncodeError {
     /// 書き込み先バッファのサイズが不足している
     BufferTooSmall,
@@ -8,6 +9,7 @@ pub enum EncodeError {
 
 /// デコード時に発生する可能性のあるエラー
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum DecodeError {
     InvalidChecksum,
     /// 未定義のフレームタイプID
@@ -21,6 +23,7 @@ pub enum DecodeError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ProtocolError{
     InvalidFrameType(FrameType),
     UnexpectedAck,
@@ -29,6 +32,7 @@ pub enum ProtocolError{
 }
 
 #[derive(Debug,Copy,Clone,PartialEq,Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ImcpError {
     ProtocolError(ProtocolError),
     DecodeError(DecodeError),

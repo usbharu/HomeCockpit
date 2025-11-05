@@ -11,7 +11,7 @@ defmt = { version = "1.0.1", optional = true }
 
 [features]
 default = []
-defmt = ["dep:defmt"]
+defmt = ["dep:defmt","heapless/defmt"]
 test-utils = []
 
 [workspace]
