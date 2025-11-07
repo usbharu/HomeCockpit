@@ -4,17 +4,21 @@ use std::{
     time::Duration,
 };
 
-use clap::{Args, Parser, Subcommand, ValueEnum, command};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum, command};
 use imcp::{
     frame::{Address, Frame, FramePayload},
     parser::FrameParser,
 };
+use log::LevelFilter;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "imcp-cli", long_about = None)]
 struct GlobalOptions {
     #[command(subcommand)]
     command: Commands,
+
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
 }
 
 #[derive(Subcommand, Debug)]
@@ -84,6 +88,16 @@ enum PacketType {
 fn main() {
     let cli = GlobalOptions::parse();
 
+    let log_level = match cli.verbose {
+        0 => LevelFilter::Warn,  // デフォルト
+        1 => LevelFilter::Info,  // -v
+        2 => LevelFilter::Debug, // -vv
+        _ => LevelFilter::Trace, // -vvv 以上
+    };
+
+    // ロガーを初期化（env_loggerの例）
+    env_logger::Builder::new().filter_level(log_level).init();
+
     match cli.command {
         Commands::Pack(pack_args) => {
             pack(pack_args);
@@ -104,10 +118,11 @@ fn handle_line(bytes: &[u8], frame_parser: &mut FrameParser) {
     while let Some(frame) = frame_parser.next_frame() {
         match frame {
             Ok(a) => {
+                
                 println!("{:?}", a);
             }
             Err(e) => {
-                eprintln!("{:?}", e)
+                log::warn!("{:?}", e)
             }
         }
     }
@@ -118,7 +133,7 @@ fn watch(watch_args: WatchArgs) {
         let ports = serialport::available_ports().expect("No ports found.");
 
         for ele in ports {
-            println!("{} {:?}", ele.port_name, ele.port_type);
+            log::info!("{} {:?}", ele.port_name, ele.port_type);
         }
     }
 
@@ -134,7 +149,7 @@ fn watch(watch_args: WatchArgs) {
 
     match port {
         Ok(mut port) => {
-            eprintln!(
+            log::info!(
                 "Watching port {} at {} baud...",
                 watch_args.port, watch_args.baud
             );
@@ -143,7 +158,7 @@ fn watch(watch_args: WatchArgs) {
             loop {
                 match port.read(serial_buf.as_mut_slice()) {
                     Ok(bytes_read) => {
-                        println!("read: {} {:?}", bytes_read, &serial_buf[..bytes_read]);
+                        log::debug!("read uart: {} {:?}", bytes_read, &serial_buf[..bytes_read]);
                         if bytes_read > 0 {
                             // 読み取った生のバイナリ (&[u8]) をそのまま渡す
                             handle_line(&serial_buf[..bytes_read], &mut frame_parser);
@@ -154,14 +169,14 @@ fn watch(watch_args: WatchArgs) {
                         continue;
                     }
                     Err(e) => {
-                        eprintln!("Port reading error: {}", e);
+                        log::warn!("Port reading error: {}", e);
                         break;
                     }
                 }
             }
         }
         Err(e) => {
-            eprintln!("Error opening port {}: {}", watch_args.port, e);
+            log::error!("Error opening port {}: {}", watch_args.port, e);
             process::exit(1);
         }
     }
@@ -177,7 +192,7 @@ fn unpack(unpack_args: UnpackArgs) {
     } else {
         // 標準入力 (Hex文字列の行)
         if io::stdin().is_terminal() {
-            eprintln!("--data or pipeline is required.");
+            log::error!("--data or pipeline is required.");
             process::exit(1);
         }
         reader = Box::new(io::stdin().lock().lines());
@@ -205,13 +220,13 @@ fn unpack(unpack_args: UnpackArgs) {
                     }
                     Err(e) => {
                         // Hex のデコード自体に失敗
-                        eprintln!("Hex decode error: {} (Received Line: {})", e, trimmed_line);
+                        log::warn!("Hex decode error: {} (Received Line: {})", e, trimmed_line);
                     }
                 }
             }
             Err(e) => {
                 // 標準入力の読み取りエラー
-                eprintln!("Stdin read error: {}", e);
+                log::warn!("Stdin read error: {}", e);
             }
         }
     }
