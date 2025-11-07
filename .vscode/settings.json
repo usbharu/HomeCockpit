@@ -8,12 +8,14 @@
         "heapless",
         "Imcp",
         "microcontroller",
-        "repr"
+        "repr",
+        "uart"
     ],
     "rust-analyzer.linkedProjects": [
         "imcp/Cargo.toml",
         "manager/src-tauri/Cargo.toml",
-        "firmware/upper_panel_ddi/Cargo.toml"
+        "firmware/upper_panel_ddi/Cargo.toml",
+        "utils/Cargo.toml"
     ],
     "git.ignoreLimitWarning": true,
 }
