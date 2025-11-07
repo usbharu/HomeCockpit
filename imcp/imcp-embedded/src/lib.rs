@@ -93,14 +93,16 @@ where
         }
 
         // 3. 内部の UART を使ってデータを送信
-        let written_len = self
+        self
             .uart
-            .write(buf)
+            .write_all(buf)
             .await
             .map_err(ImcpEmbeddedError::Uart)?;
 
+        let buf_len = buf.len();
+
         // 4. 送信完了待機 (Timer)
-        let wait_us = self.byte_time_micro * written_len as u64;
+        let wait_us = self.byte_time_micro * buf_len as u64;
         Timer::after(Duration::from_micros(wait_us + self.tx_finish_margin_micro)).await;
 
         // 5. 受信モードに戻す (DE=LOW)
@@ -108,7 +110,7 @@ where
             pin.set_low().map_err(ImcpEmbeddedError::Pin)?;
         }
 
-        Ok(written_len)
+        Ok(buf_len)
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
