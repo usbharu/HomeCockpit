@@ -160,7 +160,11 @@ async fn imcp_task(
                     warn!("uart write error {:?}", e);
                     0
                 });
-                info!("write {:?}", v)
+                info!("write {:?}", v);
+                imcp_embedded
+                    .flush()
+                    .await
+                    .unwrap_or_else(|e| warn!("uart flush error {:?}", e));
             }
             embassy_futures::select::Either::Second(Err(e)) => warn!("write error {:?}", e),
         }
