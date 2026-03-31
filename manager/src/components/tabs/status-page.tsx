@@ -2,43 +2,60 @@
 
 import React from 'react';
 
-export const StatusPage = () => {
-    const logs = [
-        { time: '14:32:10', level: 'INFO', message: 'アプリを起動しました。バージョン 1.0.0' },
-        { time: '14:32:12', level: 'SUCCESS', message: 'デバイス "My Custom Controller" が接続されました。' },
-        { time: '14:32:15', level: 'SUCCESS', message: 'ソフトウェア "OBS Studio" に接続しました。' },
-        { time: '14:33:01', level: 'WARN', message: 'デバイス "Foot Pedal" のバッテリー残量が低下しています (20%)。' },
-        { time: '14:33:20', level: 'INFO', message: '入力: Button A - Press' },
-        { time: '14:33:25', level: 'ERROR', message: 'ソフトウェア "Streamlabs Desktop" への接続に失敗しました。' },
-    ];
+import type { DcsBiosStatus, ManagerLogEntry } from "@/lib/manager-types";
 
-    const getLevelColor = (level) => {
+type StatusPageProps = {
+    logs: ManagerLogEntry[];
+    status: DcsBiosStatus;
+};
+
+export const StatusPage = ({ logs, status }: StatusPageProps) => {
+    const getLevelColor = (level: string) => {
         switch(level) {
-            case 'SUCCESS': return 'text-green-600';
-            case 'WARN': return 'text-yellow-600';
-            case 'ERROR': return 'text-red-600';
-            default: return 'text-gray-600';
+            case 'SUCCESS': return 'text-emerald-300';
+            case 'WARN': return 'text-amber-300';
+            case 'ERROR': return 'text-rose-300';
+            default: return 'text-slate-300';
         }
     };
 
     return (
-        <div className="p-8 space-y-6">
-            <h2 className="text-2xl font-semibold text-gray-800">ステータス</h2>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <div className="bg-white p-4 rounded-lg shadow-sm border"><p className="text-sm text-gray-500">CPU使用率</p><p className="text-2xl font-bold">12%</p></div>
-                <div className="bg-white p-4 rounded-lg shadow-sm border"><p className="text-sm text-gray-500">メモリ使用量</p><p className="text-2xl font-bold">128 MB</p></div>
-                <div className="bg-white p-4 rounded-lg shadow-sm border"><p className="text-sm text-gray-500">データ送信レート</p><p className="text-2xl font-bold">256 Kbps</p></div>
-            </div>
-            <div>
-                <h3 className="text-lg font-semibold text-gray-700 mb-2">リアルタイムログ</h3>
-                <div className="bg-gray-900 text-white font-mono text-sm p-4 rounded-lg h-80 overflow-y-auto">
-                    {logs.slice().reverse().map((log, index) => (
-                        <p key={index}>
-                            <span className="text-gray-500">{log.time}</span>
-                            <span className={`font-bold ml-2 ${getLevelColor(log.level)}`}> [{log.level}] </span>
-                            <span>{log.message}</span>
+        <div className="h-full overflow-y-auto p-8">
+            <div className="mx-auto flex max-w-7xl flex-col gap-6">
+                <div className="grid gap-4 lg:grid-cols-3">
+                    <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+                        <p className="text-sm text-gray-500">状態</p>
+                        <p className="mt-3 text-3xl font-semibold capitalize text-gray-900">{status.connectionState}</p>
+                    </div>
+                    <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+                        <p className="text-sm text-gray-500">受信パケット</p>
+                        <p className="mt-3 text-3xl font-semibold text-gray-900">{status.totalPackets}</p>
+                    </div>
+                    <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+                        <p className="text-sm text-gray-500">最終更新</p>
+                        <p className="mt-3 text-3xl font-semibold text-gray-900">
+                            {status.lastPacketAt ? new Date(status.lastPacketAt).toLocaleTimeString() : "なし"}
                         </p>
-                    ))}
+                    </div>
+                </div>
+                <div>
+                    <h3 className="mb-3 text-lg font-semibold text-gray-800">リアルタイムログ</h3>
+                    <div className="h-[32rem] overflow-y-auto rounded-lg border border-gray-200 bg-gray-900 p-4 font-mono text-sm text-white shadow-sm">
+                        {logs.length === 0 ? (
+                            <p className="text-gray-500">ログはまだありません。</p>
+                        ) : (
+                            logs.map((log) => (
+                                <p key={log.id} className="border-b border-white/5 py-2 last:border-b-0">
+                                    <span className="text-gray-500">
+                                        {new Date(log.at).toLocaleTimeString()}
+                                    </span>
+                                    <span className={`ml-2 font-bold ${getLevelColor(log.level)}`}>[{log.level}]</span>
+                                    <span className="ml-2 text-gray-400">{log.source}</span>
+                                    <span className="ml-2">{log.message}</span>
+                                </p>
+                            ))
+                        )}
+                    </div>
                 </div>
             </div>
         </div>
@@ -46,4 +63,3 @@ export const StatusPage = () => {
 };
 
 export default StatusPage;
-
