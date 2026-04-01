@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    io::Write,
+    io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -11,6 +11,11 @@ use std::{
 };
 
 use chrono::Utc;
+use hcp::{decode_set_packet, AppPacketKind, DeviceKind};
+use imcp::{
+    frame::{Address, Frame, FramePayload, MAX_ENCODED_FRAME_SIZE},
+    parser::FrameParser,
+};
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -20,6 +25,10 @@ const DEFAULT_EXPORT_PORT: u16 = 5010;
 const DEFAULT_COMMAND_HOST: &str = "127.0.0.1";
 const DEFAULT_COMMAND_PORT: u16 = 7778;
 const MAX_LOG_ENTRIES: usize = 250;
+const IMCP_PROBE_BAUD_RATE: u32 = 115200;
+const IMCP_MASTER_ADDRESS: u8 = 0x01;
+const IMCP_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
+const IMCP_READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -97,6 +106,14 @@ struct ImcpDeviceSummary {
     display_name: String,
     firmware_version: Option<String>,
     state: String,
+    protocol: String,
+    assigned_address: Option<u8>,
+    device_kind: Option<String>,
+    protocol_version: Option<u8>,
+    device_id: Option<String>,
+    displays: Option<u8>,
+    controls: Option<u16>,
+    features: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,7 +222,11 @@ impl RuntimeState {
         let _ = app.emit("manager-log", entry);
     }
 
-    fn set_devices(&self, app: &AppHandle, devices: Vec<ImcpDeviceSummary>) -> Vec<ImcpDeviceSummary> {
+    fn set_devices(
+        &self,
+        app: &AppHandle,
+        devices: Vec<ImcpDeviceSummary>,
+    ) -> Vec<ImcpDeviceSummary> {
         *self.devices.lock().unwrap() = devices.clone();
         let _ = app.emit("imcp-devices-changed", devices.clone());
         devices
@@ -289,7 +310,12 @@ impl RuntimeState {
         let app_for_thread = app.clone();
 
         let join = thread::spawn(move || {
-            state.push_log(&app_for_thread, "INFO", "dcsbios", "Socket bound successfully.");
+            state.push_log(
+                &app_for_thread,
+                "INFO",
+                "dcsbios",
+                "Socket bound successfully.",
+            );
             state.update_status(&app_for_thread, |status| {
                 status.connection_state = "listening".to_string();
                 status.error = None;
@@ -459,42 +485,36 @@ fn send_dcsbios_command(
 }
 
 #[tauri::command]
-fn list_imcp_devices(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<ImcpDeviceSummary>, String> {
+fn list_imcp_devices(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<ImcpDeviceSummary>, String> {
     let ports = serialport::available_ports().map_err(|error| error.to_string())?;
+    let scanned_ports = ports.len();
     let devices = ports
         .into_iter()
-        .map(|port| {
-            let (display_name, state_label) = match port.port_type {
-                serialport::SerialPortType::UsbPort(info) => {
-                    let display = match (info.manufacturer, info.product) {
-                        (Some(manufacturer), Some(product)) => {
-                            format!("{manufacturer} {product}")
-                        }
-                        (Some(manufacturer), None) => manufacturer,
-                        (None, Some(product)) => product,
-                        (None, None) => "USB Serial Device".to_string(),
-                    };
-                    (display, "available".to_string())
-                }
-                serialport::SerialPortType::BluetoothPort => {
-                    ("Bluetooth Serial Device".to_string(), "available".to_string())
-                }
-                serialport::SerialPortType::PciPort => {
-                    ("PCI Serial Device".to_string(), "available".to_string())
-                }
-                serialport::SerialPortType::Unknown => {
-                    ("Unknown Serial Device".to_string(), "unknown".to_string())
-                }
+        .filter_map(|port| {
+            let probed = match probe_imcp_device(&port.port_name) {
+                Ok(Some(probed)) => probed,
+                Ok(None) | Err(_) => return None,
             };
 
-            ImcpDeviceSummary {
+            Some(ImcpDeviceSummary {
                 id: port.port_name.clone(),
                 transport: "serial".to_string(),
                 port_name: port.port_name,
-                display_name,
-                firmware_version: None,
-                state: state_label,
-            }
+                display_name: probed.display_name,
+                firmware_version: Some(probed.firmware_version),
+                state: "connected".to_string(),
+                protocol: "imcp+hcp".to_string(),
+                assigned_address: Some(probed.assigned_address),
+                device_kind: Some(probed.device_kind),
+                protocol_version: Some(probed.protocol_version),
+                device_id: Some(probed.device_id),
+                displays: Some(probed.displays),
+                controls: Some(probed.controls),
+                features: Some(probed.features),
+            })
         })
         .collect::<Vec<_>>();
 
@@ -504,9 +524,169 @@ fn list_imcp_devices(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<I
         &app,
         "INFO",
         "imcp",
-        format!("Refreshed serial device list. {count} port(s) available."),
+        format!(
+            "Refreshed IMCP/HCP devices. {count} device(s) responded across {scanned_ports} scanned port(s)."
+        ),
     );
     Ok(devices)
+}
+
+#[derive(Debug, Clone)]
+struct ProbedImcpDevice {
+    display_name: String,
+    firmware_version: String,
+    assigned_address: u8,
+    device_kind: String,
+    protocol_version: u8,
+    device_id: String,
+    displays: u8,
+    controls: u16,
+    features: String,
+}
+
+fn probe_imcp_device(port_name: &str) -> Result<Option<ProbedImcpDevice>, String> {
+    let mut port = serialport::new(port_name, IMCP_PROBE_BAUD_RATE)
+        .timeout(IMCP_READ_TIMEOUT)
+        .open()
+        .map_err(|error| format!("Failed to open {port_name}: {error}"))?;
+
+    let _ = port.clear(serialport::ClearBuffer::All);
+
+    let started_at = Instant::now();
+    let mut serial_buffer = [0u8; 64];
+    let mut rx_buffer = [0u8; 256];
+    let mut frame_buffer = [0u8; 256];
+    let mut parser = FrameParser::new(&mut rx_buffer, &mut frame_buffer);
+    let mut assigned_address: Option<u8> = None;
+
+    while started_at.elapsed() < IMCP_PROBE_TIMEOUT {
+        match port.read(&mut serial_buffer) {
+            Ok(bytes_read) if bytes_read > 0 => {
+                parser
+                    .write_data(&serial_buffer[..bytes_read])
+                    .map_err(|error| {
+                        format!("Failed to parse IMCP frame on {port_name}: {error:?}")
+                    })?;
+
+                while let Some(frame) = parser.next_frame() {
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        Err(_) => continue,
+                    };
+
+                    match frame.payload() {
+                        FramePayload::Join(id) => {
+                            let next_address = assigned_address.unwrap_or(0x02);
+                            assigned_address = Some(next_address);
+                            write_frame(
+                                &mut *port,
+                                &Frame::new(
+                                    Address::Unicast(0x00),
+                                    IMCP_MASTER_ADDRESS,
+                                    FramePayload::SetAddress {
+                                        address: next_address,
+                                        id: *id,
+                                    },
+                                ),
+                            )?;
+                        }
+                        FramePayload::Set(payload) => {
+                            if let Some(probed) =
+                                decode_device_hello(payload.as_slice(), assigned_address)?
+                            {
+                                write_frame(
+                                    &mut *port,
+                                    &Frame::new(
+                                        Address::Unicast(frame.from_address()),
+                                        IMCP_MASTER_ADDRESS,
+                                        FramePayload::Ack(frame.to_address().as_byte()),
+                                    ),
+                                )?;
+                                return Ok(Some(probed));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => return Err(format!("Failed to read {port_name}: {error}")),
+        }
+    }
+
+    Ok(None)
+}
+
+fn write_frame(port: &mut dyn serialport::SerialPort, frame: &Frame) -> Result<(), String> {
+    let mut encoded = [0u8; MAX_ENCODED_FRAME_SIZE];
+    let encoded_len = frame
+        .encode(&mut encoded)
+        .map_err(|error| format!("Failed to encode IMCP frame: {error:?}"))?;
+    port.write_all(&encoded[..encoded_len])
+        .map_err(|error| format!("Failed to write IMCP frame: {error}"))?;
+    port.flush()
+        .map_err(|error| format!("Failed to flush IMCP frame: {error}"))?;
+    Ok(())
+}
+
+fn decode_device_hello(
+    payload: &[u8],
+    assigned_address: Option<u8>,
+) -> Result<Option<ProbedImcpDevice>, String> {
+    let kind = match decode_set_packet(payload) {
+        Ok(kind) => kind,
+        Err(_) => return Ok(None),
+    };
+
+    let AppPacketKind::DeviceHello(hello) = kind else {
+        return Ok(None);
+    };
+
+    let assigned_address = assigned_address
+        .ok_or_else(|| "Received DeviceHello before IMCP address assignment.".to_string())?;
+
+    Ok(Some(ProbedImcpDevice {
+        display_name: format_device_kind(hello.device_kind).to_string(),
+        firmware_version: format!(
+            "{}.{}.{}",
+            hello.firmware_version.major,
+            hello.firmware_version.minor,
+            hello.firmware_version.patch
+        ),
+        assigned_address,
+        device_kind: format_device_kind(hello.device_kind).to_string(),
+        protocol_version: hello.protocol_version,
+        device_id: format!("{:016X}", hello.device_id),
+        displays: hello.capabilities.displays,
+        controls: hello.capabilities.controls,
+        features: format_capability_flags(hello.capabilities.features),
+    }))
+}
+
+fn format_device_kind(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::UpperPanelDdi => "Upper Panel DDI",
+        DeviceKind::ButtonPanel => "Button Panel",
+        DeviceKind::Unknown(_) => "Unknown Device",
+    }
+}
+
+fn format_capability_flags(features: u32) -> String {
+    if features == 0 {
+        return "none".to_string();
+    }
+
+    let mut flags = Vec::new();
+    if features & (1 << 0) != 0 {
+        flags.push("control-events");
+    }
+
+    if flags.is_empty() {
+        format!("0x{features:08X}")
+    } else {
+        flags.join(", ")
+    }
 }
 
 fn bind_export_socket(config: &DcsBiosConnectionConfig) -> Result<UdpSocket, String> {
@@ -543,16 +723,16 @@ fn send_command_to_dcsbios(config: &DcsBiosConnectionConfig, payload: &str) -> R
     let target = format!("{}:{}", config.command_host, config.command_port);
     match config.command_transport {
         CommandTransport::Udp => {
-            let socket =
-                UdpSocket::bind("0.0.0.0:0").map_err(|error| format!("UDP bind failed: {error}"))?;
+            let socket = UdpSocket::bind("0.0.0.0:0")
+                .map_err(|error| format!("UDP bind failed: {error}"))?;
             socket
                 .send_to(payload.as_bytes(), &target)
                 .map_err(|error| format!("UDP send failed: {error}"))?;
             Ok(())
         }
         CommandTransport::Tcp => {
-            let mut stream =
-                TcpStream::connect(&target).map_err(|error| format!("TCP connect failed: {error}"))?;
+            let mut stream = TcpStream::connect(&target)
+                .map_err(|error| format!("TCP connect failed: {error}"))?;
             stream
                 .write_all(payload.as_bytes())
                 .map_err(|error| format!("TCP send failed: {error}"))?;
@@ -569,11 +749,7 @@ fn normalize_command_request(request: DcsBiosCommandRequest) -> Result<String, S
     let payload = if !raw.is_empty() {
         raw
     } else {
-        let control_id = request
-            .control_id
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let control_id = request.control_id.unwrap_or_default().trim().to_string();
         let argument = request.argument.unwrap_or_default().trim().to_string();
 
         if control_id.is_empty() || argument.is_empty() {

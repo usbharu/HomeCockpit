@@ -34,6 +34,14 @@ export type ImcpDeviceSummary = {
   displayName: string;
   firmwareVersion: string | null;
   state: string;
+  protocol: string;
+  assignedAddress: number | null;
+  deviceKind: string | null;
+  protocolVersion: number | null;
+  deviceId: string | null;
+  displays: number | null;
+  controls: number | null;
+  features: string | null;
 };
 
 export type AppSnapshot = {
