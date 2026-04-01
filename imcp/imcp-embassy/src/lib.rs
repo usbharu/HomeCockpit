@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 
+use core::convert::Infallible;
+
 use embassy_sync::{
     blocking_mutex::raw::RawMutex,
     channel::{TryReceiveError, TrySendError},
@@ -25,14 +27,19 @@ pub fn new<'ch, M: RawMutex, const N: usize>(
 }
 
 impl<'ch, M: RawMutex, const N: usize> Sender for EmbassySender<'ch, M, N> {
-    async fn send(&mut self, frame: Frame) {
+    type Error = Infallible;
+
+    async fn send(&mut self, frame: Frame) -> Result<(), Self::Error> {
         self.sender.send(frame).await;
+        Ok(())
     }
 }
 
 impl<'ch, M: RawMutex, const N: usize> Receiver for EmbassyReceiver<'ch, M, N> {
-    async fn receive(&mut self) -> Frame {
-        self.receiver.receive().await
+    type Error = Infallible;
+
+    async fn receive(&mut self) -> Result<Frame, Self::Error> {
+        Ok(self.receiver.receive().await)
     }
 }
 
@@ -83,7 +90,7 @@ mod tests {
                 0x02,
                 None,
                 frame_parser,
-                NodeType::Client(ClientState::Ready),
+                NodeType::Client(ClientState::Ready(0x22)),
             );
 
             let data: &[u8] = &[
@@ -129,7 +136,7 @@ mod tests {
                 0x02,
                 None,
                 frame_parser,
-                NodeType::Client(ClientState::Ready),
+                NodeType::Client(ClientState::Ready(0x22)),
             );
             let data: &[u8] = &[SOF, 0x02, 0x01, 0x02, 0x01, 0x00, 0x01, 0x01, EOF];
 
@@ -171,7 +178,7 @@ mod tests {
                 SOF, 0x00, 0x01, 0x04, 0x05, 0x00, 0x02, 12, 0x00, 0x00, 0x00, 0x0e, EOF,
             ];
 
-            imcp.send_join(11).await;
+            imcp.send_join(11).await.unwrap();
 
             let result = imcp.read_tick(data);
 
@@ -209,7 +216,7 @@ mod tests {
                 SOF, 0x00, 0x01, 0x04, 0x05, 0x00, 0x02, 12, 0x00, 0x00, 0x00, 0x0e, EOF,
             ];
 
-            imcp.send_join(12).await;
+            imcp.send_join(12).await.unwrap();
 
             {
                 imcp.write_tick().await.unwrap();

@@ -55,7 +55,7 @@ static_cell = "2"
 portable-atomic = { version = "1.11", features = ["critical-section"] }
 log = "0.4"
 
-imcp-embedded = { path = "../../imcp/imcp-embedded",features = ["defmt"] }
+imcp-embedded = { path = "../../imcp/imcp-embedded",features = ["defmt", "embassy-rp"] }
 imcp-embassy = { path = "../../imcp/imcp-embassy" }
 imcp = { path = "../../imcp",features = ["defmt"] }
 
@@ -66,6 +66,7 @@ heapless = {version = "0.9.1",features = ["defmt"]}
 [patch.crates-io]
 embassy-time-driver = { path = "../lib/embassy/embassy-time-driver" }
 embassy-sync = { path = "../lib/embassy/embassy-sync" }
+embassy-rp = { path = "../lib/embassy/embassy-rp" }
 
 [[bin]]
 name = "upper_panel_ddi"

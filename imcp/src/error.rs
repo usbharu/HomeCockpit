@@ -1,3 +1,5 @@
+use core::convert::Infallible;
+
 use crate::frame::FrameType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,13 +30,15 @@ pub enum ProtocolError{
     InvalidFrameType(FrameType),
     UnexpectedAck,
     NodeNotReady,
-
+    AddressPoolExhausted,
 }
 
-#[derive(Debug,Copy,Clone,PartialEq,Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum ImcpError {
+pub enum ImcpError<RE = Infallible, SE = Infallible> {
     ProtocolError(ProtocolError),
     DecodeError(DecodeError),
-    EncodeError(EncodeError)
+    EncodeError(EncodeError),
+    ReceiveError(RE),
+    SendError(SE),
 }

@@ -7,6 +7,7 @@ use embassy_futures::select::select;
 use embassy_rp::{
     bind_interrupts,
     gpio::{Input, Level, Output},
+    pac::UART0,
     peripherals::UART0,
     uart::{BufferedUart, Config},
 };
@@ -16,7 +17,7 @@ use embedded_io_async::{Read, Write};
 use heapless::Vec;
 use imcp::{Imcp, frame::Frame};
 use imcp_embassy::{EmbassyReceiver, EmbassySender, new};
-use imcp_embedded::ImcpEmbedded;
+use imcp_embedded::{ImcpEmbedded, RpUartCarrierSense};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -72,8 +73,12 @@ async fn main(spawner: Spawner) {
         config,
     );
 
-    let imcp_embedded =
-        ImcpEmbedded::new(uart, None::<Output>, BAUD_RATE).expect("failed init imcp embedded");
+    let imcp_embedded = ImcpEmbedded::new(
+        RpUartCarrierSense::new(uart, UART0),
+        None::<Output>,
+        BAUD_RATE,
+    )
+    .expect("failed init imcp embedded");
 
     let rx_buffer = RX_BUFFER_CELL.init([0; 128]);
     let parser_frame_buffer = PARSER_FRAME_BUFFER_CELL.init([0; 64]);
@@ -141,14 +146,14 @@ async fn imcp_task(
         EmbassyReceiver<'static, CriticalSectionRawMutex, 5>,
         EmbassySender<'static, CriticalSectionRawMutex, 5>,
     >,
-    mut imcp_embedded: ImcpEmbedded<BufferedUart, Output<'static>>,
+    mut imcp_embedded: ImcpEmbedded<RpUartCarrierSense, Output<'static>>,
 ) {
     let mut read_buffer = [0u8; 16];
 
     loop {
         match select(imcp_embedded.read(&mut read_buffer), imcp.write_tick()).await {
             embassy_futures::select::Either::First(Ok(s)) => {
-                imcp.read_tick(&read_buffer).await.unwrap_or_else(|e| {
+                imcp.read_tick(&read_buffer[..s]).await.unwrap_or_else(|e| {
                     warn!("failed parse frame{:?}", e);
                     None
                 });

@@ -5,6 +5,7 @@ use crate::*;
 use defmt::Format;
 
 pub const MAX_PAYLOAD_SIZE: usize = 128;
+pub const MAX_ENCODED_FRAME_SIZE: usize = 1 + ((5 + MAX_PAYLOAD_SIZE + 1) * 2) + 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Address {

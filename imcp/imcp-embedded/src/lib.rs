@@ -2,14 +2,30 @@
 
 use core::{error::Error, fmt::Display};
 
-use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
 use embedded_hal::digital::OutputPin;
 use embedded_io_async::{ErrorType, Read, Write};
 
+#[cfg(feature = "embassy-rp")]
+use embassy_rp::{
+    pac::uart::Uart as RpUartRegs,
+    uart::BufferedUart,
+};
+#[cfg(feature = "embassy-rp")]
+use embedded_io_async::{BufRead, ReadReady};
+
+#[allow(async_fn_in_trait)]
+pub trait CarrierSenseUart: Read + Write {
+    async fn wait_bus_idle(
+        &mut self,
+        idle_for_us: u64,
+        sample_interval_us: u64,
+    ) -> Result<(), Self::Error>;
+}
+
 pub struct ImcpEmbedded<U, D>
 where
-    U: Write + Read,
+    U: CarrierSenseUart,
     D: OutputPin,
 {
     uart: U,
@@ -20,7 +36,7 @@ where
 
 impl<U, D> ImcpEmbedded<U, D>
 where
-    U: Write + Read,
+    U: CarrierSenseUart,
     D: OutputPin,
 {
     pub fn new(uart: U, mut de_pin: Option<D>, baud_rate: u32) -> Result<Self, D::Error> {
@@ -44,17 +60,19 @@ where
 
 impl<U, D> Read for ImcpEmbedded<U, D>
 where
-    U: Write + Read,
+    U: CarrierSenseUart,
     D: OutputPin,
 {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        self.uart.read(buf).await.map_err(ImcpEmbeddedError::Uart)
+        Read::read(&mut self.uart, buf)
+            .await
+            .map_err(ImcpEmbeddedError::Uart)
     }
 }
 
 impl<U, D> Write for ImcpEmbedded<U, D>
 where
-    U: Write + Read,
+    U: CarrierSenseUart,
     D: OutputPin,
 {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
@@ -62,29 +80,13 @@ where
             return Ok(0);
         }
 
-        // 1. キャリアセンス (バスが空くまで待機)
-        // (アイドル時間は 1.5 バイト分など、プロトコルで定義)
-        let idle_duration =
-            Duration::from_micros(self.byte_time_micro + (self.byte_time_micro / 2));
-        let mut read_buf = [0u8; 1];
-
-        loop {
-            match select(self.uart.read(&mut read_buf), Timer::after(idle_duration)).await {
-                Either::Second(_) => {
-                    // タイマーが完了 = バスはアイドル
-                    break;
-                }
-                Either::First(Ok(_)) => {
-                    // データを受信 = バスはビジー、監視を継続
-                    continue;
-                }
-                Either::First(Err(e)) => {
-                    // UART読み取りエラー
-                    // (エラーを無視して継続するか、即時エラーとするか)
-                    return Err(ImcpEmbeddedError::Uart(e));
-                }
-            }
-        }
+        self.uart
+            .wait_bus_idle(
+                self.byte_time_micro + (self.byte_time_micro / 2),
+                (self.byte_time_micro / 8).max(1),
+            )
+            .await
+            .map_err(ImcpEmbeddedError::Uart)?;
 
         // 2. 送信モードに設定 (DE=HIGH)
         // (OutputPin::Error を Rs485Error::Pin にマッピング)
@@ -93,11 +95,7 @@ where
         }
 
         // 3. 内部の UART を使ってデータを送信
-        self
-            .uart
-            .write_all(buf)
-            .await
-            .map_err(ImcpEmbeddedError::Uart)?;
+        let write_result = Write::write_all(&mut self.uart, buf).await;
 
         let buf_len = buf.len();
 
@@ -110,11 +108,15 @@ where
             pin.set_low().map_err(ImcpEmbeddedError::Pin)?;
         }
 
+        write_result.map_err(ImcpEmbeddedError::Uart)?;
+
         Ok(buf_len)
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        self.uart.flush().await.map_err(ImcpEmbeddedError::Uart)
+        Write::flush(&mut self.uart)
+            .await
+            .map_err(ImcpEmbeddedError::Uart)
     }
 }
 
@@ -167,8 +169,76 @@ where
 /// ErrorType トレイトの実装
 impl<U, P> ErrorType for ImcpEmbedded<U, P>
 where
-    U: Read + Write,
+    U: CarrierSenseUart,
     P: OutputPin,
 {
     type Error = ImcpEmbeddedError<U::Error, P::Error>;
+}
+
+#[cfg(feature = "embassy-rp")]
+pub struct RpUartCarrierSense {
+    uart: BufferedUart,
+    regs: RpUartRegs,
+}
+
+#[cfg(feature = "embassy-rp")]
+impl RpUartCarrierSense {
+    pub fn new(uart: BufferedUart, regs: RpUartRegs) -> Self {
+        Self { uart, regs }
+    }
+}
+
+#[cfg(feature = "embassy-rp")]
+impl ErrorType for RpUartCarrierSense {
+    type Error = <BufferedUart as ErrorType>::Error;
+}
+
+#[cfg(feature = "embassy-rp")]
+impl Read for RpUartCarrierSense {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        Read::read(&mut self.uart, buf).await
+    }
+}
+
+#[cfg(feature = "embassy-rp")]
+impl Write for RpUartCarrierSense {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        Write::write(&mut self.uart, buf).await
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        Write::flush(&mut self.uart).await
+    }
+}
+
+#[cfg(feature = "embassy-rp")]
+impl CarrierSenseUart for RpUartCarrierSense {
+    async fn wait_bus_idle(
+        &mut self,
+        idle_for_us: u64,
+        sample_interval_us: u64,
+    ) -> Result<(), Self::Error> {
+        let sample_us = sample_interval_us.max(1);
+        let mut quiet_us = 0;
+
+        while quiet_us < idle_for_us {
+            let fr = self.regs.uartfr().read();
+            let rx_buffered = if ReadReady::read_ready(&mut self.uart)? {
+                let buffered: &[u8] = BufRead::fill_buf(&mut self.uart).await?;
+                !buffered.is_empty()
+            } else {
+                false
+            };
+
+            if fr.busy() || !fr.rxfe() || rx_buffered {
+                quiet_us = 0;
+            } else {
+                quiet_us = quiet_us.saturating_add(sample_us);
+            }
+
+            Timer::after(Duration::from_micros(sample_us)).await;
+        }
+
+        Ok(())
+    }
 }

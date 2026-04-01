@@ -11,7 +11,9 @@ embedded-io-async = "0.6.1"
 embedded-hal = "1.0.0"
 embassy-time = { version = "0.5.0" }
 defmt = { version = "1.0.1", optional = true }
+embassy-rp = { version = "0.8.0", optional = true, default-features = false, features = ["rp2040", "unstable-pac"] }
 
 [features]
 default = []
 defmt = ["dep:defmt"]
+embassy-rp = ["dep:embassy-rp"]

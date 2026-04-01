@@ -1,3 +1,5 @@
+use core::fmt;
+
 use imcp::frame::Frame;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -9,9 +11,27 @@ pub struct TokioReceiver {
     receiver: Receiver<Frame>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokioChannelError {
+    Closed,
+}
+
+impl fmt::Display for TokioChannelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TokioChannelError::Closed => write!(f, "channel closed"),
+        }
+    }
+}
+
 impl imcp::channel::Sender for TokioSender {
-    async fn send(&mut self, frame: Frame) {
-        self.sender.send(frame).await.unwrap();
+    type Error = TokioChannelError;
+
+    async fn send(&mut self, frame: Frame) -> Result<(), Self::Error> {
+        self.sender
+            .send(frame)
+            .await
+            .map_err(|_| TokioChannelError::Closed)
     }
 }
 
@@ -25,8 +45,10 @@ impl TokioSender {
 }
 
 impl imcp::channel::Receiver for TokioReceiver {
-    async fn receive(&mut self) -> Frame {
-        self.receiver.recv().await.unwrap()
+    type Error = TokioChannelError;
+
+    async fn receive(&mut self) -> Result<Frame, Self::Error> {
+        self.receiver.recv().await.ok_or(TokioChannelError::Closed)
     }
 }
 

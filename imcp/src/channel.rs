@@ -1,11 +1,17 @@
 use crate::frame::Frame;
 
+#[allow(async_fn_in_trait)]
 pub trait Sender {
-    async fn send(&mut self, frame: Frame);
+    type Error;
+
+    async fn send(&mut self, frame: Frame) -> Result<(), Self::Error>;
 }
 
+#[allow(async_fn_in_trait)]
 pub trait Receiver {
-    async fn receive(&mut self) -> Frame;
+    type Error;
+
+    async fn receive(&mut self) -> Result<Frame, Self::Error>;
 }
 
 pub trait SyncSender<E> {

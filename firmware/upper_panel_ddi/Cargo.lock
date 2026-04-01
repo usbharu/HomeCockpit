@@ -998,6 +998,7 @@ dependencies = [
  "defmt 1.0.1",
  "embassy-executor 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "embassy-futures 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embassy-rp",
  "embassy-sync 0.7.2",
  "embassy-time 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embedded-hal 1.0.0",

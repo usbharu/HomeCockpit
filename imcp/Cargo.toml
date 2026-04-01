@@ -19,6 +19,9 @@ members = [
     "imcp-embassy"
 , "imcp-embedded", "imcp-tokio"]
 
+[dev-dependencies]
+futures = "0.3.31"
+
 
 [lints.clippy]
 unwrap_used = "forbid"
