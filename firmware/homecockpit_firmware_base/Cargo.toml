@@ -1,0 +1,27 @@
+[package]
+name = "homecockpit_firmware_base"
+version = "0.1.0"
+edition = "2024"
+description = "Shared firmware helpers for HomeCockpit devices"
+
+[dependencies]
+defmt = { version = "1.0.1", optional = true }
+hcp = { path = "../hcp" }
+imcp = { path = "../../imcp" }
+
+[features]
+default = []
+defmt = ["dep:defmt", "hcp/defmt", "imcp/defmt"]
+
+[lints.clippy]
+unwrap_used = "forbid"
+expect_used = "warn"
+panic = "forbid"
+
+large_stack_arrays = "forbid"
+
+float_arithmetic = "forbid"
+float_cmp = "forbid"
+cast_possible_truncation = "forbid"
+cast_sign_loss = "forbid"
+cast_possible_wrap = "warn"

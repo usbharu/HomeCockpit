@@ -3,6 +3,11 @@ name = "upper_panel_ddi"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["rp2040"]
+rp2040 = []
+rp235x = []
+
 [dependencies]
 embassy-sync = { version = "0.7.2", path = "../lib/embassy/embassy-sync", features = [
     "defmt",
@@ -60,6 +65,8 @@ imcp-embassy = { path = "../../imcp/imcp-embassy" }
 imcp = { path = "../../imcp",features = ["defmt"] }
 
 embedded-io-async = "0.6.1"
+hcp = { path = "../hcp", features = ["defmt"] }
+homecockpit_firmware_base = { path = "../homecockpit_firmware_base", features = ["defmt"] }
 
 heapless = {version = "0.9.1",features = ["defmt"]}
 
