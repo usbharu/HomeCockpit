@@ -97,6 +97,12 @@ pub struct DeviceHello {
 }
 ```
 
+`DeviceKind`
+
+- `UpperPanelDdi`
+- `ButtonPanel`
+- `ImcpHub`
+
 想定タイミング:
 
 - IMCP の `Join`
@@ -163,7 +169,7 @@ use hcp::{
 
 let hello = AppPacketKind::DeviceHello(DeviceHello {
     device_id: 0x0123_4567_89AB_CDEF,
-    device_kind: DeviceKind::UpperPanelDdi,
+    device_kind: DeviceKind::ImcpHub,
     protocol_version: 1,
     firmware_version: Version { major: 0, minor: 1, patch: 0 },
     capabilities: Capabilities {

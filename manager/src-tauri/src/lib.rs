@@ -1,7 +1,9 @@
 use std::{
     collections::VecDeque,
+    fs,
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -11,7 +13,10 @@ use std::{
 };
 
 use chrono::Utc;
-use hcp::{decode_set_packet, AppPacketKind, DeviceKind};
+use hcp::{
+    decode_set_packet, encode_set_packet, AppPacketKind, ControlEvent, ControlValue, DeviceKind,
+    CONTROL_ID_REQUEST_DEVICE_HELLO,
+};
 use imcp::{
     frame::{Address, Frame, FramePayload, MAX_ENCODED_FRAME_SIZE},
     parser::FrameParser,
@@ -25,10 +30,12 @@ const DEFAULT_EXPORT_PORT: u16 = 5010;
 const DEFAULT_COMMAND_HOST: &str = "127.0.0.1";
 const DEFAULT_COMMAND_PORT: u16 = 7778;
 const MAX_LOG_ENTRIES: usize = 250;
-const IMCP_PROBE_BAUD_RATE: u32 = 115200;
+const DEFAULT_DEVICE_ENDPOINT_BAUD_RATE: u32 = 115200;
 const IMCP_MASTER_ADDRESS: u8 = 0x01;
-const IMCP_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
+const IMCP_ROOT_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
+const IMCP_CHILD_ENUMERATION_TIMEOUT: Duration = Duration::from_millis(600);
 const IMCP_READ_TIMEOUT: Duration = Duration::from_millis(50);
+const SETTINGS_FILE_NAME: &str = "manager-state.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -97,12 +104,57 @@ struct ManagerLogEntry {
     message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum DeviceEndpointTransport {
+    Serial,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum EndpointRoleHint {
+    Auto,
+    DirectDevice,
+    ImcpHub,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-struct ImcpDeviceSummary {
+struct DeviceEndpointConfig {
     id: String,
-    transport: String,
-    port_name: String,
+    name: String,
+    transport: DeviceEndpointTransport,
+    address: String,
+    enabled: bool,
+    baud_rate: u32,
+    role_hint: EndpointRoleHint,
+}
+
+impl Default for DeviceEndpointConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            transport: DeviceEndpointTransport::Serial,
+            address: String::new(),
+            enabled: true,
+            baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
+            role_hint: EndpointRoleHint::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ManagedDeviceSummary {
+    id: String,
+    connection_kind: String,
+    gateway_id: Option<String>,
+    gateway_display_name: Option<String>,
+    endpoint_id: String,
+    endpoint_name: String,
+    endpoint_transport: String,
+    endpoint_address: String,
     display_name: String,
     firmware_version: Option<String>,
     state: String,
@@ -130,7 +182,8 @@ struct AppSnapshot {
     dcsbios_config: DcsBiosConnectionConfig,
     dcsbios_status: DcsBiosStatus,
     logs: Vec<ManagerLogEntry>,
-    devices: Vec<ImcpDeviceSummary>,
+    devices: Vec<ManagedDeviceSummary>,
+    device_endpoints: Vec<DeviceEndpointConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -139,6 +192,12 @@ struct DcsBiosCommandRequest {
     raw_command: Option<String>,
     control_id: Option<String>,
     argument: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedManagerState {
+    device_endpoints: Vec<DeviceEndpointConfig>,
 }
 
 struct ListenerHandle {
@@ -150,7 +209,8 @@ struct RuntimeState {
     config: Mutex<DcsBiosConnectionConfig>,
     status: Mutex<DcsBiosStatus>,
     logs: Mutex<VecDeque<ManagerLogEntry>>,
-    devices: Mutex<Vec<ImcpDeviceSummary>>,
+    devices: Mutex<Vec<ManagedDeviceSummary>>,
+    device_endpoints: Mutex<Vec<DeviceEndpointConfig>>,
     log_counter: AtomicU64,
     listener: Mutex<Option<ListenerHandle>>,
 }
@@ -162,6 +222,7 @@ impl RuntimeState {
             status: Mutex::new(DcsBiosStatus::default()),
             logs: Mutex::new(VecDeque::new()),
             devices: Mutex::new(Vec::new()),
+            device_endpoints: Mutex::new(Vec::new()),
             log_counter: AtomicU64::new(0),
             listener: Mutex::new(None),
         }
@@ -173,6 +234,7 @@ impl RuntimeState {
             dcsbios_status: self.status.lock().unwrap().clone(),
             logs: self.logs.lock().unwrap().iter().cloned().collect(),
             devices: self.devices.lock().unwrap().clone(),
+            device_endpoints: self.device_endpoints.lock().unwrap().clone(),
         }
     }
 
@@ -225,11 +287,21 @@ impl RuntimeState {
     fn set_devices(
         &self,
         app: &AppHandle,
-        devices: Vec<ImcpDeviceSummary>,
-    ) -> Vec<ImcpDeviceSummary> {
+        devices: Vec<ManagedDeviceSummary>,
+    ) -> Vec<ManagedDeviceSummary> {
         *self.devices.lock().unwrap() = devices.clone();
-        let _ = app.emit("imcp-devices-changed", devices.clone());
+        let _ = app.emit("devices-changed", devices.clone());
         devices
+    }
+
+    fn set_device_endpoints(
+        &self,
+        app: &AppHandle,
+        device_endpoints: Vec<DeviceEndpointConfig>,
+    ) -> Vec<DeviceEndpointConfig> {
+        *self.device_endpoints.lock().unwrap() = device_endpoints.clone();
+        let _ = app.emit("device-endpoints-changed", device_endpoints.clone());
+        device_endpoints
     }
 
     fn stop_listener(&self, app: &AppHandle) {
@@ -484,74 +556,179 @@ fn send_dcsbios_command(
     Ok(())
 }
 
-fn discover_imcp_devices() -> Result<(Vec<ImcpDeviceSummary>, usize), String> {
-    let ports = serialport::available_ports().map_err(|error| error.to_string())?;
-    let scanned_ports = ports.len();
-    let devices = ports
-        .into_iter()
-        .filter_map(|port| {
-            let probed = match probe_imcp_device(&port.port_name) {
-                Ok(Some(probed)) => probed,
-                Ok(None) | Err(_) => return None,
-            };
-
-            Some(ImcpDeviceSummary {
-                id: port.port_name.clone(),
-                transport: "serial".to_string(),
-                port_name: port.port_name,
-                display_name: probed.display_name,
-                firmware_version: Some(probed.firmware_version),
-                state: "connected".to_string(),
-                protocol: "imcp+hcp".to_string(),
-                assigned_address: Some(probed.assigned_address),
-                device_kind: Some(probed.device_kind),
-                protocol_version: Some(probed.protocol_version),
-                device_id: Some(probed.device_id),
-                displays: Some(probed.displays),
-                controls: Some(probed.controls),
-                features: Some(probed.features),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    Ok((devices, scanned_ports))
+#[tauri::command]
+fn save_device_endpoints(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    device_endpoints: Vec<DeviceEndpointConfig>,
+) -> Result<AppSnapshot, String> {
+    persist_device_endpoints(&app, &device_endpoints)?;
+    state
+        .inner
+        .set_device_endpoints(&app, sanitize_device_endpoints(device_endpoints));
+    state.inner.push_log(
+        &app,
+        "INFO",
+        "devices",
+        "Saved device endpoints configuration.",
+    );
+    Ok(state.inner.snapshot())
 }
 
-async fn refresh_imcp_devices(
+#[tauri::command]
+fn list_serial_ports() -> Result<Vec<String>, String> {
+    let mut ports = serialport::available_ports()
+        .map_err(|error| format!("Failed to list serial ports: {error}"))?
+        .into_iter()
+        .map(|port| port.port_name)
+        .collect::<Vec<_>>();
+    ports.sort();
+    Ok(ports)
+}
+
+async fn refresh_devices(
     app: AppHandle,
     runtime: Arc<RuntimeState>,
-) -> Result<Vec<ImcpDeviceSummary>, String> {
-    let (devices, scanned_ports) = tauri::async_runtime::spawn_blocking(discover_imcp_devices)
-        .await
-        .map_err(|error| format!("Failed to join IMCP device scan task: {error}"))??;
+) -> Result<Vec<ManagedDeviceSummary>, String> {
+    let endpoints = runtime.device_endpoints.lock().unwrap().clone();
+    let endpoints = sanitize_device_endpoints(endpoints);
+    let count_endpoints = endpoints.len();
+    let devices =
+        tauri::async_runtime::spawn_blocking(move || list_devices_for_endpoints(&endpoints))
+            .await
+            .map_err(|error| format!("Failed to join device scan task: {error}"))??;
 
-    let count = devices.len();
+    let count_devices = devices.len();
     let devices = runtime.set_devices(&app, devices);
     runtime.push_log(
         &app,
         "INFO",
-        "imcp",
+        "devices",
         format!(
-            "Refreshed IMCP/HCP devices. {count} device(s) responded across {scanned_ports} scanned port(s)."
+            "Refreshed devices from {count_endpoints} configured endpoint(s). {count_devices} device(s) available."
         ),
     );
     Ok(devices)
 }
 
 #[tauri::command]
-async fn list_imcp_devices(
+async fn list_devices(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<Vec<ImcpDeviceSummary>, String> {
-    refresh_imcp_devices(app, state.inner.clone()).await
+) -> Result<Vec<ManagedDeviceSummary>, String> {
+    refresh_devices(app, state.inner.clone()).await
 }
 
-#[derive(Debug, Clone)]
+fn sanitize_device_endpoints(
+    device_endpoints: Vec<DeviceEndpointConfig>,
+) -> Vec<DeviceEndpointConfig> {
+    device_endpoints
+        .into_iter()
+        .map(|mut endpoint| {
+            if endpoint.baud_rate == 0 {
+                endpoint.baud_rate = DEFAULT_DEVICE_ENDPOINT_BAUD_RATE;
+            }
+            endpoint
+        })
+        .collect()
+}
+
+trait DeviceEndpointProvider {
+    fn supports(&self, endpoint: &DeviceEndpointConfig) -> bool;
+    fn list_devices(
+        &self,
+        endpoint: &DeviceEndpointConfig,
+    ) -> Result<Vec<ManagedDeviceSummary>, String>;
+}
+
+struct SerialImcpEndpointProvider;
+
+impl DeviceEndpointProvider for SerialImcpEndpointProvider {
+    fn supports(&self, endpoint: &DeviceEndpointConfig) -> bool {
+        matches!(endpoint.transport, DeviceEndpointTransport::Serial)
+    }
+
+    fn list_devices(
+        &self,
+        endpoint: &DeviceEndpointConfig,
+    ) -> Result<Vec<ManagedDeviceSummary>, String> {
+        enumerate_serial_endpoint(endpoint)
+    }
+}
+
+fn list_devices_for_endpoints(
+    device_endpoints: &[DeviceEndpointConfig],
+) -> Result<Vec<ManagedDeviceSummary>, String> {
+    let providers: [&dyn DeviceEndpointProvider; 1] = [&SerialImcpEndpointProvider];
+    let mut devices = Vec::new();
+
+    for endpoint in device_endpoints {
+        if !endpoint.enabled {
+            continue;
+        }
+
+        let provider = providers
+            .iter()
+            .find(|provider| provider.supports(endpoint))
+            .ok_or_else(|| format!("No provider found for endpoint '{}'.", endpoint.name))?;
+
+        match provider.list_devices(endpoint) {
+            Ok(mut discovered) => devices.append(&mut discovered),
+            Err(error) => {
+                devices.push(unavailable_device_summary(endpoint, error));
+            }
+        }
+    }
+
+    Ok(devices)
+}
+
+fn enumerate_serial_endpoint(
+    endpoint: &DeviceEndpointConfig,
+) -> Result<Vec<ManagedDeviceSummary>, String> {
+    let probe = probe_endpoint_root_device(endpoint)?;
+    let root_connection_kind = if probe.root.device_kind == DeviceKind::ImcpHub {
+        "hub"
+    } else {
+        "direct"
+    };
+
+    let root_summary = probed_device_to_summary(endpoint, &probe.root, root_connection_kind, None);
+    let mut devices = vec![root_summary.clone()];
+
+    let should_enumerate_children = match endpoint.role_hint {
+        EndpointRoleHint::DirectDevice => false,
+        EndpointRoleHint::ImcpHub => true,
+        EndpointRoleHint::Auto => probe.root.device_kind == DeviceKind::ImcpHub,
+    };
+
+    if should_enumerate_children {
+        let mut probe = probe;
+        let children = enumerate_children_via_hub(&mut *probe.port, endpoint, &probe.root)?;
+        devices.extend(children.into_iter().map(|child| {
+            probed_device_to_summary(
+                endpoint,
+                &child,
+                "hub-child",
+                Some((&root_summary.id, root_summary.display_name.as_str())),
+            )
+        }));
+    }
+
+    Ok(devices)
+}
+
+struct EndpointProbe {
+    port: Box<dyn serialport::SerialPort>,
+    root: ProbedImcpDevice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ProbedImcpDevice {
     display_name: String,
     firmware_version: String,
-    assigned_address: u8,
-    device_kind: String,
+    assigned_address: Option<u8>,
+    device_kind: DeviceKind,
     protocol_version: u8,
     device_id: String,
     displays: u8,
@@ -559,11 +736,11 @@ struct ProbedImcpDevice {
     features: String,
 }
 
-fn probe_imcp_device(port_name: &str) -> Result<Option<ProbedImcpDevice>, String> {
-    let mut port = serialport::new(port_name, IMCP_PROBE_BAUD_RATE)
+fn probe_endpoint_root_device(endpoint: &DeviceEndpointConfig) -> Result<EndpointProbe, String> {
+    let mut port = serialport::new(&endpoint.address, endpoint.baud_rate)
         .timeout(IMCP_READ_TIMEOUT)
         .open()
-        .map_err(|error| format!("Failed to open {port_name}: {error}"))?;
+        .map_err(|error| format!("Failed to open {}: {error}", endpoint.address))?;
 
     let _ = port.clear(serialport::ClearBuffer::All);
 
@@ -574,13 +751,16 @@ fn probe_imcp_device(port_name: &str) -> Result<Option<ProbedImcpDevice>, String
     let mut parser = FrameParser::new(&mut rx_buffer, &mut frame_buffer);
     let mut assigned_address: Option<u8> = None;
 
-    while started_at.elapsed() < IMCP_PROBE_TIMEOUT {
+    while started_at.elapsed() < IMCP_ROOT_PROBE_TIMEOUT {
         match port.read(&mut serial_buffer) {
             Ok(bytes_read) if bytes_read > 0 => {
                 parser
                     .write_data(&serial_buffer[..bytes_read])
                     .map_err(|error| {
-                        format!("Failed to parse IMCP frame on {port_name}: {error:?}")
+                        format!(
+                            "Failed to parse IMCP frame on {}: {error:?}",
+                            endpoint.address
+                        )
                     })?;
 
                 while let Some(frame) = parser.next_frame() {
@@ -617,7 +797,7 @@ fn probe_imcp_device(port_name: &str) -> Result<Option<ProbedImcpDevice>, String
                                         FramePayload::Ack(frame.to_address().as_byte()),
                                     ),
                                 )?;
-                                return Ok(Some(probed));
+                                return Ok(EndpointProbe { port, root: probed });
                             }
                         }
                         _ => {}
@@ -626,11 +806,195 @@ fn probe_imcp_device(port_name: &str) -> Result<Option<ProbedImcpDevice>, String
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(error) => return Err(format!("Failed to read {port_name}: {error}")),
+            Err(error) => return Err(format!("Failed to read {}: {error}", endpoint.address)),
         }
     }
 
-    Ok(None)
+    Err(format!(
+        "No IMCP/HCP device responded on configured endpoint {}.",
+        endpoint.address
+    ))
+}
+
+fn enumerate_children_via_hub(
+    port: &mut dyn serialport::SerialPort,
+    endpoint: &DeviceEndpointConfig,
+    hub: &ProbedImcpDevice,
+) -> Result<Vec<ProbedImcpDevice>, String> {
+    let request = encode_set_packet(&AppPacketKind::ControlEvent(ControlEvent {
+        seq: 0,
+        control_id: CONTROL_ID_REQUEST_DEVICE_HELLO,
+        event: ControlValue::RequestDeviceHello,
+    }))
+    .map_err(|error| format!("Failed to encode RequestDeviceHello: {error:?}"))?;
+
+    write_frame(
+        port,
+        &Frame::new(
+            Address::Unicast(
+                hub.assigned_address
+                    .ok_or_else(|| "Hub IMCP address is missing.".to_string())?,
+            ),
+            IMCP_MASTER_ADDRESS,
+            FramePayload::Set(request),
+        ),
+    )?;
+
+    let started_at = Instant::now();
+    let mut serial_buffer = [0u8; 64];
+    let mut rx_buffer = [0u8; 256];
+    let mut frame_buffer = [0u8; 256];
+    let mut parser = FrameParser::new(&mut rx_buffer, &mut frame_buffer);
+    let mut children = Vec::new();
+
+    while started_at.elapsed() < IMCP_CHILD_ENUMERATION_TIMEOUT {
+        match port.read(&mut serial_buffer) {
+            Ok(bytes_read) if bytes_read > 0 => {
+                parser
+                    .write_data(&serial_buffer[..bytes_read])
+                    .map_err(|error| {
+                        format!(
+                            "Failed to parse IMCP frame on {}: {error:?}",
+                            endpoint.address
+                        )
+                    })?;
+
+                while let Some(frame) = parser.next_frame() {
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        Err(_) => continue,
+                    };
+
+                    if let FramePayload::Set(payload) = frame.payload() {
+                        if let Some(probed) = decode_device_hello(payload.as_slice(), None)? {
+                            write_frame(
+                                port,
+                                &Frame::new(
+                                    Address::Unicast(frame.from_address()),
+                                    IMCP_MASTER_ADDRESS,
+                                    FramePayload::Ack(frame.to_address().as_byte()),
+                                ),
+                            )?;
+
+                            if probed.device_id != hub.device_id {
+                                children.push(probed);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => return Err(format!("Failed to enumerate hub children: {error}")),
+        }
+    }
+
+    Ok(children)
+}
+
+fn unavailable_device_summary(
+    endpoint: &DeviceEndpointConfig,
+    error: String,
+) -> ManagedDeviceSummary {
+    ManagedDeviceSummary {
+        id: format!("endpoint-error:{}", endpoint.id),
+        connection_kind: "direct".to_string(),
+        gateway_id: None,
+        gateway_display_name: None,
+        endpoint_id: endpoint.id.clone(),
+        endpoint_name: endpoint.name.clone(),
+        endpoint_transport: format_endpoint_transport(endpoint.transport).to_string(),
+        endpoint_address: endpoint.address.clone(),
+        display_name: endpoint.name.clone(),
+        firmware_version: None,
+        state: "error".to_string(),
+        protocol: "imcp+hcp".to_string(),
+        assigned_address: None,
+        device_kind: None,
+        protocol_version: None,
+        device_id: None,
+        displays: None,
+        controls: None,
+        features: Some(error),
+    }
+}
+
+fn probed_device_to_summary(
+    endpoint: &DeviceEndpointConfig,
+    device: &ProbedImcpDevice,
+    connection_kind: &str,
+    gateway: Option<(&str, &str)>,
+) -> ManagedDeviceSummary {
+    let stable_id = match connection_kind {
+        "hub" => format!("hub:{}:{}", endpoint.id, device.device_id),
+        "hub-child" => {
+            let gateway_id = gateway.map(|(id, _)| id).unwrap_or("unknown");
+            format!("hub-child:{gateway_id}:{}", device.device_id)
+        }
+        _ => format!("direct:{}:{}", endpoint.id, device.device_id),
+    };
+
+    ManagedDeviceSummary {
+        id: stable_id,
+        connection_kind: connection_kind.to_string(),
+        gateway_id: gateway.map(|(id, _)| id.to_string()),
+        gateway_display_name: gateway.map(|(_, display_name)| display_name.to_string()),
+        endpoint_id: endpoint.id.clone(),
+        endpoint_name: endpoint.name.clone(),
+        endpoint_transport: format_endpoint_transport(endpoint.transport).to_string(),
+        endpoint_address: endpoint.address.clone(),
+        display_name: device.display_name.clone(),
+        firmware_version: Some(device.firmware_version.clone()),
+        state: "connected".to_string(),
+        protocol: "imcp+hcp".to_string(),
+        assigned_address: device.assigned_address,
+        device_kind: Some(format_device_kind(device.device_kind).to_string()),
+        protocol_version: Some(device.protocol_version),
+        device_id: Some(device.device_id.clone()),
+        displays: Some(device.displays),
+        controls: Some(device.controls),
+        features: Some(device.features.clone()),
+    }
+}
+
+fn persist_device_endpoints(
+    app: &AppHandle,
+    device_endpoints: &[DeviceEndpointConfig],
+) -> Result<(), String> {
+    let file_path = manager_state_file_path(app)?;
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create config directory: {error}"))?;
+    }
+
+    let body = serde_json::to_string_pretty(&PersistedManagerState {
+        device_endpoints: sanitize_device_endpoints(device_endpoints.to_vec()),
+    })
+    .map_err(|error| format!("Failed to serialize device endpoints: {error}"))?;
+
+    fs::write(file_path, body).map_err(|error| format!("Failed to write device endpoints: {error}"))
+}
+
+fn load_device_endpoints(app: &AppHandle) -> Result<Vec<DeviceEndpointConfig>, String> {
+    let file_path = manager_state_file_path(app)?;
+    match fs::read_to_string(file_path) {
+        Ok(contents) => {
+            let persisted: PersistedManagerState = serde_json::from_str(&contents)
+                .map_err(|error| format!("Failed to parse device endpoints: {error}"))?;
+            Ok(sanitize_device_endpoints(persisted.device_endpoints))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!("Failed to read device endpoints: {error}")),
+    }
+}
+
+fn manager_state_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("Failed to resolve app config directory: {error}"))?;
+    dir.push(SETTINGS_FILE_NAME);
+    Ok(dir)
 }
 
 fn write_frame(port: &mut dyn serialport::SerialPort, frame: &Frame) -> Result<(), String> {
@@ -669,8 +1033,8 @@ fn decode_device_hello(
             hello.firmware_version.minor,
             hello.firmware_version.patch
         ),
-        assigned_address,
-        device_kind: format_device_kind(hello.device_kind).to_string(),
+        assigned_address: Some(assigned_address),
+        device_kind: hello.device_kind,
         protocol_version: hello.protocol_version,
         device_id: format!("{:016X}", hello.device_id),
         displays: hello.capabilities.displays,
@@ -683,7 +1047,14 @@ fn format_device_kind(kind: DeviceKind) -> &'static str {
     match kind {
         DeviceKind::UpperPanelDdi => "Upper Panel DDI",
         DeviceKind::ButtonPanel => "Button Panel",
+        DeviceKind::ImcpHub => "IMCP Hub",
         DeviceKind::Unknown(_) => "Unknown Device",
+    }
+}
+
+fn format_endpoint_transport(transport: DeviceEndpointTransport) -> &'static str {
+    match transport {
+        DeviceEndpointTransport::Serial => "serial",
     }
 }
 
@@ -868,17 +1239,25 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let state = app.state::<AppState>().inner.clone();
 
-            tauri::async_runtime::spawn({
-                let app_handle = app_handle.clone();
-                let state = state.clone();
-                async move {
-                    if let Err(error) =
-                        refresh_imcp_devices(app_handle.clone(), state.clone()).await
-                    {
-                        state.push_log(&app_handle, "WARN", "imcp", error);
+            match load_device_endpoints(&app_handle) {
+                Ok(device_endpoints) => {
+                    state.set_device_endpoints(&app_handle, device_endpoints.clone());
+                    if !device_endpoints.is_empty() {
+                        tauri::async_runtime::spawn({
+                            let app_handle = app_handle.clone();
+                            let state = state.clone();
+                            async move {
+                                if let Err(error) =
+                                    refresh_devices(app_handle.clone(), state.clone()).await
+                                {
+                                    state.push_log(&app_handle, "WARN", "devices", error);
+                                }
+                            }
+                        });
                     }
                 }
-            });
+                Err(error) => state.push_log(&app_handle, "WARN", "devices", error),
+            }
 
             if let Err(error) = state.start_listener(app_handle.clone()) {
                 state.push_log(&app_handle, "ERROR", "dcsbios", error);
@@ -892,7 +1271,9 @@ pub fn run() {
             start_dcsbios,
             stop_dcsbios,
             send_dcsbios_command,
-            list_imcp_devices
+            save_device_endpoints,
+            list_serial_ports,
+            list_devices
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -942,5 +1323,77 @@ mod tests {
 
         let diagnostics = build_diagnostics(&config, &status);
         assert!(diagnostics[0].contains("Listening on UDP"));
+    }
+
+    #[test]
+    fn sanitize_endpoints_applies_default_baud_rate() {
+        let endpoints = sanitize_device_endpoints(vec![DeviceEndpointConfig {
+            id: "serial-1".to_string(),
+            name: "Serial".to_string(),
+            transport: DeviceEndpointTransport::Serial,
+            address: "COM3".to_string(),
+            enabled: true,
+            baud_rate: 0,
+            role_hint: EndpointRoleHint::Auto,
+        }]);
+
+        assert_eq!(endpoints[0].baud_rate, DEFAULT_DEVICE_ENDPOINT_BAUD_RATE);
+    }
+
+    #[test]
+    fn hub_child_summary_includes_gateway_metadata() {
+        let endpoint = DeviceEndpointConfig {
+            id: "serial-hub".to_string(),
+            name: "Upper Hub".to_string(),
+            transport: DeviceEndpointTransport::Serial,
+            address: "COM4".to_string(),
+            enabled: true,
+            baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
+            role_hint: EndpointRoleHint::Auto,
+        };
+        let child = ProbedImcpDevice {
+            display_name: "Button Panel".to_string(),
+            firmware_version: "1.0.0".to_string(),
+            assigned_address: Some(4),
+            device_kind: DeviceKind::ButtonPanel,
+            protocol_version: 1,
+            device_id: "0000000000001234".to_string(),
+            displays: 0,
+            controls: 20,
+            features: "control-events".to_string(),
+        };
+
+        let summary = probed_device_to_summary(
+            &endpoint,
+            &child,
+            "hub-child",
+            Some(("hub:serial-hub:0000000000000001", "IMCP Hub")),
+        );
+
+        assert_eq!(summary.connection_kind, "hub-child");
+        assert_eq!(
+            summary.gateway_id.as_deref(),
+            Some("hub:serial-hub:0000000000000001")
+        );
+        assert_eq!(summary.gateway_display_name.as_deref(), Some("IMCP Hub"));
+    }
+
+    #[test]
+    fn unavailable_summary_marks_endpoint_error() {
+        let endpoint = DeviceEndpointConfig {
+            id: "serial-error".to_string(),
+            name: "Broken".to_string(),
+            transport: DeviceEndpointTransport::Serial,
+            address: "COM9".to_string(),
+            enabled: true,
+            baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
+            role_hint: EndpointRoleHint::Auto,
+        };
+
+        let summary = unavailable_device_summary(&endpoint, "open failed".to_string());
+
+        assert_eq!(summary.state, "error");
+        assert_eq!(summary.endpoint_id, "serial-error");
+        assert_eq!(summary.features.as_deref(), Some("open failed"));
     }
 }

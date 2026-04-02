@@ -27,10 +27,29 @@ export type ManagerLogEntry = {
   message: string;
 };
 
-export type ImcpDeviceSummary = {
+export type DeviceEndpointTransport = "serial";
+
+export type EndpointRoleHint = "auto" | "direct-device" | "imcp-hub";
+
+export type DeviceEndpointConfig = {
   id: string;
-  transport: string;
-  portName: string;
+  name: string;
+  transport: DeviceEndpointTransport;
+  address: string;
+  enabled: boolean;
+  baudRate: number;
+  roleHint: EndpointRoleHint;
+};
+
+export type ManagedDeviceSummary = {
+  id: string;
+  connectionKind: "direct" | "hub" | "hub-child" | string;
+  gatewayId: string | null;
+  gatewayDisplayName: string | null;
+  endpointId: string;
+  endpointName: string;
+  endpointTransport: string;
+  endpointAddress: string;
   displayName: string;
   firmwareVersion: string | null;
   state: string;
@@ -48,7 +67,8 @@ export type AppSnapshot = {
   dcsbiosConfig: DcsBiosConnectionConfig;
   dcsbiosStatus: DcsBiosStatus;
   logs: ManagerLogEntry[];
-  devices: ImcpDeviceSummary[];
+  devices: ManagedDeviceSummary[];
+  deviceEndpoints: DeviceEndpointConfig[];
 };
 
 export type DcsBiosCommandRequest = {
@@ -77,4 +97,5 @@ export const defaultSnapshot: AppSnapshot = {
   },
   logs: [],
   devices: [],
+  deviceEndpoints: [],
 };

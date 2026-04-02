@@ -19,10 +19,12 @@ export default function ManagerTabs() {
         snapshot,
         runtimeError,
         busyAction,
+        serialPorts,
         saveConfig,
         startDcsBios,
         stopDcsBios,
         refreshDevices,
+        saveDeviceEndpoints,
     } = useManagerState();
 
     const tabs = [
@@ -49,8 +51,11 @@ export default function ManagerTabs() {
             content: (
                 <DeviceSettings
                     devices={snapshot.devices}
+                    deviceEndpoints={snapshot.deviceEndpoints}
+                    serialPorts={serialPorts}
                     busyAction={busyAction}
                     onRefresh={refreshDevices}
+                    onSaveEndpoints={saveDeviceEndpoints}
                 />
             ),
         },

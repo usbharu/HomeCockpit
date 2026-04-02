@@ -11,14 +11,16 @@ import {
   type DcsBiosCommandRequest,
   type DcsBiosConnectionConfig,
   type DcsBiosStatus,
-  type ImcpDeviceSummary,
+  type DeviceEndpointConfig,
   type ManagerLogEntry,
+  type ManagedDeviceSummary,
 } from "@/lib/manager-types";
 
 export function useManagerState() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(defaultSnapshot);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [serialPorts, setSerialPorts] = useState<string[]>([]);
 
   const replaceSnapshot = useCallback((next: AppSnapshot) => {
     setSnapshot(next);
@@ -36,8 +38,12 @@ export function useManagerState() {
     }));
   }, []);
 
-  const mergeDevices = useCallback((devices: ImcpDeviceSummary[]) => {
+  const mergeDevices = useCallback((devices: ManagedDeviceSummary[]) => {
     setSnapshot((current) => ({ ...current, devices }));
+  }, []);
+
+  const mergeDeviceEndpoints = useCallback((deviceEndpoints: DeviceEndpointConfig[]) => {
+    setSnapshot((current) => ({ ...current, deviceEndpoints }));
   }, []);
 
   const refreshSnapshot = useCallback(async () => {
@@ -121,13 +127,45 @@ export function useManagerState() {
 
     try {
       const devices = await runAction("refresh-devices", () =>
-        invoke<ImcpDeviceSummary[]>("list_imcp_devices"),
+        invoke<ManagedDeviceSummary[]>("list_devices"),
       );
       mergeDevices(devices);
     } catch (error) {
       setRuntimeError(String(error));
     }
   }, [mergeDevices, runAction]);
+
+  const saveDeviceEndpoints = useCallback(
+    async (deviceEndpoints: DeviceEndpointConfig[]) => {
+      if (!isTauri()) {
+        setSnapshot((current) => ({ ...current, deviceEndpoints }));
+        return;
+      }
+
+      try {
+        const next = await runAction("save-device-endpoints", () =>
+          invoke<AppSnapshot>("save_device_endpoints", { deviceEndpoints }),
+        );
+        replaceSnapshot(next);
+      } catch (error) {
+        setRuntimeError(String(error));
+      }
+    },
+    [replaceSnapshot, runAction],
+  );
+
+  const refreshSerialPorts = useCallback(async () => {
+    if (!isTauri()) {
+      return;
+    }
+
+    try {
+      const ports = await invoke<string[]>("list_serial_ports");
+      setSerialPorts(ports);
+    } catch (error) {
+      setRuntimeError(String(error));
+    }
+  }, []);
 
   const sendCommand = useCallback(
     async (request: DcsBiosCommandRequest) => {
@@ -153,6 +191,7 @@ export function useManagerState() {
     }
 
     void refreshSnapshot();
+    void refreshSerialPorts();
 
     let disposed = false;
     let unlistenFns: UnlistenFn[] = [];
@@ -169,9 +208,14 @@ export function useManagerState() {
             mergeLog(event.payload);
           }
         }),
-        listen<ImcpDeviceSummary[]>("imcp-devices-changed", (event) => {
+        listen<ManagedDeviceSummary[]>("devices-changed", (event) => {
           if (!disposed) {
             mergeDevices(event.payload);
+          }
+        }),
+        listen<DeviceEndpointConfig[]>("device-endpoints-changed", (event) => {
+          if (!disposed) {
+            mergeDeviceEndpoints(event.payload);
           }
         }),
       ]);
@@ -187,16 +231,19 @@ export function useManagerState() {
         void unlisten();
       }
     };
-  }, [mergeDevices, mergeLog, mergeStatus, refreshSnapshot]);
+  }, [mergeDeviceEndpoints, mergeDevices, mergeLog, mergeStatus, refreshSerialPorts, refreshSnapshot]);
 
   return {
     snapshot,
     runtimeError,
     busyAction,
+    serialPorts,
     saveConfig,
     startDcsBios,
     stopDcsBios,
     refreshDevices,
+    saveDeviceEndpoints,
+    refreshSerialPorts,
     sendCommand,
     refreshSnapshot,
   };

@@ -93,11 +93,13 @@ pub struct DeviceHello {
     pub capabilities: Capabilities,
 }
 
+#[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum DeviceKind {
-    UpperPanelDdi,
-    ButtonPanel,
+    UpperPanelDdi = 0,
+    ButtonPanel = 1,
+    ImcpHub = 2,
     Unknown(u16),
 }
 
@@ -244,6 +246,30 @@ mod tests {
     }
 
     #[test]
+    fn set_imcp_hub_device_hello_roundtrip_works() {
+        let packet = AppPacketKind::DeviceHello(DeviceHello {
+            device_id: 0x0BAD_F00D_CAFE_BEEF,
+            device_kind: DeviceKind::ImcpHub,
+            protocol_version: APP_PROTOCOL_VERSION,
+            firmware_version: Version {
+                major: 1,
+                minor: 2,
+                patch: 3,
+            },
+            capabilities: Capabilities {
+                displays: 0,
+                controls: 1,
+                features: 0x01,
+            },
+        });
+
+        let encoded = encode_set_packet(&packet).unwrap();
+        let decoded = decode_set_packet(&encoded).unwrap();
+
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
     fn set_control_event_roundtrip_works() {
         let button = AppPacketKind::ControlEvent(ControlEvent {
             seq: 7,
@@ -339,6 +365,12 @@ mod tests {
 
         assert!(newer.supersedes(9));
         assert!(!newer.supersedes(10));
-        assert!(!DisplayData { seq: 9, ..newer.clone() }.supersedes(10));
+        assert!(
+            !DisplayData {
+                seq: 9,
+                ..newer.clone()
+            }
+            .supersedes(10)
+        );
     }
 }
