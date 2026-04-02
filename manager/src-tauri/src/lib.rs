@@ -484,11 +484,7 @@ fn send_dcsbios_command(
     Ok(())
 }
 
-#[tauri::command]
-fn list_imcp_devices(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<ImcpDeviceSummary>, String> {
+fn discover_imcp_devices() -> Result<(Vec<ImcpDeviceSummary>, usize), String> {
     let ports = serialport::available_ports().map_err(|error| error.to_string())?;
     let scanned_ports = ports.len();
     let devices = ports
@@ -518,9 +514,20 @@ fn list_imcp_devices(
         })
         .collect::<Vec<_>>();
 
+    Ok((devices, scanned_ports))
+}
+
+async fn refresh_imcp_devices(
+    app: AppHandle,
+    runtime: Arc<RuntimeState>,
+) -> Result<Vec<ImcpDeviceSummary>, String> {
+    let (devices, scanned_ports) = tauri::async_runtime::spawn_blocking(discover_imcp_devices)
+        .await
+        .map_err(|error| format!("Failed to join IMCP device scan task: {error}"))??;
+
     let count = devices.len();
-    let devices = state.inner.set_devices(&app, devices);
-    state.inner.push_log(
+    let devices = runtime.set_devices(&app, devices);
+    runtime.push_log(
         &app,
         "INFO",
         "imcp",
@@ -529,6 +536,14 @@ fn list_imcp_devices(
         ),
     );
     Ok(devices)
+}
+
+#[tauri::command]
+async fn list_imcp_devices(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<ImcpDeviceSummary>, String> {
+    refresh_imcp_devices(app, state.inner.clone()).await
 }
 
 #[derive(Debug, Clone)]
@@ -853,10 +868,17 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let state = app.state::<AppState>().inner.clone();
 
-            match list_imcp_devices(app_handle.clone(), app.state::<AppState>()) {
-                Ok(_) => {}
-                Err(error) => state.push_log(&app_handle, "WARN", "imcp", error),
-            }
+            tauri::async_runtime::spawn({
+                let app_handle = app_handle.clone();
+                let state = state.clone();
+                async move {
+                    if let Err(error) =
+                        refresh_imcp_devices(app_handle.clone(), state.clone()).await
+                    {
+                        state.push_log(&app_handle, "WARN", "imcp", error);
+                    }
+                }
+            });
 
             if let Err(error) = state.start_listener(app_handle.clone()) {
                 state.push_log(&app_handle, "ERROR", "dcsbios", error);

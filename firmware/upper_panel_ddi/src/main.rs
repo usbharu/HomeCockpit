@@ -44,11 +44,11 @@ use {defmt_rtt as _, panic_probe as _};
 
 const BAUD_RATE: u32 = 115200;
 const CONTROL_MATRIX_COLUMNS: u8 = 5;
-const CONTROL_MATRIX_ROWS: u8 = 4;
+const CONTROL_MATRIX_ROWS: u8 = 8;
 #[cfg(feature = "rp2040")]
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 
-static RESULT: Mutex<CriticalSectionRawMutex, [[Level; 5]; 4]> = Mutex::new([[Level::Low; 5]; 4]);
+static RESULT: Mutex<CriticalSectionRawMutex, [[Level; 5]; 8]> = Mutex::new([[Level::Low; 5]; 8]);
 static DEVICE_STATE: Mutex<CriticalSectionRawMutex, DeviceRuntimeState> =
     Mutex::new(DeviceRuntimeState::new());
 
@@ -80,24 +80,28 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "rp235x")]
     let device_identity = initialize_device_identity(p.FLASH, p.TRNG);
 
-    let outputs: [Output<'static>; 4] = [
+    let outputs: [Output<'static>; 8] = [
         Output::new(p.PIN_2, Level::Low),
         Output::new(p.PIN_3, Level::Low),
         Output::new(p.PIN_4, Level::Low),
         Output::new(p.PIN_5, Level::Low),
+        Output::new(p.PIN_6, Level::Low),
+        Output::new(p.PIN_7, Level::Low),
+        Output::new(p.PIN_8, Level::Low),
+        Output::new(p.PIN_9, Level::Low),
     ];
 
     let inputs: [Input<'static>; 5] = [
-        Input::new(p.PIN_6, embassy_rp::gpio::Pull::Down),
-        Input::new(p.PIN_7, embassy_rp::gpio::Pull::Down),
-        Input::new(p.PIN_8, embassy_rp::gpio::Pull::Down),
-        Input::new(p.PIN_9, embassy_rp::gpio::Pull::Down),
         Input::new(p.PIN_10, embassy_rp::gpio::Pull::Down),
+        Input::new(p.PIN_11, embassy_rp::gpio::Pull::Down),
+        Input::new(p.PIN_12, embassy_rp::gpio::Pull::Down),
+        Input::new(p.PIN_13, embassy_rp::gpio::Pull::Down),
+        Input::new(p.PIN_14, embassy_rp::gpio::Pull::Down),
     ];
 
     spawner.spawn(scan_matrix(inputs, outputs).expect("failed spawn scan_matrix"));
 
-    let mut old: [[Level; 5]; 4] = [[Level::Low; 5]; 4];
+    let mut old: [[Level; 5]; 8] = [[Level::Low; 5]; 8];
 
     let mut config = Config::default();
     config.baudrate = BAUD_RATE;
@@ -154,7 +158,7 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn scan_matrix(inputs: [Input<'static>; 5], mut outputs: [Output<'static>; 4]) {
+async fn scan_matrix(inputs: [Input<'static>; 5], mut outputs: [Output<'static>; 8]) {
     loop {
         for (index, ele) in outputs.iter_mut().enumerate() {
             ele.set_high();
