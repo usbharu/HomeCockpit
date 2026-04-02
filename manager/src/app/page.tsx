@@ -5,12 +5,14 @@ import * as Tabs from '@radix-ui/react-tabs';
 import {
   Activity,
   Cable,
+  ArrowRightLeft,
   Radar,
 } from 'lucide-react';
 
 import { useManagerState } from "@/lib/use-manager-state";
 import { SoftwareSettings } from "@/components/tabs/software-settings";
 import DeviceSettings from "@/components/tabs/device-settings";
+import MappingSettings from "@/components/tabs/mapping-settings";
 import StatusPage from "@/components/tabs/status-page";
 
 
@@ -25,6 +27,8 @@ export default function ManagerTabs() {
         stopDcsBios,
         refreshDevices,
         saveDeviceEndpoints,
+        saveDeviceRoleAssignments,
+        saveRoleMappings,
     } = useManagerState();
 
     const tabs = [
@@ -52,10 +56,26 @@ export default function ManagerTabs() {
                 <DeviceSettings
                     devices={snapshot.devices}
                     deviceEndpoints={snapshot.deviceEndpoints}
+                    deviceRoleAssignments={snapshot.deviceRoleAssignments}
                     serialPorts={serialPorts}
                     busyAction={busyAction}
                     onRefresh={refreshDevices}
                     onSaveEndpoints={saveDeviceEndpoints}
+                    onSaveDeviceRoleAssignments={saveDeviceRoleAssignments}
+                />
+            ),
+        },
+        {
+            id: 'mapping',
+            label: 'マッピング',
+            icon: ArrowRightLeft,
+            content: (
+                <MappingSettings
+                    devices={snapshot.devices}
+                    deviceRoleAssignments={snapshot.deviceRoleAssignments}
+                    roleMappings={snapshot.roleMappings}
+                    busyAction={busyAction}
+                    onSaveRoleMappings={saveRoleMappings}
                 />
             ),
         },

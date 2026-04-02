@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket},
@@ -13,6 +13,12 @@ use std::{
 };
 
 use chrono::Utc;
+use dcs_bios::{
+    import::ImportCommand,
+    mem::{MemoryMap, VecMemoryMap},
+    source::Source,
+    DcsBios, DcsBiosImpl,
+};
 use hcp::{
     decode_set_packet, encode_set_packet, AppPacketKind, ControlEvent, ControlValue, DeviceKind,
     CONTROL_ID_REQUEST_DEVICE_HELLO,
@@ -24,6 +30,7 @@ use imcp::{
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use tauri::{AppHandle, Emitter, Manager, State};
+use uuid::Uuid;
 
 const DEFAULT_EXPORT_HOST: &str = "239.255.50.10";
 const DEFAULT_EXPORT_PORT: u16 = 5010;
@@ -161,6 +168,7 @@ struct ManagedDeviceSummary {
     protocol: String,
     assigned_address: Option<u8>,
     device_kind: Option<String>,
+    device_kind_id: Option<String>,
     protocol_version: Option<u8>,
     device_id: Option<String>,
     displays: Option<u8>,
@@ -184,6 +192,8 @@ struct AppSnapshot {
     logs: Vec<ManagerLogEntry>,
     devices: Vec<ManagedDeviceSummary>,
     device_endpoints: Vec<DeviceEndpointConfig>,
+    device_role_assignments: Vec<DeviceRoleAssignment>,
+    role_mappings: Vec<RoleMappingConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -194,15 +204,119 @@ struct DcsBiosCommandRequest {
     argument: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+enum DeviceRole {
+    LeftDdi,
+    RightDdi,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum NormalizedControlEvent {
+    ButtonDown,
+    ButtonUp,
+    ButtonPushed,
+    EncoderDelta,
+    AbsoluteChanged,
+    ToggleOn,
+    ToggleOff,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DeviceRoleAssignment {
+    device_id: String,
+    role: DeviceRole,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DcsBiosMappedAction {
+    identifier: String,
+    argument: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RoleControlMapping {
+    id: String,
+    control_id: u16,
+    input_event: NormalizedControlEvent,
+    action: DcsBiosMappedAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RoleMappingConfig {
+    role: DeviceRole,
+    mappings: Vec<RoleControlMapping>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedManagerState {
     device_endpoints: Vec<DeviceEndpointConfig>,
+    device_role_assignments: Vec<DeviceRoleAssignment>,
+    role_mappings: Vec<RoleMappingConfig>,
 }
 
 struct ListenerHandle {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone)]
+struct KnownRuntimeDevice {
+    device_id: String,
+    device_kind: DeviceKind,
+}
+
+#[derive(Debug, Clone)]
+struct SinglePacketSource {
+    packet: Option<Vec<u8>>,
+}
+
+impl SinglePacketSource {
+    fn new(packet: Vec<u8>) -> Self {
+        Self {
+            packet: Some(packet),
+        }
+    }
+}
+
+impl Source for SinglePacketSource {
+    fn setup(&self) -> Result<(), dcs_bios::error::Error> {
+        Ok(())
+    }
+
+    fn read(&mut self) -> Result<Option<Vec<u8>>, dcs_bios::error::Error> {
+        Ok(self.packet.take())
+    }
+}
+
+#[derive(Clone)]
+struct SharedMemoryMap {
+    inner: Arc<Mutex<VecMemoryMap>>,
+}
+
+impl MemoryMap for SharedMemoryMap {
+    fn write(
+        &mut self,
+        address: u16,
+        data: &[u8],
+    ) -> Result<std::ops::RangeInclusive<u16>, dcs_bios::error::Error> {
+        self.inner
+            .lock()
+            .unwrap()
+            .write(address, data)
+            .map_err(|_| dcs_bios::error::Error::MemoryMapError())
+    }
+
+    fn read(&self, range: std::ops::RangeInclusive<u16>) -> Option<&[u8]> {
+        let _ = range;
+        None
+    }
 }
 
 struct RuntimeState {
@@ -211,8 +325,12 @@ struct RuntimeState {
     logs: Mutex<VecDeque<ManagerLogEntry>>,
     devices: Mutex<Vec<ManagedDeviceSummary>>,
     device_endpoints: Mutex<Vec<DeviceEndpointConfig>>,
+    device_role_assignments: Mutex<Vec<DeviceRoleAssignment>>,
+    role_mappings: Mutex<Vec<RoleMappingConfig>>,
     log_counter: AtomicU64,
     listener: Mutex<Option<ListenerHandle>>,
+    endpoint_listeners: Mutex<Vec<ListenerHandle>>,
+    dcsbios_memory: Arc<Mutex<VecMemoryMap>>,
 }
 
 impl RuntimeState {
@@ -223,8 +341,12 @@ impl RuntimeState {
             logs: Mutex::new(VecDeque::new()),
             devices: Mutex::new(Vec::new()),
             device_endpoints: Mutex::new(Vec::new()),
+            device_role_assignments: Mutex::new(Vec::new()),
+            role_mappings: Mutex::new(Vec::new()),
             log_counter: AtomicU64::new(0),
             listener: Mutex::new(None),
+            endpoint_listeners: Mutex::new(Vec::new()),
+            dcsbios_memory: Arc::new(Mutex::new(VecMemoryMap::default())),
         }
     }
 
@@ -235,6 +357,8 @@ impl RuntimeState {
             logs: self.logs.lock().unwrap().iter().cloned().collect(),
             devices: self.devices.lock().unwrap().clone(),
             device_endpoints: self.device_endpoints.lock().unwrap().clone(),
+            device_role_assignments: self.device_role_assignments.lock().unwrap().clone(),
+            role_mappings: self.role_mappings.lock().unwrap().clone(),
         }
     }
 
@@ -304,6 +428,29 @@ impl RuntimeState {
         device_endpoints
     }
 
+    fn set_device_role_assignments(
+        &self,
+        app: &AppHandle,
+        device_role_assignments: Vec<DeviceRoleAssignment>,
+    ) -> Vec<DeviceRoleAssignment> {
+        *self.device_role_assignments.lock().unwrap() = device_role_assignments.clone();
+        let _ = app.emit(
+            "device-role-assignments-changed",
+            device_role_assignments.clone(),
+        );
+        device_role_assignments
+    }
+
+    fn set_role_mappings(
+        &self,
+        app: &AppHandle,
+        role_mappings: Vec<RoleMappingConfig>,
+    ) -> Vec<RoleMappingConfig> {
+        *self.role_mappings.lock().unwrap() = role_mappings.clone();
+        let _ = app.emit("role-mappings-changed", role_mappings.clone());
+        role_mappings
+    }
+
     fn stop_listener(&self, app: &AppHandle) {
         let handle = self.listener.lock().unwrap().take();
         if let Some(mut handle) = handle {
@@ -327,6 +474,66 @@ impl RuntimeState {
             },
             None,
         );
+    }
+
+    fn stop_endpoint_listeners(&self, app: &AppHandle) {
+        let listeners = {
+            let mut listeners = self.endpoint_listeners.lock().unwrap();
+            std::mem::take(&mut *listeners)
+        };
+
+        for mut handle in listeners {
+            handle.stop.store(true, Ordering::Relaxed);
+            if let Some(join) = handle.join.take() {
+                let _ = join.join();
+            }
+        }
+
+        self.push_log(app, "INFO", "devices", "Stopped device endpoint listeners.");
+    }
+
+    fn start_endpoint_listeners(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
+        self.stop_endpoint_listeners(&app);
+
+        let endpoints = sanitize_device_endpoints(self.device_endpoints.lock().unwrap().clone());
+        let assignments = self.device_role_assignments.lock().unwrap().clone();
+        let role_mappings = self.role_mappings.lock().unwrap().clone();
+
+        let mut listeners = Vec::new();
+        for endpoint in endpoints.into_iter().filter(|entry| entry.enabled) {
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_for_thread = stop.clone();
+            let app_for_thread = app.clone();
+            let state = Arc::clone(self);
+            let assignments = assignments.clone();
+            let role_mappings = role_mappings.clone();
+
+            let join = thread::spawn(move || {
+                let state_for_run = state.clone();
+                if let Err(error) = run_endpoint_listener(
+                    state_for_run,
+                    app_for_thread.clone(),
+                    endpoint,
+                    assignments,
+                    role_mappings,
+                    stop_for_thread,
+                ) {
+                    state.push_log(&app_for_thread, "ERROR", "devices", error);
+                }
+            });
+
+            listeners.push(ListenerHandle {
+                stop,
+                join: Some(join),
+            });
+        }
+
+        *self.endpoint_listeners.lock().unwrap() = listeners;
+        Ok(())
+    }
+
+    fn restart_endpoint_listeners(self: &Arc<Self>, app: &AppHandle) -> Result<(), String> {
+        self.start_endpoint_listeners(app.clone())
     }
 
     fn start_listener(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
@@ -380,6 +587,7 @@ impl RuntimeState {
         let stop_for_thread = stop.clone();
         let state = Arc::clone(self);
         let app_for_thread = app.clone();
+        let dcsbios_memory = self.dcsbios_memory.clone();
 
         let join = thread::spawn(move || {
             state.push_log(
@@ -401,6 +609,11 @@ impl RuntimeState {
                 match socket.recv(&mut buf) {
                     Ok(size) => {
                         packets_in_window = packets_in_window.saturating_add(1);
+                        if let Err(error) =
+                            apply_dcsbios_export_packet(dcsbios_memory.clone(), buf[..size].to_vec())
+                        {
+                            state.push_log(&app_for_thread, "WARN", "dcsbios", error);
+                        }
                         let now = now_iso8601();
                         let preview = extract_ascii_preview(&buf[..size]);
                         let maybe_aircraft_name = preview.clone().and_then(extract_aircraft_name);
@@ -503,6 +716,7 @@ fn update_dcsbios_config(
     config: DcsBiosConnectionConfig,
 ) -> Result<AppSnapshot, String> {
     *state.inner.config.lock().unwrap() = config.clone();
+    state.inner.restart_endpoint_listeners(&app)?;
     state.inner.update_status(&app, |_| {});
     state.inner.push_log(
         &app,
@@ -562,10 +776,20 @@ fn save_device_endpoints(
     state: State<'_, AppState>,
     device_endpoints: Vec<DeviceEndpointConfig>,
 ) -> Result<AppSnapshot, String> {
-    persist_device_endpoints(&app, &device_endpoints)?;
+    let device_endpoints = sanitize_device_endpoints(device_endpoints);
+    persist_manager_state(
+        &app,
+        &PersistedManagerState {
+            device_endpoints: device_endpoints.clone(),
+            device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
+            role_mappings: state.inner.role_mappings.lock().unwrap().clone(),
+        },
+    )?;
+    state.inner.stop_endpoint_listeners(&app);
     state
         .inner
-        .set_device_endpoints(&app, sanitize_device_endpoints(device_endpoints));
+        .set_device_endpoints(&app, device_endpoints);
+    state.inner.restart_endpoint_listeners(&app)?;
     state.inner.push_log(
         &app,
         "INFO",
@@ -590,13 +814,16 @@ async fn refresh_devices(
     app: AppHandle,
     runtime: Arc<RuntimeState>,
 ) -> Result<Vec<ManagedDeviceSummary>, String> {
+    runtime.stop_endpoint_listeners(&app);
     let endpoints = runtime.device_endpoints.lock().unwrap().clone();
     let endpoints = sanitize_device_endpoints(endpoints);
     let count_endpoints = endpoints.len();
-    let devices =
+    let result =
         tauri::async_runtime::spawn_blocking(move || list_devices_for_endpoints(&endpoints))
             .await
-            .map_err(|error| format!("Failed to join device scan task: {error}"))??;
+            .map_err(|error| format!("Failed to join device scan task: {error}"))?;
+    runtime.restart_endpoint_listeners(&app)?;
+    let devices = result?;
 
     let count_devices = devices.len();
     let devices = runtime.set_devices(&app, devices);
@@ -608,7 +835,59 @@ async fn refresh_devices(
             "Refreshed devices from {count_endpoints} configured endpoint(s). {count_devices} device(s) available."
         ),
     );
+    runtime.restart_endpoint_listeners(&app)?;
     Ok(devices)
+}
+
+#[tauri::command]
+fn save_device_role_assignments(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    device_role_assignments: Vec<DeviceRoleAssignment>,
+) -> Result<AppSnapshot, String> {
+    let device_role_assignments = sanitize_device_role_assignments(device_role_assignments);
+    persist_manager_state(
+        &app,
+        &PersistedManagerState {
+            device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
+            device_role_assignments: device_role_assignments.clone(),
+            role_mappings: state.inner.role_mappings.lock().unwrap().clone(),
+        },
+    )?;
+    state
+        .inner
+        .set_device_role_assignments(&app, device_role_assignments);
+    state.inner.restart_endpoint_listeners(&app)?;
+    state.inner.push_log(
+        &app,
+        "INFO",
+        "devices",
+        "Saved device role assignments.",
+    );
+    Ok(state.inner.snapshot())
+}
+
+#[tauri::command]
+fn save_role_mappings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    role_mappings: Vec<RoleMappingConfig>,
+) -> Result<AppSnapshot, String> {
+    let role_mappings = sanitize_role_mappings(role_mappings);
+    persist_manager_state(
+        &app,
+        &PersistedManagerState {
+            device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
+            device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
+            role_mappings: role_mappings.clone(),
+        },
+    )?;
+    state.inner.set_role_mappings(&app, role_mappings);
+    state.inner.restart_endpoint_listeners(&app)?;
+    state
+        .inner
+        .push_log(&app, "INFO", "devices", "Saved role control mappings.");
+    Ok(state.inner.snapshot())
 }
 
 #[tauri::command]
@@ -631,6 +910,82 @@ fn sanitize_device_endpoints(
             endpoint
         })
         .collect()
+}
+
+fn sanitize_device_role_assignments(
+    device_role_assignments: Vec<DeviceRoleAssignment>,
+) -> Vec<DeviceRoleAssignment> {
+    let mut seen_roles = HashSet::new();
+    let mut seen_devices = HashSet::new();
+    let mut sanitized = Vec::new();
+
+    for assignment in device_role_assignments.into_iter().rev() {
+        let device_id = assignment.device_id.trim().to_string();
+        if device_id.is_empty() {
+            continue;
+        }
+
+        if !seen_roles.insert(assignment.role) || !seen_devices.insert(device_id.clone()) {
+            continue;
+        }
+
+        sanitized.push(DeviceRoleAssignment {
+            device_id,
+            role: assignment.role,
+        });
+    }
+
+    sanitized.reverse();
+    sanitized
+}
+
+fn sanitize_role_mappings(role_mappings: Vec<RoleMappingConfig>) -> Vec<RoleMappingConfig> {
+    let mut roles = HashSet::new();
+    let mut sanitized = Vec::new();
+
+    for config in role_mappings {
+        if !roles.insert(config.role) {
+            continue;
+        }
+
+        let mut seen_bindings = HashSet::new();
+        let mappings = config
+            .mappings
+            .into_iter()
+            .filter_map(|mapping| {
+                let identifier = mapping.action.identifier.trim().to_string();
+                let argument = mapping.action.argument.trim().to_string();
+                if identifier.is_empty() || argument.is_empty() {
+                    return None;
+                }
+
+                if !seen_bindings.insert((mapping.control_id, mapping.input_event)) {
+                    return None;
+                }
+
+                Some(RoleControlMapping {
+                    id: if mapping.id.trim().is_empty() {
+                        Uuid::new_v4().to_string()
+                    } else {
+                        mapping.id
+                    },
+                    control_id: mapping.control_id,
+                    input_event: mapping.input_event,
+                    action: DcsBiosMappedAction {
+                        identifier,
+                        argument,
+                    },
+                })
+            })
+            .collect();
+
+        sanitized.push(RoleMappingConfig {
+            role: config.role,
+            mappings,
+        });
+    }
+
+    sanitized
 }
 
 trait DeviceEndpointProvider {
@@ -866,7 +1221,9 @@ fn enumerate_children_via_hub(
                     };
 
                     if let FramePayload::Set(payload) = frame.payload() {
-                        if let Some(probed) = decode_device_hello(payload.as_slice(), None)? {
+                        if let Some(probed) =
+                            decode_device_hello(payload.as_slice(), Some(frame.from_address()))?
+                        {
                             write_frame(
                                 port,
                                 &Frame::new(
@@ -911,6 +1268,7 @@ fn unavailable_device_summary(
         protocol: "imcp+hcp".to_string(),
         assigned_address: None,
         device_kind: None,
+        device_kind_id: None,
         protocol_version: None,
         device_id: None,
         displays: None,
@@ -949,6 +1307,7 @@ fn probed_device_to_summary(
         protocol: "imcp+hcp".to_string(),
         assigned_address: device.assigned_address,
         device_kind: Some(format_device_kind(device.device_kind).to_string()),
+        device_kind_id: Some(format_device_kind_id(device.device_kind).to_string()),
         protocol_version: Some(device.protocol_version),
         device_id: Some(device.device_id.clone()),
         displays: Some(device.displays),
@@ -957,9 +1316,9 @@ fn probed_device_to_summary(
     }
 }
 
-fn persist_device_endpoints(
+fn persist_manager_state(
     app: &AppHandle,
-    device_endpoints: &[DeviceEndpointConfig],
+    manager_state: &PersistedManagerState,
 ) -> Result<(), String> {
     let file_path = manager_state_file_path(app)?;
     if let Some(parent) = file_path.parent() {
@@ -967,24 +1326,30 @@ fn persist_device_endpoints(
             .map_err(|error| format!("Failed to create config directory: {error}"))?;
     }
 
-    let body = serde_json::to_string_pretty(&PersistedManagerState {
-        device_endpoints: sanitize_device_endpoints(device_endpoints.to_vec()),
-    })
-    .map_err(|error| format!("Failed to serialize device endpoints: {error}"))?;
+    let body = serde_json::to_string_pretty(manager_state)
+        .map_err(|error| format!("Failed to serialize manager state: {error}"))?;
 
-    fs::write(file_path, body).map_err(|error| format!("Failed to write device endpoints: {error}"))
+    fs::write(file_path, body).map_err(|error| format!("Failed to write manager state: {error}"))
 }
 
-fn load_device_endpoints(app: &AppHandle) -> Result<Vec<DeviceEndpointConfig>, String> {
+fn load_manager_state(app: &AppHandle) -> Result<PersistedManagerState, String> {
     let file_path = manager_state_file_path(app)?;
     match fs::read_to_string(file_path) {
         Ok(contents) => {
             let persisted: PersistedManagerState = serde_json::from_str(&contents)
-                .map_err(|error| format!("Failed to parse device endpoints: {error}"))?;
-            Ok(sanitize_device_endpoints(persisted.device_endpoints))
+                .map_err(|error| format!("Failed to parse manager state: {error}"))?;
+            Ok(PersistedManagerState {
+                device_endpoints: sanitize_device_endpoints(persisted.device_endpoints),
+                device_role_assignments: sanitize_device_role_assignments(
+                    persisted.device_role_assignments,
+                ),
+                role_mappings: sanitize_role_mappings(persisted.role_mappings),
+            })
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(format!("Failed to read device endpoints: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(PersistedManagerState::default())
+        }
+        Err(error) => Err(format!("Failed to read manager state: {error}")),
     }
 }
 
@@ -1049,6 +1414,15 @@ fn format_device_kind(kind: DeviceKind) -> &'static str {
         DeviceKind::ButtonPanel => "Button Panel",
         DeviceKind::ImcpHub => "IMCP Hub",
         DeviceKind::Unknown(_) => "Unknown Device",
+    }
+}
+
+fn format_device_kind_id(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::UpperPanelDdi => "upper-panel-ddi",
+        DeviceKind::ButtonPanel => "button-panel",
+        DeviceKind::ImcpHub => "imcp-hub",
+        DeviceKind::Unknown(_) => "unknown",
     }
 }
 
@@ -1130,22 +1504,355 @@ fn send_command_to_dcsbios(config: &DcsBiosConnectionConfig, payload: &str) -> R
     }
 }
 
-fn normalize_command_request(request: DcsBiosCommandRequest) -> Result<String, String> {
-    let raw = request.raw_command.unwrap_or_default().trim().to_string();
-    let payload = if !raw.is_empty() {
-        raw
-    } else {
-        let control_id = request.control_id.unwrap_or_default().trim().to_string();
-        let argument = request.argument.unwrap_or_default().trim().to_string();
+fn encode_import_command(identifier: &str, argument: &str) -> Result<String, String> {
+    ImportCommand::new(identifier.trim(), argument.trim())
+        .map(|command| command.encode())
+        .map_err(|error| format!("Invalid DCS-BIOS command: {error:?}"))
+}
 
-        if control_id.is_empty() || argument.is_empty() {
-            return Err("Provide either rawCommand or both controlId and argument.".to_string());
-        }
+fn find_role_for_device(
+    device_role_assignments: &[DeviceRoleAssignment],
+    device_id: &str,
+) -> Option<DeviceRole> {
+    device_role_assignments
+        .iter()
+        .find(|assignment| assignment.device_id == device_id)
+        .map(|assignment| assignment.role)
+}
 
-        format!("{control_id} {argument}")
+fn find_mapping_action(
+    role_mappings: &[RoleMappingConfig],
+    role: DeviceRole,
+    control_id: u16,
+    input_event: NormalizedControlEvent,
+) -> Option<DcsBiosMappedAction> {
+    role_mappings
+        .iter()
+        .find(|config| config.role == role)
+        .and_then(|config| {
+            config
+                .mappings
+                .iter()
+                .find(|mapping| {
+                    mapping.control_id == control_id && mapping.input_event == input_event
+                })
+                .map(|mapping| mapping.action.clone())
+        })
+}
+
+fn control_supported_events(
+    device_kind: DeviceKind,
+    control_id: u16,
+) -> Option<&'static [NormalizedControlEvent]> {
+    match device_kind {
+        DeviceKind::UpperPanelDdi if control_id < 40 => Some(&[
+            NormalizedControlEvent::ButtonDown,
+            NormalizedControlEvent::ButtonUp,
+            NormalizedControlEvent::ButtonPushed,
+        ]),
+        _ => None,
+    }
+}
+
+fn apply_dcsbios_export_packet(
+    memory_map: Arc<Mutex<VecMemoryMap>>,
+    packet: Vec<u8>,
+) -> Result<(), String> {
+    let mut reader = DcsBiosImpl::new(
+        SinglePacketSource::new(packet),
+        SharedMemoryMap { inner: memory_map },
+    );
+    reader
+        .read_packet()
+        .map(|_| ())
+        .map_err(|error| format!("Failed to decode DCS-BIOS export packet: {error:?}"))
+}
+
+fn request_child_device_hello(
+    port: &mut dyn serialport::SerialPort,
+    hub_address: u8,
+) -> Result<(), String> {
+    let request = encode_set_packet(&AppPacketKind::ControlEvent(ControlEvent {
+        seq: 0,
+        control_id: CONTROL_ID_REQUEST_DEVICE_HELLO,
+        event: ControlValue::RequestDeviceHello,
+    }))
+    .map_err(|error| format!("Failed to encode RequestDeviceHello: {error:?}"))?;
+
+    write_frame(
+        port,
+        &Frame::new(
+            Address::Unicast(hub_address),
+            IMCP_MASTER_ADDRESS,
+            FramePayload::Set(request),
+        ),
+    )
+}
+
+fn process_control_event(
+    state: &Arc<RuntimeState>,
+    app: &AppHandle,
+    config: &DcsBiosConnectionConfig,
+    known_devices: &HashMap<u8, KnownRuntimeDevice>,
+    pressed_buttons: &mut HashSet<(String, u16)>,
+    device_role_assignments: &[DeviceRoleAssignment],
+    role_mappings: &[RoleMappingConfig],
+    source_address: u8,
+    control_event: &ControlEvent,
+) {
+    let Some(device) = known_devices.get(&source_address) else {
+        state.push_log(
+            app,
+            "WARN",
+            "devices",
+            format!(
+                "Ignoring control event from unknown IMCP address {} on control {}.",
+                source_address, control_event.control_id
+            ),
+        );
+        return;
     };
 
-    Ok(format!("{}\n", payload.trim_end_matches('\n')))
+    if control_supported_events(device.device_kind, control_event.control_id).is_none() {
+        state.push_log(
+            app,
+            "WARN",
+            "devices",
+            format!(
+                "Ignoring control {} from unsupported catalog device {}.",
+                control_event.control_id, device.device_id
+            ),
+        );
+        return;
+    }
+
+    let Some(role) = find_role_for_device(device_role_assignments, &device.device_id) else {
+        state.push_log(
+            app,
+            "WARN",
+            "devices",
+            format!(
+                "Ignoring control event for unassigned device {}.",
+                device.device_id
+            ),
+        );
+        return;
+    };
+
+    let mut events = Vec::new();
+    match control_event.event {
+        ControlValue::Button { pressed: true } => {
+            pressed_buttons.insert((device.device_id.clone(), control_event.control_id));
+            events.push(NormalizedControlEvent::ButtonDown);
+        }
+        ControlValue::Button { pressed: false } => {
+            events.push(NormalizedControlEvent::ButtonUp);
+            if pressed_buttons.remove(&(device.device_id.clone(), control_event.control_id)) {
+                events.push(NormalizedControlEvent::ButtonPushed);
+            }
+        }
+        ControlValue::EncoderDelta { .. } => events.push(NormalizedControlEvent::EncoderDelta),
+        ControlValue::Absolute { .. } => events.push(NormalizedControlEvent::AbsoluteChanged),
+        ControlValue::Toggle { state: true } => events.push(NormalizedControlEvent::ToggleOn),
+        ControlValue::Toggle { state: false } => events.push(NormalizedControlEvent::ToggleOff),
+        ControlValue::RequestDeviceHello => {}
+    }
+
+    for input_event in events {
+        let Some(action) =
+            find_mapping_action(role_mappings, role, control_event.control_id, input_event)
+        else {
+            continue;
+        };
+
+        match encode_import_command(&action.identifier, &action.argument)
+            .and_then(|payload| send_command_to_dcsbios(config, &payload))
+        {
+            Ok(()) => state.push_log(
+                app,
+                "SUCCESS",
+                "mapping",
+                format!(
+                    "Mapped {:?} control {} {:?} -> {} {}",
+                    role,
+                    control_event.control_id,
+                    input_event,
+                    action.identifier,
+                    action.argument
+                ),
+            ),
+            Err(error) => state.push_log(
+                app,
+                "ERROR",
+                "mapping",
+                format!(
+                    "Failed to send mapped DCS-BIOS command for device {}: {}",
+                    device.device_id, error
+                ),
+            ),
+        }
+    }
+}
+
+fn run_endpoint_listener(
+    state: Arc<RuntimeState>,
+    app: AppHandle,
+    endpoint: DeviceEndpointConfig,
+    device_role_assignments: Vec<DeviceRoleAssignment>,
+    role_mappings: Vec<RoleMappingConfig>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let config = state.config.lock().unwrap().clone();
+    let mut port = serialport::new(&endpoint.address, endpoint.baud_rate)
+        .timeout(IMCP_READ_TIMEOUT)
+        .open()
+        .map_err(|error| format!("Failed to open endpoint listener {}: {error}", endpoint.address))?;
+    let _ = port.clear(serialport::ClearBuffer::All);
+
+    let mut serial_buffer = [0u8; 64];
+    let mut rx_buffer = [0u8; 256];
+    let mut frame_buffer = [0u8; 256];
+    let mut parser = FrameParser::new(&mut rx_buffer, &mut frame_buffer);
+    let mut join_addresses: HashMap<u32, u8> = HashMap::new();
+    let mut next_address: u8 = 0x02;
+    let mut known_devices: HashMap<u8, KnownRuntimeDevice> = HashMap::new();
+    let mut requested_children = HashSet::new();
+    let mut pressed_buttons: HashSet<(String, u16)> = HashSet::new();
+
+    state.push_log(
+        &app,
+        "INFO",
+        "devices",
+        format!("Listening for HCP events on {}.", endpoint.address),
+    );
+
+    while !stop.load(Ordering::Relaxed) {
+        match port.read(&mut serial_buffer) {
+            Ok(bytes_read) if bytes_read > 0 => {
+                parser
+                    .write_data(&serial_buffer[..bytes_read])
+                    .map_err(|error| {
+                        format!(
+                            "Failed to parse IMCP frame on {}: {error:?}",
+                            endpoint.address
+                        )
+                    })?;
+
+                while let Some(frame) = parser.next_frame() {
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        Err(_) => continue,
+                    };
+
+                    match frame.payload() {
+                        FramePayload::Join(join_id) => {
+                            let address = *join_addresses.entry(*join_id).or_insert_with(|| {
+                                let current = next_address;
+                                next_address = next_address.saturating_add(1);
+                                current
+                            });
+                            write_frame(
+                                &mut *port,
+                                &Frame::new(
+                                    Address::Unicast(0x00),
+                                    IMCP_MASTER_ADDRESS,
+                                    FramePayload::SetAddress {
+                                        address,
+                                        id: *join_id,
+                                    },
+                                ),
+                            )?;
+                        }
+                        FramePayload::Set(payload) => {
+                            if let Some(probed) =
+                                decode_device_hello(payload.as_slice(), Some(frame.from_address()))?
+                            {
+                                write_frame(
+                                    &mut *port,
+                                    &Frame::new(
+                                        Address::Unicast(frame.from_address()),
+                                        IMCP_MASTER_ADDRESS,
+                                        FramePayload::Ack(frame.to_address().as_byte()),
+                                    ),
+                                )?;
+
+                                let source_address = frame.from_address();
+                                known_devices.insert(
+                                    source_address,
+                                    KnownRuntimeDevice {
+                                        device_id: probed.device_id.clone(),
+                                        device_kind: probed.device_kind,
+                                    },
+                                );
+
+                                if probed.device_kind == DeviceKind::ImcpHub
+                                    && requested_children.insert(source_address)
+                                {
+                                    request_child_device_hello(&mut *port, source_address)?;
+                                }
+
+                                continue;
+                            }
+
+                            let kind = match decode_set_packet(payload.as_slice()) {
+                                Ok(kind) => kind,
+                                Err(_) => continue,
+                            };
+
+                            if let AppPacketKind::ControlEvent(control_event) = kind {
+                                write_frame(
+                                    &mut *port,
+                                    &Frame::new(
+                                        Address::Unicast(frame.from_address()),
+                                        IMCP_MASTER_ADDRESS,
+                                        FramePayload::Ack(frame.to_address().as_byte()),
+                                    ),
+                                )?;
+                                process_control_event(
+                                    &state,
+                                    &app,
+                                    &config,
+                                    &known_devices,
+                                    &mut pressed_buttons,
+                                    &device_role_assignments,
+                                    &role_mappings,
+                                    frame.from_address(),
+                                    &control_event,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => {
+                return Err(format!(
+                    "Failed to read endpoint {} for control events: {error}",
+                    endpoint.address
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_command_request(request: DcsBiosCommandRequest) -> Result<String, String> {
+    let raw = request.raw_command.unwrap_or_default().trim().to_string();
+    if !raw.is_empty() {
+        return Ok(format!("{}\n", raw.trim_end_matches('\n')));
+    }
+
+    let control_id = request.control_id.unwrap_or_default().trim().to_string();
+    let argument = request.argument.unwrap_or_default().trim().to_string();
+
+    if control_id.is_empty() || argument.is_empty() {
+        return Err("Provide either rawCommand or both controlId and argument.".to_string());
+    }
+
+    encode_import_command(&control_id, &argument)
 }
 
 fn build_diagnostics(config: &DcsBiosConnectionConfig, status: &DcsBiosStatus) -> Vec<String> {
@@ -1239,10 +1946,15 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let state = app.state::<AppState>().inner.clone();
 
-            match load_device_endpoints(&app_handle) {
-                Ok(device_endpoints) => {
-                    state.set_device_endpoints(&app_handle, device_endpoints.clone());
-                    if !device_endpoints.is_empty() {
+            match load_manager_state(&app_handle) {
+                Ok(manager_state) => {
+                    state.set_device_endpoints(&app_handle, manager_state.device_endpoints.clone());
+                    state.set_device_role_assignments(
+                        &app_handle,
+                        manager_state.device_role_assignments.clone(),
+                    );
+                    state.set_role_mappings(&app_handle, manager_state.role_mappings.clone());
+                    if !manager_state.device_endpoints.is_empty() {
                         tauri::async_runtime::spawn({
                             let app_handle = app_handle.clone();
                             let state = state.clone();
@@ -1254,6 +1966,9 @@ pub fn run() {
                                 }
                             }
                         });
+                    }
+                    if let Err(error) = state.restart_endpoint_listeners(&app_handle) {
+                        state.push_log(&app_handle, "WARN", "devices", error);
                     }
                 }
                 Err(error) => state.push_log(&app_handle, "WARN", "devices", error),
@@ -1272,6 +1987,8 @@ pub fn run() {
             stop_dcsbios,
             send_dcsbios_command,
             save_device_endpoints,
+            save_device_role_assignments,
+            save_role_mappings,
             list_serial_ports,
             list_devices
         ])
@@ -1376,6 +2093,7 @@ mod tests {
             Some("hub:serial-hub:0000000000000001")
         );
         assert_eq!(summary.gateway_display_name.as_deref(), Some("IMCP Hub"));
+        assert_eq!(summary.device_kind_id.as_deref(), Some("button-panel"));
     }
 
     #[test]
@@ -1395,5 +2113,118 @@ mod tests {
         assert_eq!(summary.state, "error");
         assert_eq!(summary.endpoint_id, "serial-error");
         assert_eq!(summary.features.as_deref(), Some("open failed"));
+    }
+
+    #[test]
+    fn sanitize_role_assignments_keeps_one_device_per_role() {
+        let assignments = sanitize_device_role_assignments(vec![
+            DeviceRoleAssignment {
+                device_id: "A".to_string(),
+                role: DeviceRole::LeftDdi,
+            },
+            DeviceRoleAssignment {
+                device_id: "B".to_string(),
+                role: DeviceRole::LeftDdi,
+            },
+        ]);
+
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].device_id, "B");
+    }
+
+    #[test]
+    fn sanitize_role_mappings_deduplicates_control_event_bindings() {
+        let mappings = sanitize_role_mappings(vec![RoleMappingConfig {
+            role: DeviceRole::LeftDdi,
+            mappings: vec![
+                RoleControlMapping {
+                    id: String::new(),
+                    control_id: 3,
+                    input_event: NormalizedControlEvent::ButtonPushed,
+                    action: DcsBiosMappedAction {
+                        identifier: "AAA".to_string(),
+                        argument: "1".to_string(),
+                    },
+                },
+                RoleControlMapping {
+                    id: String::new(),
+                    control_id: 3,
+                    input_event: NormalizedControlEvent::ButtonPushed,
+                    action: DcsBiosMappedAction {
+                        identifier: "BBB".to_string(),
+                        argument: "2".to_string(),
+                    },
+                },
+            ],
+        }]);
+
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].mappings.len(), 1);
+        assert_eq!(mappings[0].mappings[0].action.identifier, "AAA");
+    }
+
+    #[test]
+    fn find_mapping_action_matches_role_control_and_event() {
+        let action = find_mapping_action(
+            &[RoleMappingConfig {
+                role: DeviceRole::RightDdi,
+                mappings: vec![RoleControlMapping {
+                    id: "1".to_string(),
+                    control_id: 7,
+                    input_event: NormalizedControlEvent::ButtonDown,
+                    action: DcsBiosMappedAction {
+                        identifier: "MASTER_ARM".to_string(),
+                        argument: "1".to_string(),
+                    },
+                }],
+            }],
+            DeviceRole::RightDdi,
+            7,
+            NormalizedControlEvent::ButtonDown,
+        )
+        .expect("action");
+
+        assert_eq!(action.identifier, "MASTER_ARM");
+    }
+
+    #[test]
+    fn import_command_rejects_invalid_identifier() {
+        let error = encode_import_command("BAD IDENT", "1").expect_err("must fail");
+        assert!(error.contains("Invalid DCS-BIOS command"));
+    }
+
+    #[test]
+    fn dcsbios_export_packet_updates_memory_map() {
+        let memory = Arc::new(Mutex::new(VecMemoryMap::default()));
+        let packet = vec![0x55, 0x55, 0x55, 0x55, 0x00, 0x10, 0x02, 0x00, 0x34, 0x12];
+
+        apply_dcsbios_export_packet(memory.clone(), packet).expect("packet must decode");
+
+        let binding = memory.lock().unwrap();
+        let bytes = binding
+            .read(0x1000..=0x1001)
+            .expect("bytes must exist");
+        assert_eq!(bytes, &[0x34, 0x12]);
+    }
+
+    #[test]
+    fn button_release_after_press_generates_pushed_event() {
+        let mut pressed_buttons = HashSet::new();
+        let device_id = "DEVICE-1".to_string();
+
+        pressed_buttons.insert((device_id.clone(), 5));
+        let released = pressed_buttons.remove(&(device_id, 5));
+
+        assert!(released);
+        assert_eq!(
+            [
+                NormalizedControlEvent::ButtonUp,
+                NormalizedControlEvent::ButtonPushed
+            ],
+            [
+                NormalizedControlEvent::ButtonUp,
+                NormalizedControlEvent::ButtonPushed
+            ]
+        );
     }
 }

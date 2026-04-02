@@ -11,9 +11,11 @@ import {
   type DcsBiosCommandRequest,
   type DcsBiosConnectionConfig,
   type DcsBiosStatus,
+  type DeviceRoleAssignment,
   type DeviceEndpointConfig,
   type ManagerLogEntry,
   type ManagedDeviceSummary,
+  type RoleMappingConfig,
 } from "@/lib/manager-types";
 
 export function useManagerState() {
@@ -44,6 +46,14 @@ export function useManagerState() {
 
   const mergeDeviceEndpoints = useCallback((deviceEndpoints: DeviceEndpointConfig[]) => {
     setSnapshot((current) => ({ ...current, deviceEndpoints }));
+  }, []);
+
+  const mergeDeviceRoleAssignments = useCallback((deviceRoleAssignments: DeviceRoleAssignment[]) => {
+    setSnapshot((current) => ({ ...current, deviceRoleAssignments }));
+  }, []);
+
+  const mergeRoleMappings = useCallback((roleMappings: RoleMappingConfig[]) => {
+    setSnapshot((current) => ({ ...current, roleMappings }));
   }, []);
 
   const refreshSnapshot = useCallback(async () => {
@@ -167,6 +177,44 @@ export function useManagerState() {
     }
   }, []);
 
+  const saveDeviceRoleAssignments = useCallback(
+    async (deviceRoleAssignments: DeviceRoleAssignment[]) => {
+      if (!isTauri()) {
+        setSnapshot((current) => ({ ...current, deviceRoleAssignments }));
+        return;
+      }
+
+      try {
+        const next = await runAction("save-device-role-assignments", () =>
+          invoke<AppSnapshot>("save_device_role_assignments", { deviceRoleAssignments }),
+        );
+        replaceSnapshot(next);
+      } catch (error) {
+        setRuntimeError(String(error));
+      }
+    },
+    [replaceSnapshot, runAction],
+  );
+
+  const saveRoleMappings = useCallback(
+    async (roleMappings: RoleMappingConfig[]) => {
+      if (!isTauri()) {
+        setSnapshot((current) => ({ ...current, roleMappings }));
+        return;
+      }
+
+      try {
+        const next = await runAction("save-role-mappings", () =>
+          invoke<AppSnapshot>("save_role_mappings", { roleMappings }),
+        );
+        replaceSnapshot(next);
+      } catch (error) {
+        setRuntimeError(String(error));
+      }
+    },
+    [replaceSnapshot, runAction],
+  );
+
   const sendCommand = useCallback(
     async (request: DcsBiosCommandRequest) => {
       if (!isTauri()) {
@@ -218,6 +266,16 @@ export function useManagerState() {
             mergeDeviceEndpoints(event.payload);
           }
         }),
+        listen<DeviceRoleAssignment[]>("device-role-assignments-changed", (event) => {
+          if (!disposed) {
+            mergeDeviceRoleAssignments(event.payload);
+          }
+        }),
+        listen<RoleMappingConfig[]>("role-mappings-changed", (event) => {
+          if (!disposed) {
+            mergeRoleMappings(event.payload);
+          }
+        }),
       ]);
 
       unlistenFns = listeners;
@@ -231,7 +289,16 @@ export function useManagerState() {
         void unlisten();
       }
     };
-  }, [mergeDeviceEndpoints, mergeDevices, mergeLog, mergeStatus, refreshSerialPorts, refreshSnapshot]);
+  }, [
+    mergeDeviceEndpoints,
+    mergeDeviceRoleAssignments,
+    mergeDevices,
+    mergeLog,
+    mergeRoleMappings,
+    mergeStatus,
+    refreshSerialPorts,
+    refreshSnapshot,
+  ]);
 
   return {
     snapshot,
@@ -243,6 +310,8 @@ export function useManagerState() {
     stopDcsBios,
     refreshDevices,
     saveDeviceEndpoints,
+    saveDeviceRoleAssignments,
+    saveRoleMappings,
     refreshSerialPorts,
     sendCommand,
     refreshSnapshot,

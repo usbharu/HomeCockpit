@@ -3,7 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { Cable, Cpu, Plus, RefreshCw, Trash2, Waypoints } from "lucide-react";
 
+import { deviceRoleLabels } from "@/lib/control-catalog";
 import type {
+  DeviceRole,
+  DeviceRoleAssignment,
   DeviceEndpointConfig,
   EndpointRoleHint,
   ManagedDeviceSummary,
@@ -12,10 +15,12 @@ import type {
 type DeviceSettingsProps = {
   devices: ManagedDeviceSummary[];
   deviceEndpoints: DeviceEndpointConfig[];
+  deviceRoleAssignments: DeviceRoleAssignment[];
   serialPorts: string[];
   busyAction: string | null;
   onRefresh: () => Promise<void>;
   onSaveEndpoints: (deviceEndpoints: DeviceEndpointConfig[]) => Promise<void>;
+  onSaveDeviceRoleAssignments: (deviceRoleAssignments: DeviceRoleAssignment[]) => Promise<void>;
 };
 
 type EndpointDraft = DeviceEndpointConfig;
@@ -41,10 +46,12 @@ const baudRateOptions = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 9216
 const DeviceSettings = ({
   devices,
   deviceEndpoints,
+  deviceRoleAssignments,
   serialPorts,
   busyAction,
   onRefresh,
   onSaveEndpoints,
+  onSaveDeviceRoleAssignments,
 }: DeviceSettingsProps) => {
   const [draftEndpoints, setDraftEndpoints] = useState<DeviceEndpointConfig[]>(deviceEndpoints);
   const [newEndpoint, setNewEndpoint] = useState<EndpointDraft>(defaultDraft);
@@ -83,6 +90,22 @@ const DeviceSettings = ({
 
   const removeEndpoint = (endpointId: string) => {
     setDraftEndpoints((current) => current.filter((endpoint) => endpoint.id !== endpointId));
+  };
+
+  const assignRole = async (deviceId: string | null, role: DeviceRole | "") => {
+    if (!deviceId) {
+      return;
+    }
+
+    const nextAssignments = deviceRoleAssignments.filter(
+      (entry) => entry.deviceId !== deviceId && entry.role !== role,
+    );
+
+    if (role) {
+      nextAssignments.push({ deviceId, role });
+    }
+
+    await onSaveDeviceRoleAssignments(nextAssignments);
   };
 
   const addEndpoint = () => {
@@ -389,6 +412,29 @@ const DeviceSettings = ({
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
                       <span>Device ID</span>
                       <span className="truncate pl-4 text-right">{device.deviceId ?? "Unknown"}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                      <span>Device Role</span>
+                      <select
+                        value={
+                          deviceRoleAssignments.find((entry) => entry.deviceId === device.deviceId)
+                            ?.role ?? ""
+                        }
+                        onChange={(event) =>
+                          void assignRole(
+                            device.deviceId,
+                            (event.target.value || "") as DeviceRole | "",
+                          )
+                        }
+                        className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500"
+                      >
+                        <option value="">未割当</option>
+                        {Object.entries(deviceRoleLabels).map(([role, label]) => (
+                          <option key={role} value={role}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
                       <span>Firmware</span>

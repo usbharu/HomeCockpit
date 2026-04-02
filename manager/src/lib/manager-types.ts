@@ -61,6 +61,40 @@ export type ManagedDeviceSummary = {
   displays: number | null;
   controls: number | null;
   features: string | null;
+  deviceKindId: string | null;
+};
+
+export type DeviceRole = "left-ddi" | "right-ddi";
+
+export type NormalizedControlEvent =
+  | "BUTTON_DOWN"
+  | "BUTTON_UP"
+  | "BUTTON_PUSHED"
+  | "ENCODER_DELTA"
+  | "ABSOLUTE_CHANGED"
+  | "TOGGLE_ON"
+  | "TOGGLE_OFF";
+
+export type DeviceRoleAssignment = {
+  deviceId: string;
+  role: DeviceRole;
+};
+
+export type DcsBiosMappedAction = {
+  identifier: string;
+  argument: string;
+};
+
+export type RoleControlMapping = {
+  id: string;
+  controlId: number;
+  inputEvent: NormalizedControlEvent;
+  action: DcsBiosMappedAction;
+};
+
+export type RoleMappingConfig = {
+  role: DeviceRole;
+  mappings: RoleControlMapping[];
 };
 
 export type AppSnapshot = {
@@ -69,6 +103,8 @@ export type AppSnapshot = {
   logs: ManagerLogEntry[];
   devices: ManagedDeviceSummary[];
   deviceEndpoints: DeviceEndpointConfig[];
+  deviceRoleAssignments: DeviceRoleAssignment[];
+  roleMappings: RoleMappingConfig[];
 };
 
 export type DcsBiosCommandRequest = {
@@ -98,4 +134,6 @@ export const defaultSnapshot: AppSnapshot = {
   logs: [],
   devices: [],
   deviceEndpoints: [],
+  deviceRoleAssignments: [],
+  roleMappings: [],
 };

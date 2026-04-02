@@ -25,5 +25,7 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 serialport = "4.7.3"
 socket2 = "0.5"
+uuid = { version = "1", features = ["v4"] }
+dcs-bios = { path = "../../dcs-bios-rs" }
 hcp = { path = "../../firmware/hcp" }
 imcp = { path = "../../imcp" }
