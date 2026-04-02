@@ -13,6 +13,18 @@ pub struct HeaplessMemoryMap {
     map: Vec<u8, 65535>,
 }
 
+impl HeaplessMemoryMap {
+    pub fn new() -> Self {
+        Self { map: Vec::new() }
+    }
+}
+
+impl Default for HeaplessMemoryMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryMap for HeaplessMemoryMap {
     fn write(&mut self, address: u16, data: &[u8]) -> Result<RangeInclusive<u16>, Error> {
         for (index, ele) in data.iter().enumerate() {
