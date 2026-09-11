@@ -18,6 +18,10 @@ pub const ESC: u8 = 0xFD;
 
 pub const ESC_XOR: u8 = 0x20;
 
+const UNASSIGNED_ADDRESS: u8 = 0x00;
+const MASTER_ADDRESS: u8 = 0x01;
+const BROADCAST_ADDRESS: u8 = 0xFF;
+
 #[cfg(feature = "defmt")]
 use defmt::{info, trace}; // Format トレイトもインポート
 
@@ -92,7 +96,10 @@ const MAX_SET_ADDRESS_RETRIES: u8 = 3;
 
 impl MasterState {
     fn allocate_address(&self) -> Result<u8, ProtocolError> {
-        if self.next_address == 0x00 || self.next_address == 0x01 || self.next_address == 0xFF {
+        if self.next_address == UNASSIGNED_ADDRESS
+            || self.next_address == MASTER_ADDRESS
+            || self.next_address == BROADCAST_ADDRESS
+        {
             return Err(ProtocolError::AddressPoolExhausted);
         }
         Ok(self.next_address)
@@ -121,7 +128,7 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         let frame_parser = FrameParser::new(rx_buffer, parser_frame_buffer);
         info!("new master registered");
         Self {
-            address: 0x01,
+            address: MASTER_ADDRESS,
             node_id: None,
             pending_frame: None,
             frame_parser,
@@ -144,7 +151,7 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         let frame_parser = FrameParser::new(rx_buffer, parser_frame_buffer);
         info!("new client registered");
         Self {
-            address: 0x00,
+            address: UNASSIGNED_ADDRESS,
             node_id: None,
             pending_frame: None,
             frame_parser,
@@ -155,15 +162,23 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
     }
 
     pub async fn send_join(&mut self, id: u32) -> Result<(), ImcpError<R::Error, S::Error>> {
-        if let NodeType::Client(_state) = &self.node_type {
-            self.node_id = Some(id);
-            self.node_type = NodeType::Client(ClientState::Joining(id));
-            let frame = Frame::new(Address::Unicast(0x01), self.address, FramePayload::Join(id));
-            self.tx_sender
-                .send(frame)
-                .await
-                .map_err(ImcpError::SendError)?;
+        if !matches!(&self.node_type, NodeType::Client(_)) {
+            return Err(ImcpError::ProtocolError(ProtocolError::InvalidFrameType(
+                FrameType::Join,
+            )));
         }
+
+        self.node_id = Some(id);
+        self.node_type = NodeType::Client(ClientState::Joining(id));
+        let frame = Frame::new(
+            Address::Unicast(MASTER_ADDRESS),
+            UNASSIGNED_ADDRESS,
+            FramePayload::Join(id),
+        );
+        self.tx_sender
+            .send(frame)
+            .await
+            .map_err(ImcpError::SendError)?;
         Ok(())
     }
 
@@ -237,14 +252,30 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
             None => return Ok(None),
         };
 
-        match frame.to_address() {
-            Address::Unicast(a) => {
-                if a != self.address {
-                    return Ok(None);
-                }
+        let addressed_to_self = match frame.to_address() {
+            Address::Broadcast => true,
+            Address::Unicast(a) if a == self.address => true,
+            // A SetAddress frame is deliberately sent to the unassigned address.
+            // Accept it after the first assignment as well so a lost ACK can be
+            // recovered by retransmitting the same frame.
+            Address::Unicast(a)
+                if a == UNASSIGNED_ADDRESS
+                    && matches!(frame.payload(), FramePayload::SetAddress { .. })
+                    && matches!(
+                        &self.node_type,
+                        NodeType::Client(ClientState::Joining(_) | ClientState::Ready(_))
+                    ) =>
+            {
+                true
             }
-            Address::Broadcast => (),
+            Address::Unicast(_) => false,
+        };
+        if !addressed_to_self {
+            return Ok(None);
         }
+
+        let from_address = frame.from_address();
+        let to_address = frame.to_address();
 
         match frame.payload_mut() {
             FramePayload::Ack(data) => {
@@ -262,7 +293,7 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
                     }
 
                     if !matches!(pending_frame.to_address(), Address::Broadcast)
-                        && frame.from_address() != expected_sender
+                        && from_address != expected_sender
                     {
                         return Err(ImcpError::ProtocolError(ProtocolError::UnexpectedAck));
                     }
@@ -285,6 +316,16 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
                     )));
                 }
 
+                if from_address != MASTER_ADDRESS {
+                    return Ok(None);
+                }
+
+                if *address <= MASTER_ADDRESS || *address == BROADCAST_ADDRESS {
+                    return Err(ImcpError::ProtocolError(ProtocolError::InvalidAddress(
+                        *address,
+                    )));
+                }
+
                 if let NodeType::Client(state) = &self.node_type {
                     match state {
                         ClientState::Joining(own_id) => {
@@ -298,9 +339,9 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
                             self.node_type = NodeType::Client(ClientState::Ready(own_id));
                             self.tx_sender
                                 .send(Frame::new(
-                                    Address::Unicast(frame.from_address()),
+                                    Address::Unicast(from_address),
                                     self.address,
-                                    FramePayload::Ack(frame.to_address().as_byte()),
+                                    FramePayload::Ack(to_address.as_byte()),
                                 ))
                                 .await
                                 .map_err(ImcpError::SendError)?;
@@ -313,9 +354,9 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
                             }
                             self.tx_sender
                                 .send(Frame::new(
-                                    Address::Unicast(frame.from_address()),
+                                    Address::Unicast(from_address),
                                     self.address,
-                                    FramePayload::Ack(frame.to_address().as_byte()),
+                                    FramePayload::Ack(to_address.as_byte()),
                                 ))
                                 .await
                                 .map_err(ImcpError::SendError)?;
@@ -329,6 +370,10 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
             }
             FramePayload::Join(id) => {
                 if let NodeType::Master(state) = &mut self.node_type {
+                    if from_address != UNASSIGNED_ADDRESS {
+                        return Ok(None);
+                    }
+
                     if let Some((pending_id, _)) = state.pending_assignment {
                         if pending_id == *id {
                             return Ok(Some(frame));
@@ -336,11 +381,10 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
                         return Ok(None);
                     }
 
-                    let assigned_address = state
-                        .allocate_address()
-                        .map_err(ImcpError::ProtocolError)?;
+                    let assigned_address =
+                        state.allocate_address().map_err(ImcpError::ProtocolError)?;
                     let frame = Frame::new(
-                        Address::Unicast(0x00),
+                        Address::Unicast(UNASSIGNED_ADDRESS),
                         self.address,
                         FramePayload::SetAddress {
                             address: assigned_address,
@@ -362,9 +406,9 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
             FramePayload::Set(_data) => {
                 self.tx_sender
                     .send(Frame::new(
-                        Address::Unicast(frame.from_address()),
+                        Address::Unicast(from_address),
                         self.address,
-                        FramePayload::Ack(frame.to_address().as_byte()),
+                        FramePayload::Ack(to_address.as_byte()),
                     ))
                     .await
                     .map_err(ImcpError::SendError)?;
@@ -372,7 +416,7 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
             FramePayload::Ping => {
                 self.tx_sender
                     .send(Frame::new(
-                        Address::Unicast(frame.from_address()),
+                        Address::Unicast(from_address),
                         self.address,
                         FramePayload::Pong,
                     ))
@@ -479,7 +523,7 @@ pub mod imcp_test {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used,clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
 
     use core::convert::Infallible;
@@ -521,7 +565,10 @@ mod tests {
         type Error = Infallible;
 
         async fn receive(&mut self) -> Result<Frame, Self::Error> {
-            Ok(self.frames.pop_front().expect("test receiver should have a frame"))
+            Ok(self
+                .frames
+                .pop_front()
+                .expect("test receiver should have a frame"))
         }
     }
 
@@ -603,14 +650,14 @@ mod tests {
 
         // H = 01 02 05 03 00 (Type=Data, Len=3)
         // P = 01 FE 03
-        // C = (01^02^05^03^00) ^ (01^FE^03) = 0x05 ^ 0xFD = 0xF8
-        // [H+P+C] = 01 02 05 03 00 | 01 FE 03 | F8
+        // C = (01^02^05^03^00) ^ (01^FE^03) = 0x05 ^ 0xFC = 0xF9
+        // [H+P+C] = 01 02 05 03 00 | 01 FE 03 | F9
 
         // Stuffing:
-        // 01 02 05 03 00 | 01 [FD DE] 03 | F8
+        // 01 02 05 03 00 | 01 [FD DE] 03 | F9
 
         // Final:
-        // FE [01 02 05 03 00 01 FD DE 03 F8] FF
+        // FE [01 02 05 03 00 01 FD DE 03 F9] FF
         let expected: &[u8] = &[
             SOF,
             0x01,
@@ -631,6 +678,20 @@ mod tests {
 
         assert_eq!(len, expected.len());
         assert_eq!(&buffer[..len], expected);
+    }
+
+    #[test]
+    fn test_encoded_len_matches_encoded_frame() {
+        let frame = Frame::new(
+            Address::Broadcast,
+            ESC,
+            FramePayload::Data(Vec::from_slice(&[SOF, 0x01, EOF, ESC]).expect("payload fits")),
+        );
+        let mut buffer = [0u8; MAX_ENCODED_FRAME_SIZE];
+
+        let encoded_len = frame.encode(&mut buffer).expect("frame fits");
+
+        assert_eq!(frame.encoded_len(), encoded_len);
     }
 
     // --- (Decode テスト (純粋フレーム)) ---
@@ -724,7 +785,7 @@ mod tests {
         // まだフレームは完成しない
         assert!(parser.next_frame().is_none());
 
-        // ... [SOF^ESC_XOR, 0x03, 0xF8, EOF]
+        // ... [SOF^ESC_XOR, 0x03, 0xF9, EOF]
         let part2: &[u8] = &[SOF ^ ESC_XOR, 0x03, 0xF9, EOF];
         parser.write_data(part2).unwrap();
 
@@ -736,6 +797,48 @@ mod tests {
             &FramePayload::Data(Vec::from_slice(expected_data).unwrap())
         );
         assert!(parser.next_frame().is_none());
+    }
+
+    #[test]
+    fn test_parser_rejects_invalid_escape_byte_and_resynchronizes() {
+        let frame = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ping);
+        let mut encoded = [0u8; MAX_ENCODED_FRAME_SIZE];
+        let encoded_len = frame.encode(&mut encoded).expect("frame fits");
+
+        let mut input = std::vec::Vec::from([SOF, ESC, 0x00, EOF]);
+        input.extend_from_slice(&encoded[..encoded_len]);
+
+        let mut rx_buf = [0u8; 64];
+        let mut frame_buf = [0u8; 64];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+        parser.write_data(&input).expect("input fits");
+
+        assert_eq!(
+            parser.next_frame(),
+            Some(Err(DecodeError::InvalidEscapeSequence))
+        );
+        assert_eq!(parser.next_frame(), Some(Ok(frame)));
+    }
+
+    #[test]
+    fn test_parser_rejects_escape_before_sof_and_resynchronizes() {
+        let frame = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ping);
+        let mut encoded = [0u8; MAX_ENCODED_FRAME_SIZE];
+        let encoded_len = frame.encode(&mut encoded).expect("frame fits");
+
+        let mut input = std::vec::Vec::from([SOF, ESC, SOF]);
+        input.extend_from_slice(&encoded[..encoded_len]);
+
+        let mut rx_buf = [0u8; 64];
+        let mut frame_buf = [0u8; 64];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+        parser.write_data(&input).expect("input fits");
+
+        assert_eq!(
+            parser.next_frame(),
+            Some(Err(DecodeError::InvalidEscapeSequence))
+        );
+        assert_eq!(parser.next_frame(), Some(Ok(frame)));
     }
 
     #[test]
@@ -825,6 +928,24 @@ mod tests {
             assert_eq!(join.to_address(), Address::Unicast(0x01));
             assert_eq!(join.from_address(), 0x00);
             assert_eq!(join.payload(), &FramePayload::Join(0x1234_5678));
+        });
+    }
+
+    #[test]
+    fn test_master_cannot_send_join() {
+        futures::executor::block_on(async {
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let receiver = TestReceiver::new(std::iter::empty());
+            let sender = TestSender::default();
+            let mut imcp = Imcp::new_master(receiver, sender, &mut rx_buf, &mut frame_buf);
+
+            assert_eq!(
+                imcp.send_join(0x1234_5678).await,
+                Err(ImcpError::ProtocolError(ProtocolError::InvalidFrameType(
+                    FrameType::Join,
+                )))
+            );
         });
     }
 
@@ -953,7 +1074,10 @@ mod tests {
             let frame = parser.next_frame().unwrap().unwrap();
 
             assert_eq!(frame.payload(), set.payload());
-            assert_eq!(imcp.pending_frame.as_ref().map(Frame::payload), Some(set.payload()));
+            assert_eq!(
+                imcp.pending_frame.as_ref().map(Frame::payload),
+                Some(set.payload())
+            );
             assert_eq!(imcp.tx_receiver.frames.lock().unwrap().len(), 0);
         });
     }
@@ -1189,9 +1313,42 @@ mod tests {
     }
 
     #[test]
+    fn test_read_tick_rejects_reserved_assigned_address() {
+        futures::executor::block_on(async {
+            let set_address = Frame::new(
+                Address::Unicast(0x00),
+                0x01,
+                FramePayload::SetAddress {
+                    address: 0x01,
+                    id: 0xABCD_EF01,
+                },
+            );
+            let encoded = encode_frame(&set_address);
+
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let receiver = TestReceiver::new(std::iter::empty());
+            let sender = TestSender::default();
+            let mut imcp = Imcp::new_client(receiver, sender, &mut rx_buf, &mut frame_buf);
+            imcp.send_join(0xABCD_EF01).await.unwrap();
+
+            assert_eq!(
+                imcp.read_tick(&encoded).await,
+                Err(ImcpError::ProtocolError(ProtocolError::InvalidAddress(
+                    0x01,
+                )))
+            );
+        });
+    }
+
+    #[test]
     fn test_read_tick_rejects_join_for_client() {
         futures::executor::block_on(async {
-            let join = Frame::new(Address::Unicast(0x00), 0x01, FramePayload::Join(0x55AA_55AA));
+            let join = Frame::new(
+                Address::Unicast(0x00),
+                0x01,
+                FramePayload::Join(0x55AA_55AA),
+            );
             let encoded = encode_frame(&join);
 
             let mut rx_buf = [0u8; 64];
@@ -1214,7 +1371,11 @@ mod tests {
     #[test]
     fn test_read_tick_returns_same_join_when_matching_pending_assignment_exists() {
         futures::executor::block_on(async {
-            let join = Frame::new(Address::Unicast(0x01), 0x00, FramePayload::Join(0x55AA_55AA));
+            let join = Frame::new(
+                Address::Unicast(0x01),
+                0x00,
+                FramePayload::Join(0x55AA_55AA),
+            );
             let encoded = encode_frame(&join);
 
             let mut rx_buf = [0u8; 64];
@@ -1254,7 +1415,11 @@ mod tests {
     #[test]
     fn test_read_tick_reports_address_pool_exhaustion_on_join() {
         futures::executor::block_on(async {
-            let join = Frame::new(Address::Unicast(0x01), 0x00, FramePayload::Join(0x1234_5678));
+            let join = Frame::new(
+                Address::Unicast(0x01),
+                0x00,
+                FramePayload::Join(0x1234_5678),
+            );
             let encoded = encode_frame(&join);
 
             let mut rx_buf = [0u8; 64];
