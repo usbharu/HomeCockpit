@@ -279,7 +279,13 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
 
         match frame.payload_mut() {
             FramePayload::Ack(data) => {
-                if self.pending_frame.is_none() && data != &0xFF {
+                // A broadcast ACK or a duplicate ACK for SetAddress (whose
+                // original destination is the unassigned address) may arrive
+                // after the corresponding frame has already been completed.
+                if self.pending_frame.is_none()
+                    && *data != BROADCAST_ADDRESS
+                    && *data != UNASSIGNED_ADDRESS
+                {
                     return Err(ImcpError::ProtocolError(ProtocolError::UnexpectedAck));
                 }
                 if let Some(pending_frame) = self.pending_frame.as_ref() {

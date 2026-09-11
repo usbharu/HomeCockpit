@@ -227,6 +227,34 @@ fn duplicate_set_address_is_reacked_on_os() {
 }
 
 #[test]
+fn duplicate_set_address_ack_is_ignored_by_master_on_os() {
+    block_on(async {
+        let mut harness = new_harness();
+        join_client(&mut harness, 0x1234_ABCD).await;
+
+        let duplicate_set_address = Frame::new(
+            Address::Unicast(0x00),
+            0x01,
+            FramePayload::SetAddress {
+                address: 0x02,
+                id: 0x1234_ABCD,
+            },
+        );
+        let mut raw = [0u8; 32];
+        let len = duplicate_set_address.encode(&mut raw).unwrap();
+
+        harness.client.read_tick(&raw[..len]).await.unwrap();
+        let ack_bytes = harness.client.write_tick().await.unwrap();
+
+        let master_seen = harness.master.read_tick(&ack_bytes).await.unwrap();
+        assert!(matches!(
+            master_seen,
+            Some(ref frame) if frame.payload() == &FramePayload::Ack(0x00)
+        ));
+    });
+}
+
+#[test]
 fn different_join_is_ignored_while_assignment_is_pending_on_os() {
     block_on(async {
         let mut harness = new_harness();
