@@ -1,9 +1,13 @@
 name: CI
 
 on:
-  push:
   pull_request:
-  workflow_dispatch:
+    branches:
+      - master
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 permissions:
   contents: read
