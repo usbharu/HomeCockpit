@@ -4,7 +4,7 @@
 mod packetization;
 mod transport;
 
-use defmt::{info, warn};
+use defmt::{debug, info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
 use embassy_rp::{
@@ -245,14 +245,14 @@ async fn imcp_task(
     loop {
         match select(imcp_transport.read(&mut read_buffer), imcp.write_tick()).await {
             embassy_futures::select::Either::First(ReadEvent::Data(s)) => {
+                debug!("imcp rx {} bytes: {:?}", s, &read_buffer[..s]);
                 let frame = imcp.read_tick(&read_buffer[..s]).await.unwrap_or_else(|e| {
-                    warn!("failed parse frame{:?}", e);
+                    warn!("failed parse frame {:?}, bytes: {:?}", e, &read_buffer[..s]);
                     None
                 });
                 if let Some(frame) = frame {
                     handle_incoming_frame(&tx_sender, &frame, device_identity.device_id);
                 }
-                info!("read: {}", s)
             }
             embassy_futures::select::Either::First(ReadEvent::UsbConnected) => {
                 info!("usb cdc connected; switching IMCP transport");

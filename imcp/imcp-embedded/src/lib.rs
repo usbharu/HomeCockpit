@@ -7,10 +7,7 @@ use embedded_hal::digital::OutputPin;
 use embedded_io_async::{ErrorType, Read, Write};
 
 #[cfg(feature = "embassy-rp")]
-use embassy_rp::{
-    pac::uart::Uart as RpUartRegs,
-    uart::BufferedUart,
-};
+use embassy_rp::{pac::uart::Uart as RpUartRegs, uart::BufferedUart};
 #[cfg(feature = "embassy-rp")]
 use embedded_io_async::{BufRead, ReadReady};
 
@@ -149,7 +146,7 @@ where
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ImcpEmbeddedError::Uart(ue) => write!(f, "UART Error {:?}", ue),
-            ImcpEmbeddedError::Pin(pe) => write!(f, "UART Error {:?}", pe),
+            ImcpEmbeddedError::Pin(pe) => write!(f, "Pin Error {:?}", pe),
         }
     }
 }
