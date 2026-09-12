@@ -7,7 +7,10 @@ edition = "2024"
 clap = { version = "4.5.51", features = ["derive"] }
 clap-num = "1.2.0"
 env_logger = "0.11.8"
+futures = "0.3.31"
+heapless = "0.9.1"
 hex = "0.4.3"
 imcp = { path = "../../imcp" }
 log = "0.4.28"
+serde_json = "1.0.145"
 serialport = "4.8.1"
