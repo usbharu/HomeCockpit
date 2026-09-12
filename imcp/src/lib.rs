@@ -961,11 +961,7 @@ mod tests {
 
             imcp.address = 0x22;
             imcp.node_id = Some(0x1111_2222);
-            imcp.pending_frame = Some(Frame::new(
-                Address::Unicast(0x01),
-                0x22,
-                FramePayload::Ping,
-            ));
+            imcp.pending_frame = Some(Frame::new(Address::Unicast(0x01), 0x22, FramePayload::Ping));
             imcp.node_type = NodeType::Client(ClientState::Ready(0x1111_2222));
             let stale_frame = Frame::new(Address::Unicast(0x22), 0x01, FramePayload::Ping);
             let mut stale_encoded = [0u8; 32];
