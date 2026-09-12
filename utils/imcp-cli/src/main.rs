@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum, command};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use imcp::{
     frame::{Address, Frame, FramePayload},
     parser::FrameParser,
@@ -118,7 +118,6 @@ fn handle_line(bytes: &[u8], frame_parser: &mut FrameParser) {
     while let Some(frame) = frame_parser.next_frame() {
         match frame {
             Ok(a) => {
-                
                 println!("{:?}", a);
             }
             Err(e) => {
@@ -151,7 +150,8 @@ fn watch(watch_args: WatchArgs) {
         Ok(mut port) => {
             log::info!(
                 "Watching port {} at {} baud...",
-                watch_args.port, watch_args.baud
+                watch_args.port,
+                watch_args.baud
             );
             let mut serial_buf: Vec<u8> = vec![0; 1024]; // 読み取りバッファ
 
@@ -275,4 +275,37 @@ fn pack(pack_args: PackArgs) {
     let he = hex::encode_upper(v);
 
     println!("{}", he);
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Commands, GlobalOptions, PackArgs};
+
+    #[test]
+    fn parses_pack_arguments_with_hex_addresses() {
+        let parsed = GlobalOptions::try_parse_from([
+            "imcp-cli",
+            "pack",
+            "--from",
+            "0x01",
+            "--to",
+            "0x02",
+            "--packet-type",
+            "ping",
+        ]);
+
+        assert!(matches!(
+            parsed,
+            Ok(GlobalOptions {
+                command: Commands::Pack(PackArgs {
+                    from: 0x01,
+                    to: Some(0x02),
+                    ..
+                }),
+                ..
+            })
+        ));
+    }
 }

@@ -1,0 +1,1039 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  PNPM_VERSION: 11.6.0
+
+jobs:
+  changes:
+    name: Detect changed projects
+    runs-on: ubuntu-latest
+    outputs:
+      all: ${{ steps.filter.outputs.all }}
+      imcp: ${{ steps.filter.outputs.imcp }}
+      utils: ${{ steps.filter.outputs.utils }}
+      dcs_bios: ${{ steps.filter.outputs.dcs_bios }}
+      firmware_hcp: ${{ steps.filter.outputs.firmware_hcp }}
+      firmware_base: ${{ steps.filter.outputs.firmware_base }}
+      firmware_upper: ${{ steps.filter.outputs.firmware_upper }}
+      manager_frontend: ${{ steps.filter.outputs.manager_frontend }}
+      manager_backend: ${{ steps.filter.outputs.manager_backend }}
+      kicad_upper: ${{ steps.filter.outputs.kicad_upper }}
+      kicad_button: ${{ steps.filter.outputs.kicad_button }}
+    steps:
+      - name: Checkout history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate project filters
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          all_changed=false
+          changed_files=""
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || -z "$HEAD_SHA" ]]; then
+            all_changed=true
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          elif [[ -z "$BEFORE_SHA" || "$BEFORE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+            all_changed=true
+          else
+            changed_files="$(git diff --name-only "$BEFORE_SHA" "$HEAD_SHA")"
+          fi
+
+          path_matches() {
+            local pattern="$1"
+            local path
+            while IFS= read -r path; do
+              if [[ -n "$path" ]]; then
+                case "$path" in
+                  $pattern)
+                    return 0
+                    ;;
+                esac
+              fi
+            done <<< "$changed_files"
+            return 1
+          }
+
+          if [[ "$all_changed" == true ]] || path_matches ".github/workflows/*" || path_matches ".github/scripts/*" || path_matches ".gitmodules"; then
+            all_changed=true
+          fi
+
+          changed() {
+            if [[ "$all_changed" == true ]]; then
+              echo true
+              return
+            fi
+
+            local pattern
+            for pattern in "$@"; do
+              if path_matches "$pattern"; then
+                echo true
+                return
+              fi
+            done
+            echo false
+          }
+
+          {
+            echo "all=$all_changed"
+            echo "imcp=$(changed 'imcp/*')"
+            echo "utils=$(changed 'utils/*' 'imcp/*')"
+            echo "dcs_bios=$(changed 'dcs-bios-rs/*')"
+            echo "firmware_hcp=$(changed 'firmware/hcp/*')"
+            echo "firmware_base=$(changed 'firmware/homecockpit_firmware_base/*' 'firmware/hcp/*' 'imcp/*')"
+            echo "firmware_upper=$(changed 'firmware/upper_panel_ddi/*' 'firmware/lib/*' 'firmware/hcp/*' 'firmware/homecockpit_firmware_base/*' 'imcp/*' '.gitmodules')"
+            echo "manager_frontend=$(changed 'manager/src/*' 'manager/public/*' 'manager/package.json' 'manager/package-lock.json' 'manager/pnpm-lock.yaml' 'manager/pnpm-workspace.yaml' 'manager/next.config.mjs' 'manager/postcss.config.mjs' 'manager/components.json' 'manager/tsconfig*')"
+            echo "manager_backend=$(changed 'manager/src-tauri/*' 'dcs-bios-rs/*' 'firmware/hcp/*' 'imcp/*')"
+            echo "kicad_upper=$(changed 'upper_panel_ddi/*' 'HomeCockpit.kicad_sym' 'Library.pretty/*')"
+            echo "kicad_button=$(changed 'upper_panel_ddi_button_panel/*' 'HomeCockpit.kicad_sym' 'Library.pretty/*')"
+          } >> "$GITHUB_OUTPUT"
+
+  imcp-test:
+    name: IMCP tests
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.imcp == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run IMCP workspace tests
+        working-directory: imcp
+        run: cargo test --locked --workspace
+
+  imcp-fmt:
+    name: IMCP rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.imcp == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check IMCP formatting
+        working-directory: imcp
+        run: cargo fmt --all -- --check
+
+  imcp-clippy:
+    name: IMCP Clippy
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.imcp == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run IMCP Clippy
+        working-directory: imcp
+        run: cargo clippy --locked --workspace --lib --bins -- -D warnings
+
+  utils-test:
+    name: IMCP CLI tests
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.utils == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run utility tests
+        working-directory: utils
+        run: cargo test --locked
+
+  utils-fmt:
+    name: IMCP CLI rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.utils == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check utility formatting
+        working-directory: utils
+        run: cargo fmt --all -- --check
+
+  utils-clippy:
+    name: IMCP CLI Clippy
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.utils == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run utility Clippy
+        working-directory: utils
+        run: cargo clippy --locked --workspace --bins -- -D warnings
+
+  dcs-bios-test:
+    name: DCS-BIOS tests
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.dcs_bios == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run DCS-BIOS tests
+        working-directory: dcs-bios-rs
+        run: cargo test --locked
+
+  dcs-bios-fmt:
+    name: DCS-BIOS rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.dcs_bios == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check DCS-BIOS formatting
+        working-directory: dcs-bios-rs
+        run: cargo fmt --all -- --check
+
+  dcs-bios-clippy:
+    name: DCS-BIOS Clippy
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.dcs_bios == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run DCS-BIOS Clippy
+        working-directory: dcs-bios-rs
+        run: cargo clippy --locked --lib --bins -- -D warnings
+
+  firmware-hcp-test:
+    name: HCP tests
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_hcp == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run HCP tests
+        working-directory: firmware/hcp
+        run: cargo test --locked
+
+  firmware-hcp-fmt:
+    name: HCP rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_hcp == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check HCP formatting
+        working-directory: firmware/hcp
+        run: cargo fmt --all -- --check
+
+  firmware-hcp-clippy:
+    name: HCP Clippy
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_hcp == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run HCP Clippy
+        working-directory: firmware/hcp
+        run: cargo clippy --locked --lib --bins -- -D warnings
+
+  firmware-base-test:
+    name: Firmware base tests
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_base == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run firmware base tests
+        working-directory: firmware/homecockpit_firmware_base
+        run: cargo test --locked
+
+  firmware-base-fmt:
+    name: Firmware base rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_base == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check firmware base formatting
+        working-directory: firmware/homecockpit_firmware_base
+        run: cargo fmt --all -- --check
+
+  firmware-base-clippy:
+    name: Firmware base Clippy
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_base == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run firmware base Clippy
+        working-directory: firmware/homecockpit_firmware_base
+        run: cargo clippy --locked --lib --bins -- -D warnings
+
+  firmware-upper-build:
+    name: Upper panel firmware build
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_upper == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+      - name: Build upper panel firmware
+        working-directory: firmware/upper_panel_ddi
+        run: cargo build --locked --release --target thumbv6m-none-eabi --bin upper_panel_ddi
+
+  firmware-upper-fmt:
+    name: Upper panel firmware rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_upper == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check upper panel firmware formatting
+        working-directory: firmware/upper_panel_ddi
+        run: cargo fmt --all -- --check
+
+  firmware-upper-clippy:
+    name: Upper panel firmware Clippy
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_upper == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: thumbv6m-none-eabi
+      - name: Run upper panel firmware Clippy
+        working-directory: firmware/upper_panel_ddi
+        run: cargo clippy --locked --target thumbv6m-none-eabi --bin upper_panel_ddi -- -D warnings
+
+  manager-frontend-build:
+    name: Manager frontend build
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.manager_frontend == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: manager/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        working-directory: manager
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend
+        working-directory: manager
+        run: pnpm run build
+
+  manager-backend-test:
+    name: Manager backend tests
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.manager_backend == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install --no-install-recommends -y
+          build-essential curl wget file libxdo-dev libssl-dev libudev-dev
+          libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run Manager backend tests
+        working-directory: manager/src-tauri
+        run: cargo test --locked
+
+  manager-backend-fmt:
+    name: Manager backend rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.manager_backend == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check Manager backend formatting
+        working-directory: manager/src-tauri
+        run: cargo fmt --all -- --check
+
+  manager-backend-clippy:
+    name: Manager backend Clippy
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.manager_backend == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install --no-install-recommends -y
+          build-essential curl wget file libxdo-dev libssl-dev libudev-dev
+          libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run Manager backend Clippy
+        working-directory: manager/src-tauri
+        run: cargo clippy --locked --lib --bins -- -D warnings
+
+  kicad-upper:
+    name: KiCad upper panel ${{ matrix.check }}
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.kicad_upper == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: upper-panel-erc
+            tool: sch
+            check: erc
+            input: upper_panel_ddi/upper_panel_ddi.kicad_sch
+          - name: upper-panel-drc
+            tool: pcb
+            check: drc
+            input: upper_panel_ddi/upper_panel_ddi.kicad_pcb
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run KiCad checks
+        shell: bash
+        env:
+          TOOL: ${{ matrix.tool }}
+          CHECK: ${{ matrix.check }}
+          INPUT: ${{ matrix.input }}
+          REPORT_NAME: ${{ matrix.name }}
+        run: |
+          set +e
+          report_dir="$RUNNER_TEMP/kicad"
+          mkdir -p "$report_dir"
+          chmod 777 "$report_dir"
+
+          docker run --rm \
+            -e HOME=/tmp/kicad-home \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -v "$report_dir:/reports" \
+            -w /workspace \
+            ghcr.io/kicad/kicad:9.0.9 \
+            kicad-cli "$TOOL" "$CHECK" \
+              --severity-all \
+              --output "/reports/${REPORT_NAME}.all.rpt" \
+              "/workspace/$INPUT"
+          full_status=$?
+
+          docker run --rm \
+            -e HOME=/tmp/kicad-home \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -v "$report_dir:/reports" \
+            -w /workspace \
+            ghcr.io/kicad/kicad:9.0.9 \
+            kicad-cli "$TOOL" "$CHECK" \
+              --format json \
+              --severity-error \
+              --exit-code-violations \
+              --output "/reports/${REPORT_NAME}.error.json" \
+              "/workspace/$INPUT"
+          error_status=$?
+
+          visualization_status=0
+          if [[ "$TOOL" == "pcb" ]]; then
+            docker run --rm \
+              -e HOME=/tmp/kicad-home \
+              -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              -v "$report_dir:/reports" \
+              -w /workspace \
+              ghcr.io/kicad/kicad:9.0.9 \
+              kicad-cli pcb export svg \
+                --page-size-mode 1 \
+                --exclude-drawing-sheet \
+                --mode-single \
+                --layers "F.Cu,B.Cu,F.Silkscreen,B.Silkscreen,Edge.Cuts" \
+                --output "/reports/${REPORT_NAME}.base.svg" \
+                "/workspace/$INPUT"
+            svg_status=$?
+
+            if [[ "$svg_status" -eq 0 && -s "$report_dir/${REPORT_NAME}.base.svg" ]]; then
+              python3 "$GITHUB_WORKSPACE/.github/scripts/render-kicad-violations.py" \
+                --kind pcb \
+                --svg "$report_dir/${REPORT_NAME}.base.svg" \
+                --report "$report_dir/${REPORT_NAME}.error.json" \
+                --text-report "$report_dir/${REPORT_NAME}.all.rpt" \
+                --output "$report_dir/${REPORT_NAME}.violations.svg" \
+                --summary "$report_dir/${REPORT_NAME}.summary.md" \
+                --source "$GITHUB_WORKSPACE/$INPUT" \
+                --title "$REPORT_NAME"
+              visualization_status=$?
+            else
+              visualization_status="$svg_status"
+            fi
+          else
+            schematic_dir="$report_dir/${REPORT_NAME}-schematic"
+            mkdir -p "$schematic_dir"
+            chmod 777 "$schematic_dir"
+            docker run --rm \
+              -e HOME=/tmp/kicad-home \
+              -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              -v "$report_dir:/reports" \
+              -w /workspace \
+              ghcr.io/kicad/kicad:9.0.9 \
+              kicad-cli sch export svg \
+                --exclude-drawing-sheet \
+                --output "/reports/${REPORT_NAME}-schematic" \
+                "/workspace/$INPUT"
+            svg_status=$?
+            schematic_svg="$(find "$schematic_dir" -type f -name '*.svg' -print -quit)"
+
+            if [[ "$svg_status" -eq 0 && -n "$schematic_svg" && -s "$report_dir/${REPORT_NAME}.error.json" ]]; then
+              cp "$schematic_svg" "$report_dir/${REPORT_NAME}.base.svg"
+              python3 "$GITHUB_WORKSPACE/.github/scripts/render-kicad-violations.py" \
+                --kind sch \
+                --svg "$report_dir/${REPORT_NAME}.base.svg" \
+                --report "$report_dir/${REPORT_NAME}.error.json" \
+                --text-report "$report_dir/${REPORT_NAME}.all.rpt" \
+                --output "$report_dir/${REPORT_NAME}.violations.svg" \
+                --summary "$report_dir/${REPORT_NAME}.summary.md" \
+                --title "$REPORT_NAME"
+              visualization_status=$?
+            else
+              visualization_status="$svg_status"
+            fi
+          fi
+
+          if [[ ! -f "$report_dir/${REPORT_NAME}.summary.md" ]]; then
+            printf '%s\n\n%s\n' \
+              "## KiCad visualization: ${REPORT_NAME}" \
+              "The annotated SVG could not be generated (status ${visualization_status})." \
+              > "$report_dir/${REPORT_NAME}.summary.md"
+          fi
+
+          printf 'full_status=%s\nerror_status=%s\n' "$full_status" "$error_status" \
+            > "$report_dir/${REPORT_NAME}.status"
+
+          failure=0
+          if [[ "$full_status" -ne 0 && "$full_status" -ne 5 ]]; then
+            failure="$full_status"
+          fi
+          if [[ "$error_status" -ne 0 ]]; then
+            failure="$error_status"
+          fi
+          exit "$failure"
+      - name: Upload KiCad reports
+        if: always()
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-reports
+          path: ${{ runner.temp }}/kicad/${{ matrix.name }}.*
+          if-no-files-found: warn
+      - name: Publish KiCad summary
+        if: always()
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          if [[ -f "${{ runner.temp }}/kicad/${{ matrix.name }}.summary.md" ]]; then
+            cat "${{ runner.temp }}/kicad/${{ matrix.name }}.summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' "KiCad visualization summary was not generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -n "${ARTIFACT_URL:-}" ]]; then
+            printf '\n[Download the KiCad reports and annotated image](%s)\n' "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  kicad-button:
+    name: KiCad button panel ${{ matrix.check }}
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.kicad_button == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: button-panel-erc
+            tool: sch
+            check: erc
+            input: upper_panel_ddi_button_panel/upper_panel_ddi_button_panel.kicad_sch
+          - name: button-panel-drc
+            tool: pcb
+            check: drc
+            input: upper_panel_ddi_button_panel/upper_panel_ddi_button_panel.kicad_pcb
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run KiCad checks
+        shell: bash
+        env:
+          TOOL: ${{ matrix.tool }}
+          CHECK: ${{ matrix.check }}
+          INPUT: ${{ matrix.input }}
+          REPORT_NAME: ${{ matrix.name }}
+        run: |
+          set +e
+          report_dir="$RUNNER_TEMP/kicad"
+          mkdir -p "$report_dir"
+          chmod 777 "$report_dir"
+
+          docker run --rm \
+            -e HOME=/tmp/kicad-home \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -v "$report_dir:/reports" \
+            -w /workspace \
+            ghcr.io/kicad/kicad:9.0.9 \
+            kicad-cli "$TOOL" "$CHECK" \
+              --severity-all \
+              --output "/reports/${REPORT_NAME}.all.rpt" \
+              "/workspace/$INPUT"
+          full_status=$?
+
+          docker run --rm \
+            -e HOME=/tmp/kicad-home \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -v "$report_dir:/reports" \
+            -w /workspace \
+            ghcr.io/kicad/kicad:9.0.9 \
+            kicad-cli "$TOOL" "$CHECK" \
+              --format json \
+              --severity-error \
+              --exit-code-violations \
+              --output "/reports/${REPORT_NAME}.error.json" \
+              "/workspace/$INPUT"
+          error_status=$?
+
+          visualization_status=0
+          if [[ "$TOOL" == "pcb" ]]; then
+            docker run --rm \
+              -e HOME=/tmp/kicad-home \
+              -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              -v "$report_dir:/reports" \
+              -w /workspace \
+              ghcr.io/kicad/kicad:9.0.9 \
+              kicad-cli pcb export svg \
+                --page-size-mode 1 \
+                --exclude-drawing-sheet \
+                --mode-single \
+                --layers "F.Cu,B.Cu,F.Silkscreen,B.Silkscreen,Edge.Cuts" \
+                --output "/reports/${REPORT_NAME}.base.svg" \
+                "/workspace/$INPUT"
+            svg_status=$?
+
+            if [[ "$svg_status" -eq 0 && -s "$report_dir/${REPORT_NAME}.base.svg" ]]; then
+              python3 "$GITHUB_WORKSPACE/.github/scripts/render-kicad-violations.py" \
+                --kind pcb \
+                --svg "$report_dir/${REPORT_NAME}.base.svg" \
+                --report "$report_dir/${REPORT_NAME}.error.json" \
+                --text-report "$report_dir/${REPORT_NAME}.all.rpt" \
+                --output "$report_dir/${REPORT_NAME}.violations.svg" \
+                --summary "$report_dir/${REPORT_NAME}.summary.md" \
+                --source "$GITHUB_WORKSPACE/$INPUT" \
+                --title "$REPORT_NAME"
+              visualization_status=$?
+            else
+              visualization_status="$svg_status"
+            fi
+          else
+            schematic_dir="$report_dir/${REPORT_NAME}-schematic"
+            mkdir -p "$schematic_dir"
+            chmod 777 "$schematic_dir"
+            docker run --rm \
+              -e HOME=/tmp/kicad-home \
+              -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              -v "$report_dir:/reports" \
+              -w /workspace \
+              ghcr.io/kicad/kicad:9.0.9 \
+              kicad-cli sch export svg \
+                --exclude-drawing-sheet \
+                --output "/reports/${REPORT_NAME}-schematic" \
+                "/workspace/$INPUT"
+            svg_status=$?
+            schematic_svg="$(find "$schematic_dir" -type f -name '*.svg' -print -quit)"
+
+            if [[ "$svg_status" -eq 0 && -n "$schematic_svg" && -s "$report_dir/${REPORT_NAME}.error.json" ]]; then
+              cp "$schematic_svg" "$report_dir/${REPORT_NAME}.base.svg"
+              python3 "$GITHUB_WORKSPACE/.github/scripts/render-kicad-violations.py" \
+                --kind sch \
+                --svg "$report_dir/${REPORT_NAME}.base.svg" \
+                --report "$report_dir/${REPORT_NAME}.error.json" \
+                --text-report "$report_dir/${REPORT_NAME}.all.rpt" \
+                --output "$report_dir/${REPORT_NAME}.violations.svg" \
+                --summary "$report_dir/${REPORT_NAME}.summary.md" \
+                --title "$REPORT_NAME"
+              visualization_status=$?
+            else
+              visualization_status="$svg_status"
+            fi
+          fi
+
+          if [[ ! -f "$report_dir/${REPORT_NAME}.summary.md" ]]; then
+            printf '%s\n\n%s\n' \
+              "## KiCad visualization: ${REPORT_NAME}" \
+              "The annotated SVG could not be generated (status ${visualization_status})." \
+              > "$report_dir/${REPORT_NAME}.summary.md"
+          fi
+
+          printf 'full_status=%s\nerror_status=%s\n' "$full_status" "$error_status" \
+            > "$report_dir/${REPORT_NAME}.status"
+
+          failure=0
+          if [[ "$full_status" -ne 0 && "$full_status" -ne 5 ]]; then
+            failure="$full_status"
+          fi
+          if [[ "$error_status" -ne 0 ]]; then
+            failure="$error_status"
+          fi
+          exit "$failure"
+      - name: Upload KiCad reports
+        if: always()
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-reports
+          path: ${{ runner.temp }}/kicad/${{ matrix.name }}.*
+          if-no-files-found: warn
+      - name: Publish KiCad summary
+        if: always()
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          if [[ -f "${{ runner.temp }}/kicad/${{ matrix.name }}.summary.md" ]]; then
+            cat "${{ runner.temp }}/kicad/${{ matrix.name }}.summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' "KiCad visualization summary was not generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -n "${ARTIFACT_URL:-}" ]]; then
+            printf '\n[Download the KiCad reports and annotated image](%s)\n' "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  kicad-pr-comment:
+    name: Comment KiCad violations on PR
+    needs:
+      - kicad-upper
+      - kicad-button
+    if: >-
+      ${{
+        always() &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (needs.kicad-upper.result == 'failure' || needs.kicad-button.result == 'failure')
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Download KiCad reports
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-reports'
+          path: ${{ runner.temp }}/kicad-reports
+          merge-multiple: true
+
+      - name: Create or update KiCad PR comment
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          REPORT_DIR: ${{ runner.temp }}/kicad-reports
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const marker = '<!-- homecockpit-kicad-ci -->';
+            const reportDir = process.env.REPORT_DIR;
+
+            function findSummaryFiles(directory) {
+              if (!fs.existsSync(directory)) {
+                return [];
+              }
+
+              const files = [];
+              for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                const entryPath = path.join(directory, entry.name);
+                if (entry.isDirectory()) {
+                  files.push(...findSummaryFiles(entryPath));
+                } else if (entry.isFile() && entry.name.endsWith('.summary.md')) {
+                  files.push(entryPath);
+                }
+              }
+              return files.sort();
+            }
+
+            function findImageFiles(directory) {
+              if (!fs.existsSync(directory)) {
+                return [];
+              }
+
+              const files = [];
+              for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                const entryPath = path.join(directory, entry.name);
+                if (entry.isDirectory()) {
+                  files.push(...findImageFiles(entryPath));
+                } else if (entry.isFile() && entry.name.endsWith('.violations.svg')) {
+                  files.push(entryPath);
+                }
+              }
+              return files.sort();
+            }
+
+            const summaries = findSummaryFiles(reportDir)
+              .map((file) => fs.readFileSync(file, 'utf8').trim())
+              .filter(Boolean);
+            let details = summaries.join('\n\n---\n\n');
+            if (!details) {
+              details = 'KiCad の詳細レポートを取得できませんでした。Actions の実行ログを確認してください。';
+            }
+
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              },
+            );
+            const reportArtifacts = artifacts
+              .filter((artifact) => artifact.name.endsWith('-reports'))
+              .sort((a, b) => a.name.localeCompare(b.name));
+            const artifactLinks = reportArtifacts.length
+              ? reportArtifacts
+                  .map((artifact) => `- [${artifact.name}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/artifacts/${artifact.id})`)
+                  .join('\n')
+              : '- KiCad artifact は利用できません。';
+
+            const issueNumber = context.payload.pull_request.number;
+            const imageFiles = findImageFiles(reportDir);
+            const imageLinks = [];
+            if (imageFiles.length > 0) {
+              const imageBranch = `ci-artifacts/pr-${issueNumber}`;
+              let branchHead;
+              try {
+                const ref = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `heads/${imageBranch}`,
+                });
+                branchHead = ref.data.object.sha;
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+              }
+
+              const tree = [];
+              for (const imageFile of imageFiles) {
+                const imageName = path.basename(imageFile);
+                const blob = await github.rest.git.createBlob({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  content: fs.readFileSync(imageFile).toString('base64'),
+                  encoding: 'base64',
+                });
+                tree.push({
+                  path: imageName,
+                  mode: '100644',
+                  type: 'blob',
+                  sha: blob.data.sha,
+                });
+              }
+
+              const treeResponse = await github.rest.git.createTree({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tree,
+              });
+              const commitResponse = await github.rest.git.createCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                message: `ci: update KiCad images for PR #${issueNumber}`,
+                tree: treeResponse.data.sha,
+                parents: [branchHead || context.payload.pull_request.base.sha],
+              });
+
+              if (branchHead) {
+                await github.rest.git.updateRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `heads/${imageBranch}`,
+                  sha: commitResponse.data.sha,
+                  force: true,
+                });
+              } else {
+                await github.rest.git.createRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `refs/heads/${imageBranch}`,
+                  sha: commitResponse.data.sha,
+                });
+              }
+
+              const imageBaseUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/raw/${commitResponse.data.sha}`;
+              for (const imageFile of imageFiles) {
+                const imageName = path.basename(imageFile);
+                const label = imageName.replace(/\.violations\.svg$/, '');
+                imageLinks.push(`![${label}](${imageBaseUrl}/${encodeURIComponent(imageName)})`);
+              }
+              core.info(`Published ${imageLinks.length} KiCad images to ${imageBranch}`);
+            }
+
+            const maxDetailsLength = 48000;
+            if (details.length > maxDetailsLength) {
+              details = `${details.slice(0, maxDetailsLength)}\n\n…詳細は artifact のレポートを確認してください。`;
+            }
+
+            const body = [
+              marker,
+              '## ❌ KiCad ERC/DRC check failed',
+              '',
+              'error-level の ERC/DRC 違反を検出しました。番号付きマーカー付きの基板・回路図 SVG と詳細レポートを artifact に保存しています。',
+              '',
+              `- [Actions の実行結果を開く](${runUrl})`,
+              imageLinks.length > 0 ? '### Annotated images' : '',
+              ...imageLinks,
+              '',
+              '- Reports / annotated images:',
+              artifactLinks,
+              '',
+              details,
+              '',
+              `_このコメントは CI run #${context.runNumber} が自動更新しています。_`,
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+            const existing = comments.find(
+              (comment) => comment.user?.login === 'github-actions[bot]' && comment.body?.includes(marker),
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`Updated KiCad PR comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+              });
+              core.info('Created KiCad PR comment');
+            }
+
+  ci-status:
+    name: CI status
+    if: always()
+    needs:
+      - changes
+      - imcp-test
+      - imcp-fmt
+      - imcp-clippy
+      - utils-test
+      - utils-fmt
+      - utils-clippy
+      - dcs-bios-test
+      - dcs-bios-fmt
+      - dcs-bios-clippy
+      - firmware-hcp-test
+      - firmware-hcp-fmt
+      - firmware-hcp-clippy
+      - firmware-base-test
+      - firmware-base-fmt
+      - firmware-base-clippy
+      - firmware-upper-build
+      - firmware-upper-fmt
+      - firmware-upper-clippy
+      - manager-frontend-build
+      - manager-backend-test
+      - manager-backend-fmt
+      - manager-backend-clippy
+      - kicad-upper
+      - kicad-button
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail when a required check failed or was cancelled
+        shell: bash
+        env:
+          RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          set -euo pipefail
+          if [[ "$RESULTS" == *failure* || "$RESULTS" == *cancelled* ]]; then
+            echo "One or more CI jobs failed or were cancelled: $RESULTS"
+            exit 1
+          fi
+          echo "All applicable CI jobs passed or were skipped: $RESULTS"
