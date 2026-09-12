@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Render KiCad ERC/DRC locations on top of a KiCad SVG export.
 
-KiCad's JSON reports contain coordinates in the design coordinate system while
-its SVG plotter emits millimetre-based page coordinates with the Y axis flipped.
-This script keeps the SVG as a vector image and appends a small, self-contained
-overlay, so the CI job does not need ImageMagick or another graphics package.
+KiCad's text reports contain the display-formatted design coordinates while its
+SVG plotter emits millimetre-based page coordinates with the Y axis flipped.
+This script uses those coordinates for the overlay and keeps the SVG as a
+vector image, so the CI job does not need ImageMagick or another graphics
+package.
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ from typing import Any
 NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 COORDINATE_RE = re.compile(
     rf"\((?:start|end|center|mid|at|xy)\s+({NUMBER})\s+({NUMBER})"
+)
+REPORT_POSITION_RE = re.compile(
+    rf"@\(\s*({NUMBER})\s*([A-Za-z]+)\s*,\s*({NUMBER})\s*([A-Za-z]+)\s*\)"
 )
 SVG_ROOT_RE = re.compile(r"<svg\b(?P<attributes>[^>]*)>", re.IGNORECASE | re.DOTALL)
 SVG_ATTRIBUTE_RE = re.compile(
@@ -241,7 +245,7 @@ def coordinate_to_svg(
     return svg_x, svg_y
 
 
-def collect_violations(report: dict[str, Any], kind: str) -> list[dict[str, Any]]:
+def collect_json_violations(report: dict[str, Any], kind: str) -> list[dict[str, Any]]:
     raw: list[tuple[str, dict[str, Any]]] = []
     if kind == "pcb":
         for section in ("violations", "unconnected_items", "schematic_parity"):
@@ -282,6 +286,76 @@ def collect_violations(report: dict[str, Any], kind: str) -> list[dict[str, Any]
         )
 
     return records
+
+
+def collect_text_violations(text: str, kind: str) -> list[dict[str, Any]]:
+    """Read error positions from KiCad's human-readable report.
+
+    KiCad 9.0.9 writes ERC JSON coordinates with a different scale from its
+    text report.  The text report is also useful as a version-independent
+    fallback because it is the same report a developer sees in the CLI.
+    """
+
+    header_re = re.compile(r"^\s*\[([^\]]+)\]:\s*(.*?)\s*$")
+    severity_re = re.compile(r";\s*(error|warning|exclusion)\s*$", re.IGNORECASE)
+    current: dict[str, Any] | None = None
+    records: list[dict[str, Any]] = []
+
+    def finish() -> None:
+        if current is None or str(current.get("severity", "")).lower() != "error":
+            return
+        records.append(current.copy())
+
+    for line in text.splitlines():
+        header = header_re.match(line)
+        if header is not None:
+            finish()
+            violation_type = header.group(1)
+            current = {
+                "section": (
+                    "violations"
+                    if kind == "sch"
+                    else (
+                        "unconnected_items"
+                        if violation_type == "unconnected_items"
+                        else "violations"
+                    )
+                ),
+                "type": violation_type,
+                "description": header.group(2),
+                "points": [],
+                "severity": None,
+            }
+            continue
+
+        if current is None:
+            continue
+
+        severity = severity_re.search(line)
+        if severity is not None:
+            current["severity"] = severity.group(1).lower()
+
+        position = REPORT_POSITION_RE.search(line)
+        if position is not None:
+            x, x_unit, y, y_unit = position.groups()
+            if x_unit.lower() == y_unit.lower():
+                current["points"].append((float(x), float(y)))
+
+    finish()
+    return records
+
+
+def collect_violations(
+    report: dict[str, Any], kind: str, text_report: str | None
+) -> list[dict[str, Any]]:
+    json_records = collect_json_violations(report, kind)
+    if text_report is None:
+        return json_records
+
+    text_records = collect_text_violations(text_report, kind)
+    if text_records and len(text_records) == len(json_records):
+        return text_records
+    return json_records
 
 
 def markdown_cell(value: str) -> str:
@@ -432,6 +506,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
+    parser.add_argument("--text-report", type=Path)
     parser.add_argument("--source", type=Path)
     parser.add_argument("--title", required=True)
     return parser.parse_args()
@@ -442,11 +517,16 @@ def main() -> int:
     try:
         svg_text = args.svg.read_text(encoding="utf-8")
         report = json.loads(args.report.read_text(encoding="utf-8"))
+        text_report = (
+            args.text_report.read_text(encoding="utf-8")
+            if args.text_report is not None and args.text_report.is_file()
+            else None
+        )
         svg = parse_svg(svg_text)
         svg_text, svg = crop_to_edge_cuts(
             svg_text, svg, args.source if args.kind == "pcb" else None
         )
-        records = collect_violations(report, args.kind)
+        records = collect_violations(report, args.kind, text_report)
         overlay = make_overlay(svg, args.title, args.kind, records, report)
         annotated = annotate_svg(svg_text, svg, overlay)
         args.output.parent.mkdir(parents=True, exist_ok=True)

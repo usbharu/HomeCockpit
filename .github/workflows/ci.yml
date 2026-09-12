@@ -523,6 +523,7 @@ jobs:
                 --kind pcb \
                 --svg "$report_dir/${REPORT_NAME}.base.svg" \
                 --report "$report_dir/${REPORT_NAME}.error.json" \
+                --text-report "$report_dir/${REPORT_NAME}.all.rpt" \
                 --output "$report_dir/${REPORT_NAME}.violations.svg" \
                 --summary "$report_dir/${REPORT_NAME}.summary.md" \
                 --source "$GITHUB_WORKSPACE/$INPUT" \
@@ -554,6 +555,7 @@ jobs:
                 --kind sch \
                 --svg "$report_dir/${REPORT_NAME}.base.svg" \
                 --report "$report_dir/${REPORT_NAME}.error.json" \
+                --text-report "$report_dir/${REPORT_NAME}.all.rpt" \
                 --output "$report_dir/${REPORT_NAME}.violations.svg" \
                 --summary "$report_dir/${REPORT_NAME}.summary.md" \
                 --title "$REPORT_NAME"
@@ -683,6 +685,7 @@ jobs:
                 --kind pcb \
                 --svg "$report_dir/${REPORT_NAME}.base.svg" \
                 --report "$report_dir/${REPORT_NAME}.error.json" \
+                --text-report "$report_dir/${REPORT_NAME}.all.rpt" \
                 --output "$report_dir/${REPORT_NAME}.violations.svg" \
                 --summary "$report_dir/${REPORT_NAME}.summary.md" \
                 --source "$GITHUB_WORKSPACE/$INPUT" \
@@ -714,6 +717,7 @@ jobs:
                 --kind sch \
                 --svg "$report_dir/${REPORT_NAME}.base.svg" \
                 --report "$report_dir/${REPORT_NAME}.error.json" \
+                --text-report "$report_dir/${REPORT_NAME}.all.rpt" \
                 --output "$report_dir/${REPORT_NAME}.violations.svg" \
                 --summary "$report_dir/${REPORT_NAME}.summary.md" \
                 --title "$REPORT_NAME"
