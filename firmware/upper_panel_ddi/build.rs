@@ -13,14 +13,12 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Put `memory.x` in our output directory and ensure it's
     // on the linker search path.
-    let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);
     File::create(out.join("memory.x"))
-        .unwrap()
-        .write_all(include_bytes!("memory.x"))
-        .unwrap();
+        .and_then(|mut file| file.write_all(include_bytes!("memory.x")))?;
     println!("cargo:rustc-link-search={}", out.display());
 
     // By default, Cargo will re-run a build script whenever
@@ -33,4 +31,6 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
     println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
+
+    Ok(())
 }

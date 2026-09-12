@@ -564,7 +564,7 @@ impl RuntimeState {
             ),
         );
 
-        let socket = bind_export_socket(&config).map_err(|error| {
+        let socket = bind_export_socket(&config).inspect_err(|error| {
             self.set_status(
                 &app,
                 DcsBiosStatus {
@@ -580,7 +580,6 @@ impl RuntimeState {
                 Some(&config),
             );
             self.push_log(&app, "ERROR", "dcsbios", error.clone());
-            error
         })?;
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -609,9 +608,10 @@ impl RuntimeState {
                 match socket.recv(&mut buf) {
                     Ok(size) => {
                         packets_in_window = packets_in_window.saturating_add(1);
-                        if let Err(error) =
-                            apply_dcsbios_export_packet(dcsbios_memory.clone(), buf[..size].to_vec())
-                        {
+                        if let Err(error) = apply_dcsbios_export_packet(
+                            dcsbios_memory.clone(),
+                            buf[..size].to_vec(),
+                        ) {
                             state.push_log(&app_for_thread, "WARN", "dcsbios", error);
                         }
                         let now = now_iso8601();
@@ -655,7 +655,7 @@ impl RuntimeState {
                         let stale = status
                             .last_seen_at
                             .as_ref()
-                            .and_then(|_| status.last_packet_at.as_ref())
+                            .and(status.last_packet_at.as_ref())
                             .is_some();
                         if stale && last_rate_tick.elapsed() >= Duration::from_secs(1) {
                             last_rate_tick = Instant::now();
@@ -786,9 +786,7 @@ fn save_device_endpoints(
         },
     )?;
     state.inner.stop_endpoint_listeners(&app);
-    state
-        .inner
-        .set_device_endpoints(&app, device_endpoints);
+    state.inner.set_device_endpoints(&app, device_endpoints);
     state.inner.restart_endpoint_listeners(&app)?;
     state.inner.push_log(
         &app,
@@ -858,12 +856,9 @@ fn save_device_role_assignments(
         .inner
         .set_device_role_assignments(&app, device_role_assignments);
     state.inner.restart_endpoint_listeners(&app)?;
-    state.inner.push_log(
-        &app,
-        "INFO",
-        "devices",
-        "Saved device role assignments.",
-    );
+    state
+        .inner
+        .push_log(&app, "INFO", "devices", "Saved device role assignments.");
     Ok(state.inner.snapshot())
 }
 
@@ -1589,20 +1584,24 @@ fn request_child_device_hello(
     )
 }
 
+struct ControlEventContext<'a> {
+    state: &'a RuntimeState,
+    app: &'a AppHandle,
+    config: &'a DcsBiosConnectionConfig,
+    known_devices: &'a HashMap<u8, KnownRuntimeDevice>,
+    device_role_assignments: &'a [DeviceRoleAssignment],
+    role_mappings: &'a [RoleMappingConfig],
+}
+
 fn process_control_event(
-    state: &Arc<RuntimeState>,
-    app: &AppHandle,
-    config: &DcsBiosConnectionConfig,
-    known_devices: &HashMap<u8, KnownRuntimeDevice>,
+    context: &ControlEventContext<'_>,
     pressed_buttons: &mut HashSet<(String, u16)>,
-    device_role_assignments: &[DeviceRoleAssignment],
-    role_mappings: &[RoleMappingConfig],
     source_address: u8,
     control_event: &ControlEvent,
 ) {
-    let Some(device) = known_devices.get(&source_address) else {
-        state.push_log(
-            app,
+    let Some(device) = context.known_devices.get(&source_address) else {
+        context.state.push_log(
+            context.app,
             "WARN",
             "devices",
             format!(
@@ -1614,8 +1613,8 @@ fn process_control_event(
     };
 
     if control_supported_events(device.device_kind, control_event.control_id).is_none() {
-        state.push_log(
-            app,
+        context.state.push_log(
+            context.app,
             "WARN",
             "devices",
             format!(
@@ -1626,9 +1625,10 @@ fn process_control_event(
         return;
     }
 
-    let Some(role) = find_role_for_device(device_role_assignments, &device.device_id) else {
-        state.push_log(
-            app,
+    let Some(role) = find_role_for_device(context.device_role_assignments, &device.device_id)
+    else {
+        context.state.push_log(
+            context.app,
             "WARN",
             "devices",
             format!(
@@ -1659,30 +1659,29 @@ fn process_control_event(
     }
 
     for input_event in events {
-        let Some(action) =
-            find_mapping_action(role_mappings, role, control_event.control_id, input_event)
-        else {
+        let Some(action) = find_mapping_action(
+            context.role_mappings,
+            role,
+            control_event.control_id,
+            input_event,
+        ) else {
             continue;
         };
 
         match encode_import_command(&action.identifier, &action.argument)
-            .and_then(|payload| send_command_to_dcsbios(config, &payload))
+            .and_then(|payload| send_command_to_dcsbios(context.config, &payload))
         {
-            Ok(()) => state.push_log(
-                app,
+            Ok(()) => context.state.push_log(
+                context.app,
                 "SUCCESS",
                 "mapping",
                 format!(
                     "Mapped {:?} control {} {:?} -> {} {}",
-                    role,
-                    control_event.control_id,
-                    input_event,
-                    action.identifier,
-                    action.argument
+                    role, control_event.control_id, input_event, action.identifier, action.argument
                 ),
             ),
-            Err(error) => state.push_log(
-                app,
+            Err(error) => context.state.push_log(
+                context.app,
                 "ERROR",
                 "mapping",
                 format!(
@@ -1706,7 +1705,12 @@ fn run_endpoint_listener(
     let mut port = serialport::new(&endpoint.address, endpoint.baud_rate)
         .timeout(IMCP_READ_TIMEOUT)
         .open()
-        .map_err(|error| format!("Failed to open endpoint listener {}: {error}", endpoint.address))?;
+        .map_err(|error| {
+            format!(
+                "Failed to open endpoint listener {}: {error}",
+                endpoint.address
+            )
+        })?;
     let _ = port.clear(serialport::ClearBuffer::All);
 
     let mut serial_buffer = [0u8; 64];
@@ -1808,14 +1812,17 @@ fn run_endpoint_listener(
                                         FramePayload::Ack(frame.to_address().as_byte()),
                                     ),
                                 )?;
+                                let control_context = ControlEventContext {
+                                    state: state.as_ref(),
+                                    app: &app,
+                                    config: &config,
+                                    known_devices: &known_devices,
+                                    device_role_assignments: &device_role_assignments,
+                                    role_mappings: &role_mappings,
+                                };
                                 process_control_event(
-                                    &state,
-                                    &app,
-                                    &config,
-                                    &known_devices,
+                                    &control_context,
                                     &mut pressed_buttons,
-                                    &device_role_assignments,
-                                    &role_mappings,
                                     frame.from_address(),
                                     &control_event,
                                 );
@@ -2201,9 +2208,7 @@ mod tests {
         apply_dcsbios_export_packet(memory.clone(), packet).expect("packet must decode");
 
         let binding = memory.lock().unwrap();
-        let bytes = binding
-            .read(0x1000..=0x1001)
-            .expect("bytes must exist");
+        let bytes = binding.read(0x1000..=0x1001).expect("bytes must exist");
         assert_eq!(bytes, &[0x34, 0x12]);
     }
 

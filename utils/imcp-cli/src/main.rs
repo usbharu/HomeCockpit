@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum, command};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use imcp::{
     frame::{Address, Frame, FramePayload},
     parser::FrameParser,
@@ -118,7 +118,6 @@ fn handle_line(bytes: &[u8], frame_parser: &mut FrameParser) {
     while let Some(frame) = frame_parser.next_frame() {
         match frame {
             Ok(a) => {
-                
                 println!("{:?}", a);
             }
             Err(e) => {
@@ -151,7 +150,8 @@ fn watch(watch_args: WatchArgs) {
         Ok(mut port) => {
             log::info!(
                 "Watching port {} at {} baud...",
-                watch_args.port, watch_args.baud
+                watch_args.port,
+                watch_args.baud
             );
             let mut serial_buf: Vec<u8> = vec![0; 1024]; // 読み取りバッファ
 
