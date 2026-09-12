@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 
+mod packetization;
+mod transport;
+
 use defmt::{debug, info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
@@ -8,8 +11,9 @@ use embassy_rp::{
     Peri, bind_interrupts,
     gpio::{Input, Level, Output},
     pac::UART0,
-    peripherals::UART0,
+    peripherals::{UART0, USB},
     uart::{BufferedUart, Config},
+    usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler},
 };
 #[cfg(feature = "rp2040")]
 use embassy_rp::{
@@ -25,7 +29,8 @@ use embassy_rp::{
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, mutex::Mutex};
 use embassy_time::Timer;
-use embedded_io_async::{Read, Write};
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcState};
+use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
 use hcp::{Capabilities, DeviceKind, Version};
 use homecockpit_firmware_base::{
     DeviceDescriptor, DeviceRuntimeState, FEATURE_CONTROL_EVENTS, build_button_control_event,
@@ -36,9 +41,13 @@ use imcp::{Imcp, frame::Frame};
 use imcp_embassy::{EmbassyReceiver, EmbassySender, new};
 use imcp_embedded::{ImcpEmbedded, RpUartCarrierSense};
 use static_cell::StaticCell;
+use transport::{ImcpTransport, ReadEvent, USB_MAX_PACKET_SIZE, WriteEvent};
 use {defmt_rtt as _, panic_probe as _};
 
 const BAUD_RATE: u32 = 115200;
+// Development-only USB identity. Replace before shipping production firmware.
+const USB_VENDOR_ID: u16 = 0xc0de;
+const USB_PRODUCT_ID: u16 = 0xcafe;
 const CONTROL_MATRIX_COLUMNS: u8 = 5;
 const CONTROL_MATRIX_ROWS: u8 = 8;
 #[cfg(feature = "rp2040")]
@@ -52,9 +61,15 @@ static FRAME_CHANNEL: Channel<CriticalSectionRawMutex, Frame, 5> = Channel::new(
 
 static RX_BUFFER_CELL: StaticCell<[u8; 128]> = StaticCell::new();
 static PARSER_FRAME_BUFFER_CELL: StaticCell<[u8; 64]> = StaticCell::new();
+static USB_RX_BUFFER_CELL: StaticCell<[u8; USB_MAX_PACKET_SIZE]> = StaticCell::new();
+static USB_CONFIG_DESCRIPTOR_CELL: StaticCell<[u8; 256]> = StaticCell::new();
+static USB_BOS_DESCRIPTOR_CELL: StaticCell<[u8; 256]> = StaticCell::new();
+static USB_CONTROL_BUFFER_CELL: StaticCell<[u8; 64]> = StaticCell::new();
+static CDC_STATE_CELL: StaticCell<CdcState> = StaticCell::new();
 
 bind_interrupts!(struct Irqs {
     UART0_IRQ => embassy_rp::uart::BufferedInterruptHandler<UART0>;
+    USBCTRL_IRQ => UsbInterruptHandler<USB>;
     #[cfg(feature = "rp235x")]
     TRNG_IRQ => TrngInterruptHandler<TRNG>;
 });
@@ -75,6 +90,37 @@ async fn main(spawner: Spawner) {
     let device_identity = initialize_device_identity(p.FLASH);
     #[cfg(feature = "rp235x")]
     let device_identity = initialize_device_identity(p.FLASH, p.TRNG);
+
+    let usb_driver = UsbDriver::new(p.USB, Irqs);
+    let mut usb_config = UsbConfig::new(USB_VENDOR_ID, USB_PRODUCT_ID);
+    usb_config.manufacturer = Some("HomeCockpit");
+    usb_config.product = Some("Upper Panel DDI");
+    usb_config.max_power = 100;
+    let usb_max_packet_size_0 =
+        u8::try_from(USB_MAX_PACKET_SIZE).expect("USB packet size must fit in endpoint 0");
+    let usb_max_packet_size =
+        u16::try_from(USB_MAX_PACKET_SIZE).expect("USB packet size must fit in CDC endpoint");
+    usb_config.max_packet_size_0 = usb_max_packet_size_0;
+
+    let usb_config_descriptor = USB_CONFIG_DESCRIPTOR_CELL.init([0; 256]);
+    let usb_bos_descriptor = USB_BOS_DESCRIPTOR_CELL.init([0; 256]);
+    let usb_control_buf = USB_CONTROL_BUFFER_CELL.init([0; 64]);
+    let cdc_state = CDC_STATE_CELL.init(CdcState::new());
+    let mut usb_builder = Builder::new(
+        usb_driver,
+        usb_config,
+        usb_config_descriptor,
+        usb_bos_descriptor,
+        &mut [],
+        usb_control_buf,
+    );
+    let cdc_class = CdcAcmClass::new(&mut usb_builder, cdc_state, usb_max_packet_size);
+    let (usb_sender, usb_receiver) = cdc_class.split();
+    let usb_receiver =
+        usb_receiver.into_buffered(USB_RX_BUFFER_CELL.init([0; USB_MAX_PACKET_SIZE]));
+    let usb_device = usb_builder.build();
+
+    spawner.spawn(usb_task(usb_device).expect("failed spawn usb_task"));
 
     let outputs: [Output<'static>; 8] = [
         Output::new(p.PIN_2, Level::Low),
@@ -128,8 +174,10 @@ async fn main(spawner: Spawner) {
     let (tx_sender, tx_receiver) = new(sender, FRAME_CHANNEL.receiver());
 
     let imcp = Imcp::new_client(tx_receiver, tx_sender, rx_buffer, parser_frame_buffer);
+    let imcp_transport = ImcpTransport::new(imcp_embedded, usb_sender, usb_receiver);
 
-    spawner.spawn(imcp_task(imcp, imcp_embedded, device_identity).expect("failed spawn imcp_task"));
+    spawner
+        .spawn(imcp_task(imcp, imcp_transport, device_identity).expect("failed spawn imcp_task"));
 
     loop {
         if let Ok(g) = RESULT.try_lock() {
@@ -161,6 +209,14 @@ async fn main(spawner: Spawner) {
     }
 }
 
+type UsbDriverType = UsbDriver<'static, USB>;
+type UsbDeviceType = UsbDevice<'static, UsbDriverType>;
+
+#[embassy_executor::task]
+async fn usb_task(mut usb: UsbDeviceType) -> ! {
+    usb.run().await
+}
+
 #[embassy_executor::task]
 async fn scan_matrix(inputs: [Input<'static>; 5], mut outputs: [Output<'static>; 8]) {
     loop {
@@ -188,20 +244,21 @@ async fn imcp_task(
         EmbassyReceiver<'static, CriticalSectionRawMutex, 5>,
         EmbassySender<'static, CriticalSectionRawMutex, 5>,
     >,
-    mut imcp_embedded: ImcpEmbedded<RpUartCarrierSense, Output<'static>>,
+    mut imcp_transport: ImcpTransport,
     device_identity: DeviceIdentity,
 ) {
-    let mut read_buffer = [0u8; 16];
+    let mut read_buffer = [0u8; USB_MAX_PACKET_SIZE];
     let tx_sender = FRAME_CHANNEL.sender();
 
-    imcp.send_join(device_identity.join_id)
+    reset_device_runtime_state().await;
+    imcp.restart_client(device_identity.join_id)
         .await
-        .unwrap_or_else(|e| warn!("join error {:?}", e));
+        .unwrap_or_else(|e| warn!("client restart error {:?}", e));
 
     loop {
-        match select(imcp_embedded.read(&mut read_buffer), imcp.write_tick()).await {
-            embassy_futures::select::Either::First(Ok(s)) => {
-                debug!("uart rx {} bytes: {:?}", s, &read_buffer[..s]);
+        match select(imcp_transport.read(&mut read_buffer), imcp.write_tick()).await {
+            embassy_futures::select::Either::First(ReadEvent::Data(s)) => {
+                debug!("imcp rx {} bytes: {:?}", s, &read_buffer[..s]);
                 let frame = imcp.read_tick(&read_buffer[..s]).await.unwrap_or_else(|e| {
                     warn!("failed parse frame {:?}, bytes: {:?}", e, &read_buffer[..s]);
                     None
@@ -210,27 +267,52 @@ async fn imcp_task(
                     handle_incoming_frame(&tx_sender, &frame, device_identity.device_id);
                 }
             }
-            embassy_futures::select::Either::First(Err(e)) => {
-                debug!("uart rx error: {:?}", e)
+            embassy_futures::select::Either::First(ReadEvent::UsbConnected) => {
+                info!("usb cdc connected; switching IMCP transport");
+                reset_device_runtime_state().await;
+                imcp.restart_client(device_identity.join_id)
+                    .await
+                    .unwrap_or_else(|e| warn!("usb restart error {:?}", e));
+            }
+            embassy_futures::select::Either::First(ReadEvent::UsbDisconnected) => {
+                info!("usb cdc disconnected; falling back to UART");
+                reset_device_runtime_state().await;
+                imcp.restart_client(device_identity.join_id)
+                    .await
+                    .unwrap_or_else(|e| warn!("UART restart error {:?}", e));
+            }
+            embassy_futures::select::Either::First(ReadEvent::UartError) => {
+                warn!("UART transport read error")
+            }
+            embassy_futures::select::Either::First(ReadEvent::UsbError) => {
+                warn!("USB transport read error")
             }
             embassy_futures::select::Either::Second(Ok(v)) => {
-                imcp_embedded.write(&v).await.unwrap_or_else(|e| {
-                    warn!("uart write error {:?}", e);
-                    0
-                });
-                info!("write {:?}", v);
-                imcp_embedded
-                    .flush()
-                    .await
-                    .unwrap_or_else(|e| warn!("uart flush error {:?}", e));
+                match imcp_transport.write_frame(&v).await {
+                    WriteEvent::Sent => info!("write {:?}", v),
+                    WriteEvent::UsbDisconnected => {
+                        info!("usb cdc disconnected during write; falling back to UART");
+                        reset_device_runtime_state().await;
+                        imcp.restart_client(device_identity.join_id)
+                            .await
+                            .unwrap_or_else(|e| warn!("UART restart error {:?}", e));
+                    }
+                    WriteEvent::UartError => warn!("UART transport write error"),
+                    WriteEvent::UsbError => warn!("USB transport write error"),
+                }
             }
             embassy_futures::select::Either::Second(Err(e)) => warn!("write error {:?}", e),
         }
 
         Timer::after_millis(50).await;
 
-        read_buffer = [0u8; 16];
+        read_buffer = [0u8; USB_MAX_PACKET_SIZE];
     }
+}
+
+async fn reset_device_runtime_state() {
+    let mut state = DEVICE_STATE.lock().await;
+    *state = DeviceRuntimeState::new();
 }
 
 fn enqueue_control_event(

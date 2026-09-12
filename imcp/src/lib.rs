@@ -182,6 +182,19 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         Ok(())
     }
 
+    /// Clear client-side transport state and start a fresh JOIN handshake.
+    pub async fn restart_client(&mut self, id: u32) -> Result<(), ImcpError<R::Error, S::Error>> {
+        if matches!(self.node_type, NodeType::Client(_)) {
+            self.address = 0x00;
+            self.node_id = None;
+            self.pending_frame = None;
+            self.frame_parser.reset();
+            self.node_type = NodeType::Client(ClientState::NotReady);
+        }
+
+        self.send_join(id).await
+    }
+
     pub async fn write_tick(
         &mut self,
     ) -> Result<Vec<u8, MAX_ENCODED_FRAME_SIZE>, ImcpError<R::Error, S::Error>> {
@@ -934,6 +947,47 @@ mod tests {
             assert_eq!(join.to_address(), Address::Unicast(0x01));
             assert_eq!(join.from_address(), 0x00);
             assert_eq!(join.payload(), &FramePayload::Join(0x1234_5678));
+        });
+    }
+
+    #[test]
+    fn test_restart_client_clears_transport_state_before_joining() {
+        futures::executor::block_on(async {
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let receiver = TestReceiver::new(std::iter::empty());
+            let sender = TestSender::default();
+            let mut imcp = Imcp::new_client(receiver, sender, &mut rx_buf, &mut frame_buf);
+
+            imcp.address = 0x22;
+            imcp.node_id = Some(0x1111_2222);
+            imcp.pending_frame = Some(Frame::new(Address::Unicast(0x01), 0x22, FramePayload::Ping));
+            imcp.node_type = NodeType::Client(ClientState::Ready(0x1111_2222));
+            let stale_frame = Frame::new(Address::Unicast(0x22), 0x01, FramePayload::Ping);
+            let mut stale_encoded = [0u8; 32];
+            let stale_len = stale_frame.encode(&mut stale_encoded).unwrap();
+            imcp.frame_parser.write_data(&stale_encoded[..2]).unwrap();
+            assert!(imcp.frame_parser.next_frame().is_none());
+
+            imcp.restart_client(0x3333_4444).await.unwrap();
+
+            assert_eq!(imcp.address, 0x00);
+            assert_eq!(imcp.node_id, Some(0x3333_4444));
+            assert!(imcp.pending_frame.is_none());
+            assert!(matches!(
+                imcp.node_type,
+                NodeType::Client(ClientState::Joining(0x3333_4444))
+            ));
+            assert!(imcp.frame_parser.next_frame().is_none());
+            imcp.frame_parser
+                .write_data(&stale_encoded[2..stale_len])
+                .unwrap();
+            assert!(imcp.frame_parser.next_frame().is_none());
+
+            let join = imcp.tx_sender.sent.first().unwrap();
+            assert_eq!(join.to_address(), Address::Unicast(0x01));
+            assert_eq!(join.from_address(), 0x00);
+            assert_eq!(join.payload(), &FramePayload::Join(0x3333_4444));
         });
     }
 
