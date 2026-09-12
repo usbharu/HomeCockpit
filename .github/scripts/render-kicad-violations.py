@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Render KiCad ERC/DRC locations on top of a KiCad SVG export.
 
-KiCad's text reports contain the display-formatted design coordinates while its
-SVG plotter emits millimetre-based page coordinates with the Y axis flipped.
-This script uses those coordinates for the overlay and keeps the SVG as a
-vector image, so the CI job does not need ImageMagick or another graphics
-package.
+KiCad's text reports contain the display-formatted design coordinates and its
+SVG plotter emits the same millimetre-based page coordinates. This script uses
+those coordinates for the overlay and keeps the SVG as a vector image, so the
+CI job does not need ImageMagick or another graphics package.
 """
 
 from __future__ import annotations
@@ -192,9 +191,7 @@ def crop_to_edge_cuts(
     max_y += margin
 
     crop_x = svg["view_x"] + min_x * svg["scale_x"]
-    crop_y = svg["view_y"] + (
-        svg["page_height"] - max_y
-    ) * svg["scale_y"]
+    crop_y = svg["view_y"] + min_y * svg["scale_y"]
     crop_width = (max_x - min_x) * svg["scale_x"]
     crop_height = (max_y - min_y) * svg["scale_y"]
     crop_physical_width = max_x - min_x
@@ -236,12 +233,10 @@ def coordinate_to_svg(
     x_mm = x * unit_scale
     y_mm = y * unit_scale
 
-    # KiCad's SVG plotter uses millimetres and reverses the Y axis so that the
-    # result can be displayed in the normal SVG top-to-bottom coordinate space.
+    # KiCad's PCB and schematic SVG exporters use the design coordinate system
+    # directly. In particular, Y is not reversed relative to the CLI report.
     svg_x = svg["coordinate_view_x"] + x_mm * svg["scale_x"]
-    svg_y = svg["coordinate_view_y"] + (
-        svg["page_height"] - y_mm
-    ) * svg["scale_y"]
+    svg_y = svg["coordinate_view_y"] + y_mm * svg["scale_y"]
     return svg_x, svg_y
 
 
