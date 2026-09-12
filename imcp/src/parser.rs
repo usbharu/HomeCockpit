@@ -26,6 +26,14 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
         }
     }
 
+    pub(crate) fn reset(&mut self) {
+        self.rx_len = 0;
+        self.rx_scan_pos = 0;
+        self.frame_len = 0;
+        self.state = ParserState::WaitingForSof;
+        self.is_escaping = false;
+    }
+
     /// rx_buffer の末尾に新しいデータを追加（書き込み）する
     pub fn write_data(&mut self, new_data: &[u8]) -> Result<usize, DecodeError> {
         // 1. バッファを整理 (もし rx_scan_pos > 0 ならデータを詰める)
