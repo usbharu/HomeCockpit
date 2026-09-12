@@ -82,7 +82,7 @@ jobs:
             return 1
           }
 
-          if [[ "$all_changed" == true ]] || path_matches ".github/workflows/*" || path_matches ".gitmodules"; then
+          if [[ "$all_changed" == true ]] || path_matches ".github/workflows/*" || path_matches ".github/scripts/*" || path_matches ".gitmodules"; then
             all_changed=true
           fi
 
