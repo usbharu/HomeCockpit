@@ -29,6 +29,13 @@
 - Keep commit messages short, specific, and imperative.
 - PRs should explain the user-visible change, list verification commands, and include screenshots or screen recordings for UI changes. Mention firmware or hardware impacts explicitly.
 
+### PR本文の作成と確認
+- ユーザーが指定した言語で本文を書く。日本語指定時は、概要・変更内容・検証結果を日本語で記載する。
+- `gh pr create`や`gh pr edit`の`--body "...\n..."`は使用しない。ダブルクォート内の`\n`は改行にならず、文字どおり保存される。
+- 本文は実際の改行を含むUTF-8ファイルを作成して`--body-file`で渡す。インライン指定が必要な場合は、実改行を含む引数またはシェルのANSI-Cクォート（`$'...\n...'`）を使用する。
+- 作成・更新後は`gh pr view <番号> --json body --jq .body`で本文を取得して確認する。`--json body`だけではJSON表現として改行が`\n`にエスケープされるため、`--jq .body`を使って実際の改行、見出し、空行を検証する。
+- 本文に`\n`が表示された場合はGitHubの表示不具合と判断せず、`gh pr edit <番号> --body-file <本文ファイル>`で実改行を含む本文に置き換え、再確認する。
+
 ## Security & Configuration Tips
 - Do not commit secrets, tokens, or device credentials.
 - Treat generated binaries and target artifacts as disposable unless a crate explicitly keeps checked-in firmware assets.
