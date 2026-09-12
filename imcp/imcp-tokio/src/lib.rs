@@ -57,3 +57,13 @@ impl TokioReceiver {
         self.receiver.recv().await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TokioChannelError;
+
+    #[test]
+    fn closed_channel_has_a_stable_display_message() {
+        assert_eq!(TokioChannelError::Closed.to_string(), "channel closed");
+    }
+}

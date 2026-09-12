@@ -172,6 +172,21 @@ where
     type Error = ImcpEmbeddedError<U::Error, P::Error>;
 }
 
+#[cfg(test)]
+mod tests {
+    use super::ImcpEmbeddedError;
+
+    #[test]
+    fn uart_error_reports_the_embedded_io_error_kind() {
+        let error = ImcpEmbeddedError::<&str, &str>::Uart("uart");
+
+        assert_eq!(
+            embedded_io_async::Error::kind(&error),
+            embedded_io_async::ErrorKind::Other
+        );
+    }
+}
+
 #[cfg(feature = "embassy-rp")]
 pub struct RpUartCarrierSense {
     uart: BufferedUart,

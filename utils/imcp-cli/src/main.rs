@@ -276,3 +276,36 @@ fn pack(pack_args: PackArgs) {
 
     println!("{}", he);
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Commands, GlobalOptions, PackArgs};
+
+    #[test]
+    fn parses_pack_arguments_with_hex_addresses() {
+        let parsed = GlobalOptions::try_parse_from([
+            "imcp-cli",
+            "pack",
+            "--from",
+            "0x01",
+            "--to",
+            "0x02",
+            "--packet-type",
+            "ping",
+        ]);
+
+        assert!(matches!(
+            parsed,
+            Ok(GlobalOptions {
+                command: Commands::Pack(PackArgs {
+                    from: 0x01,
+                    to: Some(0x02),
+                    ..
+                }),
+                ..
+            })
+        ));
+    }
+}
