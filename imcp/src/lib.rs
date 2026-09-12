@@ -237,13 +237,22 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
             None => return Ok(None),
         };
 
+        // SetAddress retries keep the unassigned destination (0x00), so a client
+        // must recognize its own assignment again after it has become Ready.
+        let is_duplicate_assignment = matches!(
+            (&self.node_type, frame.to_address(), frame.payload()),
+            (
+                NodeType::Client(ClientState::Ready(own_id)),
+                Address::Unicast(0x00),
+                FramePayload::SetAddress { address, id },
+            ) if *address == self.address && *id == *own_id
+        );
+
         match frame.to_address() {
-            Address::Unicast(a) => {
-                if a != self.address {
-                    return Ok(None);
-                }
+            Address::Unicast(a) if a != self.address && !is_duplicate_assignment => {
+                return Ok(None);
             }
-            Address::Broadcast => (),
+            Address::Unicast(_) | Address::Broadcast => (),
         }
 
         match frame.payload_mut() {
