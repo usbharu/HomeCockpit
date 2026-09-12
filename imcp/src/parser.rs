@@ -65,21 +65,43 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
                 }
 
                 ParserState::Receiving => {
+                    if self.is_escaping {
+                        // ESC の後に現れるのは、予約バイトを XOR した3種類だけ。
+                        // それ以外を受け入れると、壊れたフレームを別の内容として
+                        // 正常扱いしてしまう。
+                        let is_valid_escape = byte == (SOF ^ ESC_XOR)
+                            || byte == (EOF ^ ESC_XOR)
+                            || byte == (ESC ^ ESC_XOR);
+                        self.is_escaping = false;
+
+                        if !is_valid_escape {
+                            // SOF は現在の壊れたフレームを破棄し、次のフレームの
+                            // 開始として再利用する。EOF/通常バイトの場合は、次の
+                            // SOF まで待機する。
+                            if byte == SOF {
+                                self.state = ParserState::Receiving;
+                                self.frame_len = 0;
+                            } else {
+                                self.reset();
+                            }
+                            return Some(Err(DecodeError::InvalidEscapeSequence));
+                        }
+
+                        if let Err(error) = self.push_frame_byte(byte ^ ESC_XOR) {
+                            return Some(Err(error));
+                        }
+                        continue;
+                    }
+
                     match byte {
                         SOF => {
-                            // 予期せぬ SOF。フレームの再開とみなす
+                            // 予期せぬ SOF。破損したフレームを破棄し、ここから
+                            // 新しいフレームとして再同期する。
                             self.frame_len = 0;
-                            self.is_escaping = false;
-                            // (継続)
                         }
                         EOF => {
                             // EOF受信。フレーム終端
                             self.state = ParserState::WaitingForSof;
-                            if self.is_escaping {
-                                // ESC + EOF は不正
-                                self.is_escaping = false;
-                                return Some(Err(DecodeError::InvalidEscapeSequence));
-                            }
 
                             // frame_buffer (アンスタッフィング済み) をデコード
                             let decode_slice = &self.frame_buffer[..self.frame_len];
@@ -88,31 +110,12 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
                             return Some(Frame::decode(decode_slice));
                         }
                         ESC => {
-                            if self.is_escaping {
-                                // ESC + ESC は不正
-                                self.state = ParserState::WaitingForSof;
-                                return Some(Err(DecodeError::InvalidEscapeSequence));
-                            }
                             self.is_escaping = true;
                         }
                         _ => {
-                            // 通常データ or エスケープ解除データ
-                            if self.frame_len >= self.frame_buffer.len() {
-                                // アンスタッフィング後バッファが溢れた
-                                // フレームが長すぎる (破損)
-                                self.state = ParserState::WaitingForSof;
-                                return Some(Err(DecodeError::FrameBufferTooSmall));
+                            if let Err(error) = self.push_frame_byte(byte) {
+                                return Some(Err(error));
                             }
-
-                            if self.is_escaping {
-                                // エスケープ解除
-                                self.frame_buffer[self.frame_len] = byte ^ ESC_XOR;
-                                self.is_escaping = false;
-                            } else {
-                                // 通常データ
-                                self.frame_buffer[self.frame_len] = byte;
-                            }
-                            self.frame_len += 1;
                         }
                     }
                 }
@@ -121,6 +124,25 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
 
         // データ不足 (ループを抜けた)
         None
+    }
+
+    fn push_frame_byte(&mut self, byte: u8) -> Result<(), DecodeError> {
+        if self.frame_len >= self.frame_buffer.len() {
+            // アンスタッフィング後バッファが溢れた
+            // フレームが長すぎる (破損)
+            self.reset();
+            return Err(DecodeError::FrameBufferTooSmall);
+        }
+
+        self.frame_buffer[self.frame_len] = byte;
+        self.frame_len += 1;
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.state = ParserState::WaitingForSof;
+        self.frame_len = 0;
+        self.is_escaping = false;
     }
 
     /// rx_buffer の消費済み領域 (0..rx_scan_pos) を破棄し、

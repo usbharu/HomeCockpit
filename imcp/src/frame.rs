@@ -5,7 +5,10 @@ use crate::*;
 use defmt::Format;
 
 pub const MAX_PAYLOAD_SIZE: usize = 128;
-pub const MAX_ENCODED_FRAME_SIZE: usize = 1 + ((5 + MAX_PAYLOAD_SIZE + 1) * 2) + 1;
+/// フレーム境界を除いた、スタッフィング前の最大フレーム長。
+pub const MAX_FRAME_SIZE: usize = 5 + MAX_PAYLOAD_SIZE + 1;
+/// SOF/EOF と、全バイトがスタッフィングされた場合の最大フレーム長。
+pub const MAX_ENCODED_FRAME_SIZE: usize = 2 + (MAX_FRAME_SIZE * 2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Address {
@@ -18,7 +21,7 @@ impl Format for Address {
     fn format(&self, fmt: defmt::Formatter) {
         match self {
             Address::Unicast(address) => defmt::write!(fmt, "{}", address),
-            Address::Broadcast => defmt::write!(fmt, "Broadcast(0x00)"),
+            Address::Broadcast => defmt::write!(fmt, "Broadcast(0xFF)"),
         }
     }
 }
@@ -68,7 +71,8 @@ pub enum FramePayload {
 impl Format for FramePayload {
     fn format(&self, fmt: defmt::Formatter) {
         match self {
-            FramePayload::Ping | FramePayload::Pong => defmt::write!(fmt, "{0}", self),
+            FramePayload::Ping => defmt::write!(fmt, "Ping"),
+            FramePayload::Pong => defmt::write!(fmt, "Pong"),
             FramePayload::Ack(a) => defmt::write!(fmt, "Ack address: {0}", a),
             FramePayload::Join(a) => defmt::write!(fmt, "Join id: {0}", a),
             FramePayload::SetAddress { address, id } => {
@@ -102,7 +106,7 @@ impl FrameType {
     }
 }
 
-impl<'a> FramePayload {
+impl FramePayload {
     pub fn frame_type(&self) -> FrameType {
         match self {
             FramePayload::Ping => FrameType::Ping,
@@ -130,7 +134,7 @@ impl<'a> FramePayload {
             FramePayload::Data(data) => data
                 .len()
                 .try_into()
-                .expect("FramePayload::Set data.len() is too large"),
+                .expect("FramePayload::Data data.len() is too large"),
         }
     }
 
@@ -147,7 +151,7 @@ impl<'a> FramePayload {
     /// # 戻り値
     /// * `Ok(FramePayload)` - デコードされたペイロード
     /// * `Err(CorruptionError)` - ペイロード長がタイプと矛盾する場合
-    fn decode(frame_type: FrameType, payload_slice: &'a [u8]) -> Result<Self, DecodeError> {
+    fn decode(frame_type: FrameType, payload_slice: &[u8]) -> Result<Self, DecodeError> {
         let payload_len = payload_slice.len();
 
         match frame_type {
@@ -222,7 +226,7 @@ impl Format for Frame {
     }
 }
 
-impl<'a> Frame {
+impl Frame {
     pub fn new(to: Address, from: u8, payload: FramePayload) -> Self {
         Self {
             to_address: to,
@@ -255,9 +259,53 @@ impl<'a> Frame {
     /// チェックサムの長さ
     pub const CHECKSUM_LEN: usize = 1;
 
-    /// (ヘッダー + ペイロード + チェックサム)
+    /// エンコード後のワイヤ上の長さ（SOF/EOF とスタッフィングを含む）。
     pub fn encoded_len(&self) -> usize {
-        Self::HEADER_LEN + self.payload.len() as usize + Self::CHECKSUM_LEN
+        let mut length = 2; // SOF + EOF
+        let mut checksum = 0;
+
+        let mut add_byte = |byte: u8| {
+            checksum ^= byte;
+            length += Self::stuffed_len(byte);
+        };
+
+        add_byte(self.to_address.as_byte());
+        add_byte(self.from_address);
+        add_byte(self.payload.frame_type() as u8);
+        for byte in self.payload.len().to_le_bytes() {
+            add_byte(byte);
+        }
+
+        match &self.payload {
+            FramePayload::Join(id) => {
+                for byte in id.to_le_bytes() {
+                    add_byte(byte);
+                }
+            }
+            FramePayload::SetAddress { address, id } => {
+                add_byte(*address);
+                for byte in id.to_le_bytes() {
+                    add_byte(byte);
+                }
+            }
+            FramePayload::Data(data) | FramePayload::Set(data) => {
+                for byte in data {
+                    add_byte(*byte);
+                }
+            }
+            FramePayload::Ack(address) => add_byte(*address),
+            FramePayload::Ping | FramePayload::Pong => {}
+        }
+
+        length + Self::stuffed_len(checksum)
+    }
+
+    fn stuffed_len(byte: u8) -> usize {
+        if matches!(byte, SOF | EOF | ESC) {
+            2
+        } else {
+            1
+        }
     }
 
     fn calculate_xor_checksum(data: &[u8]) -> u8 {
@@ -353,7 +401,7 @@ impl<'a> Frame {
 
     /// バイトスライス（スタッフィング解除済み）からフレームをデコードする
     /// (戻り値から消費バイト数 usize を削除)
-    pub fn decode(buffer: &'a [u8]) -> Result<Frame, DecodeError> {
+    pub fn decode(buffer: &[u8]) -> Result<Frame, DecodeError> {
         // 1. 最小長チェック (Header + Checksum)
         let min_len = Self::HEADER_LEN + Self::CHECKSUM_LEN;
         if buffer.len() < min_len {

@@ -2,26 +2,16 @@
 
 use futures::executor::block_on;
 use imcp::{
-    error::{ImcpError, ProtocolError},
     Imcp,
     channel::Sender,
+    error::{ImcpError, ProtocolError},
     frame::{Address, Frame, FramePayload},
     imcp_test::{decode_single_encoded_frame, memory_channel},
 };
 
 struct Harness {
-    master: Imcp<
-        'static,
-        'static,
-        imcp::imcp_test::MemoryReceiver,
-        imcp::imcp_test::MemorySender,
-    >,
-    client: Imcp<
-        'static,
-        'static,
-        imcp::imcp_test::MemoryReceiver,
-        imcp::imcp_test::MemorySender,
-    >,
+    master: Imcp<'static, 'static, imcp::imcp_test::MemoryReceiver, imcp::imcp_test::MemorySender>,
+    client: Imcp<'static, 'static, imcp::imcp_test::MemoryReceiver, imcp::imcp_test::MemorySender>,
     master_injector: imcp::imcp_test::MemorySender,
 }
 
@@ -74,7 +64,12 @@ fn join_and_set_address_roundtrip_works_on_os() {
         let join = decode_single_encoded_frame(&join_bytes).unwrap();
         assert_eq!(join.payload(), &FramePayload::Join(0xCAFE_BABE));
 
-        let master_seen = harness.master.read_tick(&join_bytes).await.unwrap().unwrap();
+        let master_seen = harness
+            .master
+            .read_tick(&join_bytes)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(master_seen.payload(), &FramePayload::Join(0xCAFE_BABE));
 
         let set_address_bytes = harness.master.write_tick().await.unwrap();
@@ -107,6 +102,22 @@ fn join_and_set_address_roundtrip_works_on_os() {
 
         let master_ack = harness.master.read_tick(&ack_bytes).await.unwrap().unwrap();
         assert_eq!(master_ack.payload(), &FramePayload::Ack(0x00));
+    });
+}
+
+#[test]
+fn rejoin_uses_the_unassigned_source_address_on_os() {
+    block_on(async {
+        let mut harness = new_harness();
+        join_client(&mut harness, 0xCAFE_BABE).await;
+
+        harness.client.send_join(0xDEAD_BEEF).await.unwrap();
+        let join_bytes = harness.client.write_tick().await.unwrap();
+        let join = decode_single_encoded_frame(&join_bytes).unwrap();
+
+        assert_eq!(join.to_address(), Address::Unicast(0x01));
+        assert_eq!(join.from_address(), 0x00);
+        assert_eq!(join.payload(), &FramePayload::Join(0xDEAD_BEEF));
     });
 }
 
@@ -154,7 +165,12 @@ fn ping_gets_pong_on_os() {
             .unwrap();
 
         let ping_bytes = harness.master.write_tick().await.unwrap();
-        let seen = harness.client.read_tick(&ping_bytes).await.unwrap().unwrap();
+        let seen = harness
+            .client
+            .read_tick(&ping_bytes)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(seen.payload(), &FramePayload::Ping);
 
         let pong_bytes = harness.client.write_tick().await.unwrap();
@@ -188,7 +204,8 @@ fn duplicate_set_address_is_reacked_on_os() {
         join_client(&mut harness, 0x1234_ABCD).await;
 
         let duplicate_set_address = Frame::new(
-            Address::Unicast(0x02),
+            // Master は割り当て前アドレス宛てに同じフレームを再送する。
+            Address::Unicast(0x00),
             0x01,
             FramePayload::SetAddress {
                 address: 0x02,
@@ -203,9 +220,37 @@ fn duplicate_set_address_is_reacked_on_os() {
 
         let ack_bytes = harness.client.write_tick().await.unwrap();
         let ack = decode_single_encoded_frame(&ack_bytes).unwrap();
-        assert_eq!(ack.payload(), &FramePayload::Ack(0x02));
+        assert_eq!(ack.payload(), &FramePayload::Ack(0x00));
         assert_eq!(ack.from_address(), 0x02);
         assert_eq!(ack.to_address(), Address::Unicast(0x01));
+    });
+}
+
+#[test]
+fn duplicate_set_address_ack_is_ignored_by_master_on_os() {
+    block_on(async {
+        let mut harness = new_harness();
+        join_client(&mut harness, 0x1234_ABCD).await;
+
+        let duplicate_set_address = Frame::new(
+            Address::Unicast(0x00),
+            0x01,
+            FramePayload::SetAddress {
+                address: 0x02,
+                id: 0x1234_ABCD,
+            },
+        );
+        let mut raw = [0u8; 32];
+        let len = duplicate_set_address.encode(&mut raw).unwrap();
+
+        harness.client.read_tick(&raw[..len]).await.unwrap();
+        let ack_bytes = harness.client.write_tick().await.unwrap();
+
+        let master_seen = harness.master.read_tick(&ack_bytes).await.unwrap();
+        assert!(matches!(
+            master_seen,
+            Some(ref frame) if frame.payload() == &FramePayload::Ack(0x00)
+        ));
     });
 }
 
@@ -348,7 +393,11 @@ fn client_rejects_join_frame_on_os() {
     block_on(async {
         let mut harness = new_harness();
 
-        let frame = Frame::new(Address::Unicast(0x00), 0x01, FramePayload::Join(0x1111_2222));
+        let frame = Frame::new(
+            Address::Unicast(0x00),
+            0x01,
+            FramePayload::Join(0x1111_2222),
+        );
         let mut raw = [0u8; 32];
         let len = frame.encode(&mut raw).unwrap();
 
@@ -372,10 +421,14 @@ fn master_returns_duplicate_join_while_assignment_is_pending_on_os() {
         let join_bytes = harness.client.write_tick().await.unwrap();
 
         let first = harness.master.read_tick(&join_bytes).await.unwrap();
-        assert!(matches!(first, Some(ref frame) if frame.payload() == &FramePayload::Join(0xAAAA_0001)));
+        assert!(
+            matches!(first, Some(ref frame) if frame.payload() == &FramePayload::Join(0xAAAA_0001))
+        );
 
         let second = harness.master.read_tick(&join_bytes).await.unwrap();
-        assert!(matches!(second, Some(ref frame) if frame.payload() == &FramePayload::Join(0xAAAA_0001)));
+        assert!(
+            matches!(second, Some(ref frame) if frame.payload() == &FramePayload::Join(0xAAAA_0001))
+        );
     });
 }
 
