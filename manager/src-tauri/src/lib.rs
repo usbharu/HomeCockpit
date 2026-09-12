@@ -6,6 +6,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -16,11 +17,10 @@ use chrono::Utc;
 use dcs_bios::{
     import::ImportCommand,
     mem::{MemoryMap, VecMemoryMap},
-    source::Source,
-    DcsBios, DcsBiosImpl,
 };
 use hcp::{
-    decode_set_packet, encode_set_packet, AppPacketKind, ControlEvent, ControlValue, DeviceKind,
+    decode_set_packet, encode_data_packet, encode_set_packet, AppPacketKind, ByteEncoding,
+    ControlEvent, ControlValue, DeviceKind, DisplayData, DisplayPayload, DisplayTarget,
     CONTROL_ID_REQUEST_DEVICE_HELLO,
 };
 use imcp::{
@@ -30,7 +30,16 @@ use imcp::{
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use tauri::{AppHandle, Emitter, Manager, State};
-use uuid::Uuid;
+
+mod mapping;
+
+use mapping::{
+    control_event_kinds, default_role_definitions, resolve_adapter_actions,
+    resolve_logical_input_events, resolve_output_devices, sanitize_adapter_mappings,
+    sanitize_device_role_assignments, AdapterActionConfig, AdapterControlMapping,
+    AdapterMappingConfig, DeviceRoleAssignment, EventKind, LogicalOutputEvent,
+    PhysicalToLogicalBinding, ResolvedAdapterAction, RoleDefinition, STATE_SCHEMA_VERSION,
+};
 
 const DEFAULT_EXPORT_HOST: &str = "239.255.50.10";
 const DEFAULT_EXPORT_PORT: u16 = 5010;
@@ -193,7 +202,9 @@ struct AppSnapshot {
     devices: Vec<ManagedDeviceSummary>,
     device_endpoints: Vec<DeviceEndpointConfig>,
     device_role_assignments: Vec<DeviceRoleAssignment>,
-    role_mappings: Vec<RoleMappingConfig>,
+    adapter_mappings: Vec<AdapterMappingConfig>,
+    role_definitions: Vec<RoleDefinition>,
+    learn_session: LearnSessionStatus,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -204,61 +215,113 @@ struct DcsBiosCommandRequest {
     argument: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LearnSessionStatus {
+    active: bool,
+    role_id: Option<String>,
+    logical_control_id: Option<String>,
+    target_device_id: Option<String>,
+    expected_event_kind: Option<EventKind>,
+    mode: Option<LearnMode>,
+    armed_at: Option<String>,
+    timeout_ms: u64,
+    captured_device_id: Option<String>,
+    captured_physical_control_id: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-enum DeviceRole {
-    LeftDdi,
-    RightDdi,
+enum LearnMode {
+    Append,
+    Replace,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum NormalizedControlEvent {
-    ButtonDown,
-    ButtonUp,
-    ButtonPushed,
-    EncoderDelta,
-    AbsoluteChanged,
-    ToggleOn,
-    ToggleOff,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LearnRequest {
+    role_id: String,
+    logical_control_id: String,
+    target_device_id: Option<String>,
+    expected_event_kind: Option<EventKind>,
+    mode: LearnMode,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveLearnSession {
+    request: LearnRequest,
+    armed_at: Instant,
+    status: LearnSessionStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-struct DeviceRoleAssignment {
+struct PersistedManagerState {
+    #[serde(default = "default_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
+    device_endpoints: Vec<DeviceEndpointConfig>,
+    #[serde(default)]
+    device_role_assignments: Vec<DeviceRoleAssignment>,
+    #[serde(default)]
+    adapter_mappings: Vec<AdapterMappingConfig>,
+}
+
+impl Default for PersistedManagerState {
+    fn default() -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            device_endpoints: Vec::new(),
+            device_role_assignments: Vec::new(),
+            adapter_mappings: Vec::new(),
+        }
+    }
+}
+
+fn default_schema_version() -> u32 {
+    STATE_SCHEMA_VERSION
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyDeviceRoleAssignment {
     device_id: String,
-    role: DeviceRole,
+    role: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DcsBiosMappedAction {
+struct LegacyDcsBiosMappedAction {
     identifier: String,
     argument: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RoleControlMapping {
-    id: String,
+struct LegacyRoleControlMapping {
     control_id: u16,
-    input_event: NormalizedControlEvent,
-    action: DcsBiosMappedAction,
+    input_event: String,
+    action: LegacyDcsBiosMappedAction,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RoleMappingConfig {
-    role: DeviceRole,
-    mappings: Vec<RoleControlMapping>,
+struct LegacyRoleMappingConfig {
+    role: String,
+    #[serde(default)]
+    mappings: Vec<LegacyRoleControlMapping>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PersistedManagerState {
+struct LegacyPersistedManagerState {
+    #[serde(default)]
     device_endpoints: Vec<DeviceEndpointConfig>,
-    device_role_assignments: Vec<DeviceRoleAssignment>,
-    role_mappings: Vec<RoleMappingConfig>,
+    #[serde(default)]
+    device_role_assignments: Vec<LegacyDeviceRoleAssignment>,
+    #[serde(default)]
+    role_mappings: Vec<LegacyRoleMappingConfig>,
 }
 
 struct ListenerHandle {
@@ -266,57 +329,153 @@ struct ListenerHandle {
     join: Option<JoinHandle<()>>,
 }
 
+struct DispatchWorkerHandle {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone)]
+struct PhysicalControlEvent {
+    endpoint_id: String,
+    source_address: u8,
+    device_id: String,
+    device_kind: DeviceKind,
+    control_event: ControlEvent,
+}
+
+#[derive(Debug, Clone)]
+struct DisplayCommand {
+    device_id: String,
+    data: DisplayData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DcsBiosMemoryUpdate {
+    address: u16,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Default)]
+struct DcsBiosStreamDecoder {
+    buffer: Vec<u8>,
+    in_frame: bool,
+}
+
+impl DcsBiosStreamDecoder {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<DcsBiosMemoryUpdate> {
+        self.buffer.extend_from_slice(bytes);
+        let mut updates = Vec::new();
+
+        loop {
+            if !self.in_frame {
+                let Some(sync_index) = self
+                    .buffer
+                    .windows(4)
+                    .position(|window| window == [0x55; 4])
+                else {
+                    let keep = self.buffer.len().min(3);
+                    if self.buffer.len() > keep {
+                        let drain_until = self.buffer.len() - keep;
+                        self.buffer.drain(..drain_until);
+                    }
+                    break;
+                };
+                self.buffer.drain(..sync_index + 4);
+                self.in_frame = true;
+            }
+
+            if self.buffer.len() < 4 {
+                break;
+            }
+
+            if self.buffer[..4] == [0x55; 4] {
+                self.buffer.drain(..4);
+                continue;
+            }
+
+            let address = u16::from_le_bytes([self.buffer[0], self.buffer[1]]);
+            let length = u16::from_le_bytes([self.buffer[2], self.buffer[3]]) as usize;
+            let total = 4 + length;
+            if self.buffer.len() < total {
+                if let Some(sync_index) = self
+                    .buffer
+                    .windows(4)
+                    .position(|window| window == [0x55; 4])
+                {
+                    self.buffer.drain(..sync_index);
+                    self.in_frame = false;
+                    continue;
+                }
+                break;
+            }
+
+            updates.push(DcsBiosMemoryUpdate {
+                address,
+                data: self.buffer[4..total].to_vec(),
+            });
+            self.buffer.drain(..total);
+        }
+
+        updates
+    }
+}
+
+trait InputAdapter: Send {
+    fn dispatch_input(
+        &self,
+        config: &DcsBiosConnectionConfig,
+        action: &AdapterActionConfig,
+    ) -> Result<(), String>;
+}
+
+struct DcsBiosAdapter;
+
+impl InputAdapter for DcsBiosAdapter {
+    fn dispatch_input(
+        &self,
+        config: &DcsBiosConnectionConfig,
+        action: &AdapterActionConfig,
+    ) -> Result<(), String> {
+        if action.action_id != "control-command" {
+            return Err(format!(
+                "Unsupported DCS-BIOS action '{}'.",
+                action.action_id
+            ));
+        }
+
+        let identifier = action
+            .parameters
+            .get("identifier")
+            .ok_or_else(|| "DCS-BIOS action is missing identifier parameter.".to_string())?;
+        let argument = action
+            .parameters
+            .get("argument")
+            .ok_or_else(|| "DCS-BIOS action is missing argument parameter.".to_string())?;
+        let payload = encode_import_command(identifier, argument)?;
+        send_command_to_dcsbios(config, &payload)
+    }
+}
+
+struct AdapterRegistry {
+    adapters: HashMap<&'static str, Box<dyn InputAdapter>>,
+}
+
+impl AdapterRegistry {
+    fn new() -> Self {
+        let mut adapters: HashMap<&'static str, Box<dyn InputAdapter>> = HashMap::new();
+        adapters.insert("dcs-bios", Box::new(DcsBiosAdapter));
+        Self { adapters }
+    }
+
+    fn get(&self, adapter_id: &str) -> Option<&dyn InputAdapter> {
+        self.adapters.get(adapter_id).map(Box::as_ref)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct KnownRuntimeDevice {
     device_id: String,
     device_kind: DeviceKind,
-}
-
-#[derive(Debug, Clone)]
-struct SinglePacketSource {
-    packet: Option<Vec<u8>>,
-}
-
-impl SinglePacketSource {
-    fn new(packet: Vec<u8>) -> Self {
-        Self {
-            packet: Some(packet),
-        }
-    }
-}
-
-impl Source for SinglePacketSource {
-    fn setup(&self) -> Result<(), dcs_bios::error::Error> {
-        Ok(())
-    }
-
-    fn read(&mut self) -> Result<Option<Vec<u8>>, dcs_bios::error::Error> {
-        Ok(self.packet.take())
-    }
-}
-
-#[derive(Clone)]
-struct SharedMemoryMap {
-    inner: Arc<Mutex<VecMemoryMap>>,
-}
-
-impl MemoryMap for SharedMemoryMap {
-    fn write(
-        &mut self,
-        address: u16,
-        data: &[u8],
-    ) -> Result<std::ops::RangeInclusive<u16>, dcs_bios::error::Error> {
-        self.inner
-            .lock()
-            .unwrap()
-            .write(address, data)
-            .map_err(|_| dcs_bios::error::Error::MemoryMapError())
-    }
-
-    fn read(&self, range: std::ops::RangeInclusive<u16>) -> Option<&[u8]> {
-        let _ = range;
-        None
-    }
 }
 
 struct RuntimeState {
@@ -326,10 +485,15 @@ struct RuntimeState {
     devices: Mutex<Vec<ManagedDeviceSummary>>,
     device_endpoints: Mutex<Vec<DeviceEndpointConfig>>,
     device_role_assignments: Mutex<Vec<DeviceRoleAssignment>>,
-    role_mappings: Mutex<Vec<RoleMappingConfig>>,
+    adapter_mappings: Mutex<Vec<AdapterMappingConfig>>,
+    learn_session: Mutex<Option<ActiveLearnSession>>,
     log_counter: AtomicU64,
+    dispatch_seq: AtomicU64,
     listener: Mutex<Option<ListenerHandle>>,
     endpoint_listeners: Mutex<Vec<ListenerHandle>>,
+    dispatch_worker: Mutex<Option<DispatchWorkerHandle>>,
+    display_senders: Mutex<HashMap<String, SyncSender<DisplayCommand>>>,
+    display_sequences: Mutex<HashMap<String, u16>>,
     dcsbios_memory: Arc<Mutex<VecMemoryMap>>,
 }
 
@@ -342,10 +506,15 @@ impl RuntimeState {
             devices: Mutex::new(Vec::new()),
             device_endpoints: Mutex::new(Vec::new()),
             device_role_assignments: Mutex::new(Vec::new()),
-            role_mappings: Mutex::new(Vec::new()),
+            adapter_mappings: Mutex::new(Vec::new()),
+            learn_session: Mutex::new(None),
             log_counter: AtomicU64::new(0),
+            dispatch_seq: AtomicU64::new(0),
             listener: Mutex::new(None),
             endpoint_listeners: Mutex::new(Vec::new()),
+            dispatch_worker: Mutex::new(None),
+            display_senders: Mutex::new(HashMap::new()),
+            display_sequences: Mutex::new(HashMap::new()),
             dcsbios_memory: Arc::new(Mutex::new(VecMemoryMap::default())),
         }
     }
@@ -358,7 +527,15 @@ impl RuntimeState {
             devices: self.devices.lock().unwrap().clone(),
             device_endpoints: self.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: self.device_role_assignments.lock().unwrap().clone(),
-            role_mappings: self.role_mappings.lock().unwrap().clone(),
+            adapter_mappings: self.adapter_mappings.lock().unwrap().clone(),
+            role_definitions: default_role_definitions(),
+            learn_session: self
+                .learn_session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|session| session.status.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -441,14 +618,314 @@ impl RuntimeState {
         device_role_assignments
     }
 
-    fn set_role_mappings(
+    fn set_adapter_mappings(
         &self,
         app: &AppHandle,
-        role_mappings: Vec<RoleMappingConfig>,
-    ) -> Vec<RoleMappingConfig> {
-        *self.role_mappings.lock().unwrap() = role_mappings.clone();
-        let _ = app.emit("role-mappings-changed", role_mappings.clone());
-        role_mappings
+        adapter_mappings: Vec<AdapterMappingConfig>,
+    ) -> Vec<AdapterMappingConfig> {
+        *self.adapter_mappings.lock().unwrap() = adapter_mappings.clone();
+        let _ = app.emit("adapter-mappings-changed", adapter_mappings.clone());
+        adapter_mappings
+    }
+
+    fn register_display_sender(&self, device_id: String, sender: SyncSender<DisplayCommand>) {
+        self.display_senders
+            .lock()
+            .unwrap()
+            .insert(device_id, sender);
+    }
+
+    fn clear_display_senders(&self) {
+        self.display_senders.lock().unwrap().clear();
+    }
+
+    fn next_display_sequence(&self, device_id: &str) -> u16 {
+        let mut sequences = self.display_sequences.lock().unwrap();
+        let sequence = sequences.entry(device_id.to_string()).or_insert(0);
+        *sequence = sequence.wrapping_add(1);
+        *sequence
+    }
+
+    fn dispatch_logical_output_event(
+        &self,
+        app: &AppHandle,
+        assignments: &[DeviceRoleAssignment],
+        event: &LogicalOutputEvent,
+    ) {
+        let dispatch_seq = self.dispatch_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let senders = self.display_senders.lock().unwrap().clone();
+        for (device_id, physical_display_id) in resolve_output_devices(assignments, event) {
+            let Some(sender) = senders.get(&device_id) else {
+                self.push_log(
+                    app,
+                    "DEBUG",
+                    "display",
+                    format!(
+                        "dispatchSeq={dispatch_seq} no display transport for device {}.",
+                        device_id
+                    ),
+                );
+                continue;
+            };
+
+            let display_data = DisplayData {
+                seq: self.next_display_sequence(&device_id),
+                target: DisplayTarget::Indicator(physical_display_id),
+                payload: event.payload.clone(),
+            };
+            match sender.try_send(DisplayCommand {
+                device_id: device_id.clone(),
+                data: display_data,
+            }) {
+                Ok(()) => self.push_log(
+                    app,
+                    "SUCCESS",
+                    "display",
+                    format!(
+                        "dispatchSeq={dispatch_seq} queued logical output {}:{} for device {}.",
+                        event.role_id, event.logical_control_id, device_id
+                    ),
+                ),
+                Err(TrySendError::Full(_)) => self.push_log(
+                    app,
+                    "WARN",
+                    "display",
+                    format!(
+                        "dispatchSeq={dispatch_seq} display queue full for device {}.",
+                        device_id
+                    ),
+                ),
+                Err(TrySendError::Disconnected(_)) => self.push_log(
+                    app,
+                    "WARN",
+                    "display",
+                    format!(
+                        "dispatchSeq={dispatch_seq} display transport disconnected for device {}.",
+                        device_id
+                    ),
+                ),
+            }
+        }
+    }
+
+    fn dispatch_dcsbios_memory_update(&self, app: &AppHandle, update: &DcsBiosMemoryUpdate) {
+        let adapter_mappings = self.adapter_mappings.lock().unwrap().clone();
+        let assignments = self.device_role_assignments.lock().unwrap().clone();
+        for config in adapter_mappings
+            .iter()
+            .filter(|config| config.adapter_id == "dcs-bios")
+        {
+            for mapping in &config.output_mappings {
+                if mapping.source_id != "memory-range" {
+                    continue;
+                }
+                let Some(address) = mapping
+                    .parameters
+                    .get("address")
+                    .and_then(|value| parse_u16_value(value))
+                else {
+                    self.push_log(
+                        app,
+                        "WARN",
+                        "display",
+                        format!(
+                            "Ignoring DCS-BIOS output mapping {}:{} with invalid address.",
+                            mapping.role_id, mapping.logical_control_id
+                        ),
+                    );
+                    continue;
+                };
+                if update.address != address {
+                    continue;
+                }
+                if let Some(length) = mapping
+                    .parameters
+                    .get("length")
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    if update.data.len() != length {
+                        continue;
+                    }
+                }
+
+                let encoding = match mapping
+                    .parameters
+                    .get("encoding")
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("segment-map") => ByteEncoding::SegmentMap,
+                    Some("utf8-text") | Some("utf8") => ByteEncoding::Utf8Text,
+                    _ => ByteEncoding::MonoBitmap1bpp,
+                };
+                let mut data = heapless::Vec::new();
+                if data.extend_from_slice(&update.data).is_err() {
+                    self.push_log(
+                        app,
+                        "WARN",
+                        "display",
+                        format!(
+                            "DCS-BIOS output mapping {}:{} payload is too large.",
+                            mapping.role_id, mapping.logical_control_id
+                        ),
+                    );
+                    continue;
+                }
+                self.dispatch_logical_output_event(
+                    app,
+                    &assignments,
+                    &LogicalOutputEvent {
+                        role_id: mapping.role_id.clone(),
+                        logical_control_id: mapping.logical_control_id.clone(),
+                        payload: DisplayPayload::Bytes { encoding, data },
+                    },
+                );
+            }
+        }
+    }
+
+    fn emit_learn_session(&self, app: &AppHandle, status: LearnSessionStatus) {
+        let _ = app.emit("learn-session-changed", status);
+    }
+
+    fn start_learn(&self, app: &AppHandle, mut request: LearnRequest) -> Result<(), String> {
+        request.role_id = request.role_id.trim().to_string();
+        request.logical_control_id = request.logical_control_id.trim().to_string();
+        request.target_device_id = request
+            .target_device_id
+            .map(|device_id| device_id.trim().to_string())
+            .filter(|device_id| !device_id.is_empty());
+        if request.role_id.is_empty() || request.logical_control_id.is_empty() {
+            return Err("Learn requires roleId and logicalControlId.".to_string());
+        }
+
+        let timeout_ms = request.timeout_ms.unwrap_or(10_000).clamp(500, 60_000);
+        request.timeout_ms = Some(timeout_ms);
+        let armed_at = Instant::now();
+        let status = LearnSessionStatus {
+            active: true,
+            role_id: Some(request.role_id.clone()),
+            logical_control_id: Some(request.logical_control_id.clone()),
+            target_device_id: request.target_device_id.clone(),
+            expected_event_kind: request.expected_event_kind,
+            mode: Some(request.mode),
+            armed_at: Some(now_iso8601()),
+            timeout_ms,
+            captured_device_id: None,
+            captured_physical_control_id: None,
+        };
+        *self.learn_session.lock().unwrap() = Some(ActiveLearnSession {
+            request,
+            armed_at,
+            status: status.clone(),
+        });
+        self.emit_learn_session(app, status);
+        self.push_log(
+            app,
+            "INFO",
+            "mapping",
+            "Started physical control learn session.",
+        );
+        Ok(())
+    }
+
+    fn cancel_learn(&self, app: &AppHandle) {
+        let was_active = self.learn_session.lock().unwrap().take().is_some();
+        if was_active {
+            self.emit_learn_session(app, LearnSessionStatus::default());
+            self.push_log(
+                app,
+                "INFO",
+                "mapping",
+                "Cancelled physical control learn session.",
+            );
+        }
+    }
+
+    fn expire_learn(&self, app: &AppHandle) {
+        let expired = {
+            let mut session = self.learn_session.lock().unwrap();
+            if session.as_ref().is_some_and(|active| {
+                active.armed_at.elapsed().as_millis() >= u128::from(active.status.timeout_ms)
+            }) {
+                session.take()
+            } else {
+                None
+            }
+        };
+
+        if expired.is_some() {
+            self.emit_learn_session(app, LearnSessionStatus::default());
+            self.push_log(
+                app,
+                "INFO",
+                "mapping",
+                "Physical control learn session timed out.",
+            );
+        }
+    }
+
+    fn capture_learn(
+        &self,
+        app: &AppHandle,
+        physical_event: &PhysicalControlEvent,
+        event_kinds: &[EventKind],
+    ) -> Result<bool, String> {
+        let Some(mut session) = self.learn_session.lock().unwrap().take() else {
+            return Ok(false);
+        };
+
+        let target_matches = session
+            .request
+            .target_device_id
+            .as_ref()
+            .is_none_or(|target| target == &physical_event.device_id);
+        let event_matches = session
+            .request
+            .expected_event_kind
+            .is_none_or(|expected| event_kinds.contains(&expected));
+        if !target_matches || !event_matches {
+            *self.learn_session.lock().unwrap() = Some(session);
+            return Ok(false);
+        }
+
+        let request = session.request.clone();
+        let assignments = apply_learn_binding(
+            self.device_role_assignments.lock().unwrap().clone(),
+            &request,
+            &physical_event.device_id,
+            physical_event.control_event.control_id,
+        );
+        let persisted = PersistedManagerState {
+            schema_version: STATE_SCHEMA_VERSION,
+            device_endpoints: self.device_endpoints.lock().unwrap().clone(),
+            device_role_assignments: assignments.clone(),
+            adapter_mappings: self.adapter_mappings.lock().unwrap().clone(),
+        };
+        if let Err(error) = persist_manager_state(app, &persisted) {
+            *self.learn_session.lock().unwrap() = Some(session);
+            return Err(error);
+        }
+        self.set_device_role_assignments(app, assignments);
+
+        session.status.active = false;
+        session.status.captured_device_id = Some(physical_event.device_id.clone());
+        session.status.captured_physical_control_id = Some(physical_event.control_event.control_id);
+        let status = session.status;
+        self.emit_learn_session(app, status);
+        self.push_log(
+            app,
+            "INFO",
+            "mapping",
+            format!(
+                "Learned physical control {} from device {} for {}:{}.",
+                physical_event.control_event.control_id,
+                physical_event.device_id,
+                request.role_id,
+                request.logical_control_id
+            ),
+        );
+        Ok(true)
     }
 
     fn stop_listener(&self, app: &AppHandle) {
@@ -489,6 +966,15 @@ impl RuntimeState {
             }
         }
 
+        let dispatch_worker = self.dispatch_worker.lock().unwrap().take();
+        if let Some(mut worker) = dispatch_worker {
+            worker.stop.store(true, Ordering::Relaxed);
+            if let Some(join) = worker.join.take() {
+                let _ = join.join();
+            }
+        }
+        self.clear_display_senders();
+
         self.push_log(app, "INFO", "devices", "Stopped device endpoint listeners.");
     }
 
@@ -496,8 +982,23 @@ impl RuntimeState {
         self.stop_endpoint_listeners(&app);
 
         let endpoints = sanitize_device_endpoints(self.device_endpoints.lock().unwrap().clone());
-        let assignments = self.device_role_assignments.lock().unwrap().clone();
-        let role_mappings = self.role_mappings.lock().unwrap().clone();
+        let (dispatch_sender, dispatch_receiver) = mpsc::sync_channel(256);
+        let dispatch_stop = Arc::new(AtomicBool::new(false));
+        let dispatch_stop_for_thread = dispatch_stop.clone();
+        let dispatch_state = Arc::clone(self);
+        let dispatch_app = app.clone();
+        let dispatch_join = thread::spawn(move || {
+            run_dispatch_worker(
+                dispatch_state,
+                dispatch_app,
+                dispatch_receiver,
+                dispatch_stop_for_thread,
+            );
+        });
+        *self.dispatch_worker.lock().unwrap() = Some(DispatchWorkerHandle {
+            stop: dispatch_stop,
+            join: Some(dispatch_join),
+        });
 
         let mut listeners = Vec::new();
         for endpoint in endpoints.into_iter().filter(|entry| entry.enabled) {
@@ -505,8 +1006,8 @@ impl RuntimeState {
             let stop_for_thread = stop.clone();
             let app_for_thread = app.clone();
             let state = Arc::clone(self);
-            let assignments = assignments.clone();
-            let role_mappings = role_mappings.clone();
+            let dispatch_sender = dispatch_sender.clone();
+            let (display_sender, display_receiver) = mpsc::sync_channel(64);
 
             let join = thread::spawn(move || {
                 let state_for_run = state.clone();
@@ -514,8 +1015,9 @@ impl RuntimeState {
                     state_for_run,
                     app_for_thread.clone(),
                     endpoint,
-                    assignments,
-                    role_mappings,
+                    dispatch_sender,
+                    display_sender,
+                    display_receiver,
                     stop_for_thread,
                 ) {
                     state.push_log(&app_for_thread, "ERROR", "devices", error);
@@ -601,6 +1103,7 @@ impl RuntimeState {
             });
 
             let mut buf = [0_u8; 65535];
+            let mut stream_decoder = DcsBiosStreamDecoder::default();
             let mut last_rate_tick = Instant::now();
             let mut packets_in_window = 0_u32;
 
@@ -608,11 +1111,14 @@ impl RuntimeState {
                 match socket.recv(&mut buf) {
                     Ok(size) => {
                         packets_in_window = packets_in_window.saturating_add(1);
-                        if let Err(error) = apply_dcsbios_export_packet(
-                            dcsbios_memory.clone(),
-                            buf[..size].to_vec(),
-                        ) {
+                        let updates = stream_decoder.feed(&buf[..size]);
+                        if let Err(error) =
+                            apply_dcsbios_memory_updates(dcsbios_memory.clone(), &updates)
+                        {
                             state.push_log(&app_for_thread, "WARN", "dcsbios", error);
+                        }
+                        for update in updates {
+                            state.dispatch_dcsbios_memory_update(&app_for_thread, &update);
                         }
                         let now = now_iso8601();
                         let preview = extract_ascii_preview(&buf[..size]);
@@ -780,9 +1286,10 @@ fn save_device_endpoints(
     persist_manager_state(
         &app,
         &PersistedManagerState {
+            schema_version: STATE_SCHEMA_VERSION,
             device_endpoints: device_endpoints.clone(),
             device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
-            role_mappings: state.inner.role_mappings.lock().unwrap().clone(),
+            adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
         },
     )?;
     state.inner.stop_endpoint_listeners(&app);
@@ -847,9 +1354,10 @@ fn save_device_role_assignments(
     persist_manager_state(
         &app,
         &PersistedManagerState {
+            schema_version: STATE_SCHEMA_VERSION,
             device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: device_role_assignments.clone(),
-            role_mappings: state.inner.role_mappings.lock().unwrap().clone(),
+            adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
         },
     )?;
     state
@@ -863,26 +1371,43 @@ fn save_device_role_assignments(
 }
 
 #[tauri::command]
-fn save_role_mappings(
+fn save_adapter_mappings(
     app: AppHandle,
     state: State<'_, AppState>,
-    role_mappings: Vec<RoleMappingConfig>,
+    adapter_mappings: Vec<AdapterMappingConfig>,
 ) -> Result<AppSnapshot, String> {
-    let role_mappings = sanitize_role_mappings(role_mappings);
+    let adapter_mappings = sanitize_adapter_mappings(adapter_mappings);
     persist_manager_state(
         &app,
         &PersistedManagerState {
+            schema_version: STATE_SCHEMA_VERSION,
             device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
-            role_mappings: role_mappings.clone(),
+            adapter_mappings: adapter_mappings.clone(),
         },
     )?;
-    state.inner.set_role_mappings(&app, role_mappings);
+    state.inner.set_adapter_mappings(&app, adapter_mappings);
     state.inner.restart_endpoint_listeners(&app)?;
     state
         .inner
-        .push_log(&app, "INFO", "devices", "Saved role control mappings.");
+        .push_log(&app, "INFO", "mapping", "Saved adapter control mappings.");
     Ok(state.inner.snapshot())
+}
+
+#[tauri::command]
+fn start_learn(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: LearnRequest,
+) -> Result<AppSnapshot, String> {
+    state.inner.start_learn(&app, request)?;
+    Ok(state.inner.snapshot())
+}
+
+#[tauri::command]
+fn cancel_learn(app: AppHandle, state: State<'_, AppState>) -> AppSnapshot {
+    state.inner.cancel_learn(&app);
+    state.inner.snapshot()
 }
 
 #[tauri::command]
@@ -905,82 +1430,6 @@ fn sanitize_device_endpoints(
             endpoint
         })
         .collect()
-}
-
-fn sanitize_device_role_assignments(
-    device_role_assignments: Vec<DeviceRoleAssignment>,
-) -> Vec<DeviceRoleAssignment> {
-    let mut seen_roles = HashSet::new();
-    let mut seen_devices = HashSet::new();
-    let mut sanitized = Vec::new();
-
-    for assignment in device_role_assignments.into_iter().rev() {
-        let device_id = assignment.device_id.trim().to_string();
-        if device_id.is_empty() {
-            continue;
-        }
-
-        if !seen_roles.insert(assignment.role) || !seen_devices.insert(device_id.clone()) {
-            continue;
-        }
-
-        sanitized.push(DeviceRoleAssignment {
-            device_id,
-            role: assignment.role,
-        });
-    }
-
-    sanitized.reverse();
-    sanitized
-}
-
-fn sanitize_role_mappings(role_mappings: Vec<RoleMappingConfig>) -> Vec<RoleMappingConfig> {
-    let mut roles = HashSet::new();
-    let mut sanitized = Vec::new();
-
-    for config in role_mappings {
-        if !roles.insert(config.role) {
-            continue;
-        }
-
-        let mut seen_bindings = HashSet::new();
-        let mappings = config
-            .mappings
-            .into_iter()
-            .filter_map(|mapping| {
-                let identifier = mapping.action.identifier.trim().to_string();
-                let argument = mapping.action.argument.trim().to_string();
-                if identifier.is_empty() || argument.is_empty() {
-                    return None;
-                }
-
-                if !seen_bindings.insert((mapping.control_id, mapping.input_event)) {
-                    return None;
-                }
-
-                Some(RoleControlMapping {
-                    id: if mapping.id.trim().is_empty() {
-                        Uuid::new_v4().to_string()
-                    } else {
-                        mapping.id
-                    },
-                    control_id: mapping.control_id,
-                    input_event: mapping.input_event,
-                    action: DcsBiosMappedAction {
-                        identifier,
-                        argument,
-                    },
-                })
-            })
-            .collect();
-
-        sanitized.push(RoleMappingConfig {
-            role: config.role,
-            mappings,
-        });
-    }
-
-    sanitized
 }
 
 trait DeviceEndpointProvider {
@@ -1331,20 +1780,191 @@ fn load_manager_state(app: &AppHandle) -> Result<PersistedManagerState, String> 
     let file_path = manager_state_file_path(app)?;
     match fs::read_to_string(file_path) {
         Ok(contents) => {
-            let persisted: PersistedManagerState = serde_json::from_str(&contents)
-                .map_err(|error| format!("Failed to parse manager state: {error}"))?;
-            Ok(PersistedManagerState {
-                device_endpoints: sanitize_device_endpoints(persisted.device_endpoints),
-                device_role_assignments: sanitize_device_role_assignments(
-                    persisted.device_role_assignments,
-                ),
-                role_mappings: sanitize_role_mappings(persisted.role_mappings),
-            })
+            let (persisted, migrated) = normalize_manager_state_json(&contents)?;
+            if migrated {
+                persist_manager_state(app, &persisted)?;
+            }
+            Ok(persisted)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(PersistedManagerState::default())
         }
         Err(error) => Err(format!("Failed to read manager state: {error}")),
+    }
+}
+
+fn normalize_manager_state_json(contents: &str) -> Result<(PersistedManagerState, bool), String> {
+    let value: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|error| format!("Failed to parse manager state: {error}"))?;
+    let schema_version = value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+
+    if schema_version == STATE_SCHEMA_VERSION as u64 {
+        let persisted: PersistedManagerState = serde_json::from_value(value)
+            .map_err(|error| format!("Failed to parse manager state v2: {error}"))?;
+        return Ok((normalize_persisted_state(persisted), false));
+    }
+
+    let legacy: LegacyPersistedManagerState = serde_json::from_value(value)
+        .map_err(|error| format!("Failed to parse legacy manager state: {error}"))?;
+    Ok((migrate_legacy_state(legacy), true))
+}
+
+fn normalize_persisted_state(mut persisted: PersistedManagerState) -> PersistedManagerState {
+    persisted.schema_version = STATE_SCHEMA_VERSION;
+    persisted.device_endpoints = sanitize_device_endpoints(persisted.device_endpoints);
+    persisted.device_role_assignments =
+        sanitize_device_role_assignments(persisted.device_role_assignments);
+    persisted.adapter_mappings = sanitize_adapter_mappings(persisted.adapter_mappings);
+    persisted
+}
+
+fn migrate_legacy_state(legacy: LegacyPersistedManagerState) -> PersistedManagerState {
+    let mut assignments = legacy
+        .device_role_assignments
+        .into_iter()
+        .filter_map(|assignment| {
+            let device_id = assignment.device_id.trim().to_string();
+            let role_id = normalize_legacy_role_id(&assignment.role);
+            if device_id.is_empty() || role_id.is_empty() {
+                return None;
+            }
+
+            Some(DeviceRoleAssignment {
+                device_id,
+                role_id,
+                bindings: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut dcsbios_mappings = Vec::new();
+
+    for role_config in legacy.role_mappings {
+        let role_id = normalize_legacy_role_id(&role_config.role);
+        if role_id.is_empty() {
+            continue;
+        }
+
+        for mapping in role_config.mappings {
+            let Some(event_kind) = parse_legacy_event_kind(&mapping.input_event) else {
+                continue;
+            };
+            let logical_control_id = format!("button-{}", mapping.control_id);
+            let identifier = mapping.action.identifier.trim().to_string();
+            let argument = mapping.action.argument.trim().to_string();
+            if identifier.is_empty() || argument.is_empty() {
+                continue;
+            }
+
+            for assignment in assignments
+                .iter_mut()
+                .filter(|assignment| assignment.role_id == role_id)
+            {
+                assignment.bindings.push(PhysicalToLogicalBinding {
+                    physical_control_id: mapping.control_id,
+                    logical_control_id: logical_control_id.clone(),
+                });
+            }
+
+            let mut parameters = HashMap::new();
+            parameters.insert("identifier".to_string(), identifier);
+            parameters.insert("argument".to_string(), argument);
+            dcsbios_mappings.push(AdapterControlMapping {
+                role_id: role_id.clone(),
+                logical_control_id,
+                event_kind,
+                action: AdapterActionConfig {
+                    action_id: "control-command".to_string(),
+                    parameters,
+                },
+            });
+        }
+    }
+
+    normalize_persisted_state(PersistedManagerState {
+        schema_version: STATE_SCHEMA_VERSION,
+        device_endpoints: legacy.device_endpoints,
+        device_role_assignments: assignments,
+        adapter_mappings: if dcsbios_mappings.is_empty() {
+            Vec::new()
+        } else {
+            vec![AdapterMappingConfig {
+                adapter_id: "dcs-bios".to_string(),
+                profile_id: "default".to_string(),
+                output_mappings: Vec::new(),
+                mappings: dcsbios_mappings,
+            }]
+        },
+    })
+}
+
+fn normalize_legacy_role_id(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "leftddi" | "left-d-d-i" => "left-ddi".to_string(),
+        "rightddi" | "right-d-d-i" => "right-ddi".to_string(),
+        _ => normalized,
+    }
+}
+
+fn apply_learn_binding(
+    mut assignments: Vec<DeviceRoleAssignment>,
+    request: &LearnRequest,
+    device_id: &str,
+    physical_control_id: u16,
+) -> Vec<DeviceRoleAssignment> {
+    if request.mode == LearnMode::Replace {
+        for assignment in assignments
+            .iter_mut()
+            .filter(|assignment| assignment.role_id == request.role_id)
+        {
+            assignment
+                .bindings
+                .retain(|binding| binding.logical_control_id != request.logical_control_id);
+        }
+    }
+
+    let assignment = if let Some(assignment) = assignments.iter_mut().find(|assignment| {
+        assignment.device_id == device_id && assignment.role_id == request.role_id
+    }) {
+        assignment
+    } else {
+        assignments.push(DeviceRoleAssignment {
+            device_id: device_id.to_string(),
+            role_id: request.role_id.clone(),
+            bindings: Vec::new(),
+        });
+        let Some(assignment) = assignments.last_mut() else {
+            return sanitize_device_role_assignments(assignments);
+        };
+        assignment
+    };
+
+    if !assignment.bindings.iter().any(|binding| {
+        binding.physical_control_id == physical_control_id
+            && binding.logical_control_id == request.logical_control_id
+    }) {
+        assignment.bindings.push(PhysicalToLogicalBinding {
+            physical_control_id,
+            logical_control_id: request.logical_control_id.clone(),
+        });
+    }
+
+    sanitize_device_role_assignments(assignments)
+}
+
+fn parse_legacy_event_kind(value: &str) -> Option<EventKind> {
+    match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "button-down" => Some(EventKind::ButtonDown),
+        "button-up" => Some(EventKind::ButtonUp),
+        "button-pushed" => Some(EventKind::ButtonPushed),
+        "encoder-delta" => Some(EventKind::EncoderDelta),
+        "absolute-changed" => Some(EventKind::AbsoluteChanged),
+        "toggle-on" => Some(EventKind::ToggleOn),
+        "toggle-off" => Some(EventKind::ToggleOff),
+        _ => None,
     }
 }
 
@@ -1505,62 +2125,54 @@ fn encode_import_command(identifier: &str, argument: &str) -> Result<String, Str
         .map_err(|error| format!("Invalid DCS-BIOS command: {error:?}"))
 }
 
-fn find_role_for_device(
-    device_role_assignments: &[DeviceRoleAssignment],
-    device_id: &str,
-) -> Option<DeviceRole> {
-    device_role_assignments
-        .iter()
-        .find(|assignment| assignment.device_id == device_id)
-        .map(|assignment| assignment.role)
-}
-
-fn find_mapping_action(
-    role_mappings: &[RoleMappingConfig],
-    role: DeviceRole,
-    control_id: u16,
-    input_event: NormalizedControlEvent,
-) -> Option<DcsBiosMappedAction> {
-    role_mappings
-        .iter()
-        .find(|config| config.role == role)
-        .and_then(|config| {
-            config
-                .mappings
-                .iter()
-                .find(|mapping| {
-                    mapping.control_id == control_id && mapping.input_event == input_event
-                })
-                .map(|mapping| mapping.action.clone())
-        })
-}
-
 fn control_supported_events(
     device_kind: DeviceKind,
     control_id: u16,
-) -> Option<&'static [NormalizedControlEvent]> {
+) -> Option<&'static [EventKind]> {
     match device_kind {
         DeviceKind::UpperPanelDdi if control_id < 40 => Some(&[
-            NormalizedControlEvent::ButtonDown,
-            NormalizedControlEvent::ButtonUp,
-            NormalizedControlEvent::ButtonPushed,
+            EventKind::ButtonDown,
+            EventKind::ButtonUp,
+            EventKind::ButtonPushed,
+        ]),
+        DeviceKind::ButtonPanel if control_id < 64 => Some(&[
+            EventKind::ButtonDown,
+            EventKind::ButtonUp,
+            EventKind::ButtonPushed,
+            EventKind::EncoderDelta,
+            EventKind::AbsoluteChanged,
+            EventKind::ToggleOn,
+            EventKind::ToggleOff,
         ]),
         _ => None,
     }
 }
 
-fn apply_dcsbios_export_packet(
+fn apply_dcsbios_memory_updates(
     memory_map: Arc<Mutex<VecMemoryMap>>,
-    packet: Vec<u8>,
+    updates: &[DcsBiosMemoryUpdate],
 ) -> Result<(), String> {
-    let mut reader = DcsBiosImpl::new(
-        SinglePacketSource::new(packet),
-        SharedMemoryMap { inner: memory_map },
-    );
-    reader
-        .read_packet()
-        .map(|_| ())
-        .map_err(|error| format!("Failed to decode DCS-BIOS export packet: {error:?}"))
+    let mut memory_map = memory_map
+        .lock()
+        .map_err(|_| "DCS-BIOS memory map lock is poisoned.".to_string())?;
+    for update in updates {
+        memory_map
+            .write(update.address, &update.data)
+            .map_err(|error| format!("Failed to update DCS-BIOS memory map: {error:?}"))?;
+    }
+    Ok(())
+}
+
+fn parse_u16_value(value: &str) -> Option<u16> {
+    let value = value.trim();
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u16::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse::<u16>().ok()
+    }
 }
 
 fn request_child_device_hello(
@@ -1588,108 +2200,221 @@ struct ControlEventContext<'a> {
     state: &'a RuntimeState,
     app: &'a AppHandle,
     config: &'a DcsBiosConnectionConfig,
-    known_devices: &'a HashMap<u8, KnownRuntimeDevice>,
     device_role_assignments: &'a [DeviceRoleAssignment],
-    role_mappings: &'a [RoleMappingConfig],
+    adapter_mappings: &'a [AdapterMappingConfig],
+    adapter_registry: &'a AdapterRegistry,
 }
 
 fn process_control_event(
     context: &ControlEventContext<'_>,
     pressed_buttons: &mut HashSet<(String, u16)>,
-    source_address: u8,
-    control_event: &ControlEvent,
+    physical_event: &PhysicalControlEvent,
 ) {
-    let Some(device) = context.known_devices.get(&source_address) else {
-        context.state.push_log(
-            context.app,
-            "WARN",
-            "devices",
-            format!(
-                "Ignoring control event from unknown IMCP address {} on control {}.",
-                source_address, control_event.control_id
-            ),
-        );
-        return;
-    };
-
-    if control_supported_events(device.device_kind, control_event.control_id).is_none() {
+    if control_supported_events(
+        physical_event.device_kind,
+        physical_event.control_event.control_id,
+    )
+    .is_none()
+    {
         context.state.push_log(
             context.app,
             "WARN",
             "devices",
             format!(
                 "Ignoring control {} from unsupported catalog device {}.",
-                control_event.control_id, device.device_id
+                physical_event.control_event.control_id, physical_event.device_id
             ),
         );
         return;
     }
 
-    let Some(role) = find_role_for_device(context.device_role_assignments, &device.device_id)
-    else {
-        context.state.push_log(
-            context.app,
-            "WARN",
-            "devices",
-            format!(
-                "Ignoring control event for unassigned device {}.",
-                device.device_id
-            ),
-        );
-        return;
+    let was_pressed = match &physical_event.control_event.event {
+        ControlValue::Button { pressed: true } => {
+            let key = (
+                physical_event.device_id.clone(),
+                physical_event.control_event.control_id,
+            );
+            let was_pressed = pressed_buttons.contains(&key);
+            pressed_buttons.insert(key);
+            was_pressed
+        }
+        ControlValue::Button { pressed: false } => pressed_buttons.remove(&(
+            physical_event.device_id.clone(),
+            physical_event.control_event.control_id,
+        )),
+        _ => false,
     };
 
-    let mut events = Vec::new();
-    match control_event.event {
-        ControlValue::Button { pressed: true } => {
-            pressed_buttons.insert((device.device_id.clone(), control_event.control_id));
-            events.push(NormalizedControlEvent::ButtonDown);
-        }
-        ControlValue::Button { pressed: false } => {
-            events.push(NormalizedControlEvent::ButtonUp);
-            if pressed_buttons.remove(&(device.device_id.clone(), control_event.control_id)) {
-                events.push(NormalizedControlEvent::ButtonPushed);
-            }
-        }
-        ControlValue::EncoderDelta { .. } => events.push(NormalizedControlEvent::EncoderDelta),
-        ControlValue::Absolute { .. } => events.push(NormalizedControlEvent::AbsoluteChanged),
-        ControlValue::Toggle { state: true } => events.push(NormalizedControlEvent::ToggleOn),
-        ControlValue::Toggle { state: false } => events.push(NormalizedControlEvent::ToggleOff),
-        ControlValue::RequestDeviceHello => {}
-    }
-
-    for input_event in events {
-        let Some(action) = find_mapping_action(
-            context.role_mappings,
-            role,
-            control_event.control_id,
-            input_event,
-        ) else {
-            continue;
-        };
-
-        match encode_import_command(&action.identifier, &action.argument)
-            .and_then(|payload| send_command_to_dcsbios(context.config, &payload))
-        {
-            Ok(()) => context.state.push_log(
-                context.app,
-                "SUCCESS",
-                "mapping",
-                format!(
-                    "Mapped {:?} control {} {:?} -> {} {}",
-                    role, control_event.control_id, input_event, action.identifier, action.argument
-                ),
-            ),
-            Err(error) => context.state.push_log(
+    let event_kinds = control_event_kinds(&physical_event.control_event.event, was_pressed);
+    match context
+        .state
+        .capture_learn(context.app, physical_event, &event_kinds)
+    {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            context.state.push_log(
                 context.app,
                 "ERROR",
                 "mapping",
-                format!(
-                    "Failed to send mapped DCS-BIOS command for device {}: {}",
-                    device.device_id, error
-                ),
-            ),
+                format!("Failed to persist learned physical control: {error}"),
+            );
+            return;
         }
+    }
+
+    let mut matched_logical_event = false;
+    for input_event in event_kinds {
+        let logical_events = resolve_logical_input_events(
+            context.device_role_assignments,
+            &physical_event.device_id,
+            physical_event.control_event.control_id,
+            input_event,
+            &physical_event.control_event.event,
+        );
+
+        for logical_event in logical_events {
+            matched_logical_event = true;
+            for action in resolve_adapter_actions(context.adapter_mappings, &logical_event) {
+                dispatch_adapter_action(context, &action);
+            }
+        }
+    }
+
+    if !matched_logical_event {
+        context.state.push_log(
+            context.app,
+            "DEBUG",
+            "mapping",
+            format!(
+                "No logical binding for device={} control={} endpoint={} address={}",
+                physical_event.device_id,
+                physical_event.control_event.control_id,
+                physical_event.endpoint_id,
+                physical_event.source_address
+            ),
+        );
+    }
+}
+
+fn dispatch_adapter_action(context: &ControlEventContext<'_>, resolved: &ResolvedAdapterAction) {
+    let dispatch_seq = context.state.dispatch_seq.fetch_add(1, Ordering::Relaxed) + 1;
+    match context
+        .adapter_registry
+        .get(&resolved.adapter_id)
+        .ok_or_else(|| format!("Adapter '{}' is not registered.", resolved.adapter_id))
+        .and_then(|adapter| adapter.dispatch_input(context.config, &resolved.action))
+    {
+        Ok(()) => context.state.push_log(
+            context.app,
+            "SUCCESS",
+            "mapping",
+            format!(
+                "dispatchSeq={dispatch_seq} mapped {}:{} {:?} -> {}:{}.",
+                resolved.event.role_id,
+                resolved.event.logical_control_id,
+                resolved.event.event_kind,
+                resolved.adapter_id,
+                resolved.profile_id
+            ),
+        ),
+        Err(error) => context.state.push_log(
+            context.app,
+            "ERROR",
+            "mapping",
+            format!(
+                "dispatchSeq={dispatch_seq} failed adapter dispatch for {}:{}: {error}.",
+                resolved.event.role_id, resolved.event.logical_control_id
+            ),
+        ),
+    }
+}
+
+fn run_dispatch_worker(
+    state: Arc<RuntimeState>,
+    app: AppHandle,
+    receiver: Receiver<PhysicalControlEvent>,
+    stop: Arc<AtomicBool>,
+) {
+    let registry = AdapterRegistry::new();
+    let mut pressed_buttons: HashSet<(String, u16)> = HashSet::new();
+
+    state.push_log(
+        &app,
+        "INFO",
+        "mapping",
+        "Started common input dispatch worker.",
+    );
+
+    while !stop.load(Ordering::Relaxed) {
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(physical_event) => {
+                let config = state.config.lock().unwrap().clone();
+                let assignments = state.device_role_assignments.lock().unwrap().clone();
+                let adapter_mappings = state.adapter_mappings.lock().unwrap().clone();
+                let context = ControlEventContext {
+                    state: state.as_ref(),
+                    app: &app,
+                    config: &config,
+                    device_role_assignments: &assignments,
+                    adapter_mappings: &adapter_mappings,
+                    adapter_registry: &registry,
+                };
+                process_control_event(&context, &mut pressed_buttons, &physical_event);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => state.expire_learn(&app),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    state.push_log(
+        &app,
+        "INFO",
+        "mapping",
+        "Stopped common input dispatch worker.",
+    );
+}
+
+fn drain_display_commands(
+    port: &mut dyn serialport::SerialPort,
+    receiver: &Receiver<DisplayCommand>,
+    known_devices: &HashMap<u8, KnownRuntimeDevice>,
+    state: &RuntimeState,
+    app: &AppHandle,
+) -> Result<(), String> {
+    loop {
+        let command = match receiver.try_recv() {
+            Ok(command) => command,
+            Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err("Display dispatch queue disconnected.".to_string())
+            }
+        };
+        let Some((&address, _)) = known_devices
+            .iter()
+            .find(|(_, device)| device.device_id == command.device_id)
+        else {
+            state.push_log(
+                app,
+                "DEBUG",
+                "display",
+                format!(
+                    "Skipping display update for unknown device {}.",
+                    command.device_id
+                ),
+            );
+            continue;
+        };
+        let payload = encode_data_packet(&command.data)
+            .map_err(|error| format!("Failed to encode HCP DisplayData: {error:?}"))?;
+        write_frame(
+            port,
+            &Frame::new(
+                Address::Unicast(address),
+                IMCP_MASTER_ADDRESS,
+                FramePayload::Data(payload),
+            ),
+        )?;
     }
 }
 
@@ -1697,11 +2422,11 @@ fn run_endpoint_listener(
     state: Arc<RuntimeState>,
     app: AppHandle,
     endpoint: DeviceEndpointConfig,
-    device_role_assignments: Vec<DeviceRoleAssignment>,
-    role_mappings: Vec<RoleMappingConfig>,
+    dispatch_sender: SyncSender<PhysicalControlEvent>,
+    display_sender: SyncSender<DisplayCommand>,
+    display_receiver: Receiver<DisplayCommand>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let config = state.config.lock().unwrap().clone();
     let mut port = serialport::new(&endpoint.address, endpoint.baud_rate)
         .timeout(IMCP_READ_TIMEOUT)
         .open()
@@ -1721,7 +2446,6 @@ fn run_endpoint_listener(
     let mut next_address: u8 = 0x02;
     let mut known_devices: HashMap<u8, KnownRuntimeDevice> = HashMap::new();
     let mut requested_children = HashSet::new();
-    let mut pressed_buttons: HashSet<(String, u16)> = HashSet::new();
 
     state.push_log(
         &app,
@@ -1731,6 +2455,8 @@ fn run_endpoint_listener(
     );
 
     while !stop.load(Ordering::Relaxed) {
+        drain_display_commands(&mut *port, &display_receiver, &known_devices, &state, &app)?;
+
         match port.read(&mut serial_buffer) {
             Ok(bytes_read) if bytes_read > 0 => {
                 parser
@@ -1788,6 +2514,10 @@ fn run_endpoint_listener(
                                         device_kind: probed.device_kind,
                                     },
                                 );
+                                state.register_display_sender(
+                                    probed.device_id.clone(),
+                                    display_sender.clone(),
+                                );
 
                                 if probed.device_kind == DeviceKind::ImcpHub
                                     && requested_children.insert(source_address)
@@ -1812,20 +2542,40 @@ fn run_endpoint_listener(
                                         FramePayload::Ack(frame.to_address().as_byte()),
                                     ),
                                 )?;
-                                let control_context = ControlEventContext {
-                                    state: state.as_ref(),
-                                    app: &app,
-                                    config: &config,
-                                    known_devices: &known_devices,
-                                    device_role_assignments: &device_role_assignments,
-                                    role_mappings: &role_mappings,
+                                let source_address = frame.from_address();
+                                let Some(device) = known_devices.get(&source_address) else {
+                                    state.push_log(
+                                        &app,
+                                        "WARN",
+                                        "devices",
+                                        format!(
+                                            "Ignoring control event from unknown IMCP address {source_address}."
+                                        ),
+                                    );
+                                    continue;
                                 };
-                                process_control_event(
-                                    &control_context,
-                                    &mut pressed_buttons,
-                                    frame.from_address(),
-                                    &control_event,
-                                );
+                                let physical_event = PhysicalControlEvent {
+                                    endpoint_id: endpoint.id.clone(),
+                                    source_address,
+                                    device_id: device.device_id.clone(),
+                                    device_kind: device.device_kind,
+                                    control_event,
+                                };
+                                match dispatch_sender.try_send(physical_event) {
+                                    Ok(()) => {}
+                                    Err(TrySendError::Full(_)) => state.push_log(
+                                        &app,
+                                        "WARN",
+                                        "mapping",
+                                        format!(
+                                            "Input dispatch queue is full; dropping control event from {}.",
+                                            device.device_id
+                                        ),
+                                    ),
+                                    Err(TrySendError::Disconnected(_)) => {
+                                        return Err("Input dispatch worker disconnected.".to_string())
+                                    }
+                                }
                             }
                         }
                         _ => {}
@@ -1960,7 +2710,7 @@ pub fn run() {
                         &app_handle,
                         manager_state.device_role_assignments.clone(),
                     );
-                    state.set_role_mappings(&app_handle, manager_state.role_mappings.clone());
+                    state.set_adapter_mappings(&app_handle, manager_state.adapter_mappings.clone());
                     if !manager_state.device_endpoints.is_empty() {
                         tauri::async_runtime::spawn({
                             let app_handle = app_handle.clone();
@@ -1995,7 +2745,9 @@ pub fn run() {
             send_dcsbios_command,
             save_device_endpoints,
             save_device_role_assignments,
-            save_role_mappings,
+            save_adapter_mappings,
+            start_learn,
+            cancel_learn,
             list_serial_ports,
             list_devices
         ])
@@ -2123,75 +2875,272 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_role_assignments_keeps_one_device_per_role() {
+    fn sanitize_role_assignments_keeps_many_devices_roles_and_bindings() {
         let assignments = sanitize_device_role_assignments(vec![
             DeviceRoleAssignment {
                 device_id: "A".to_string(),
-                role: DeviceRole::LeftDdi,
+                role_id: "left-ddi".to_string(),
+                bindings: vec![PhysicalToLogicalBinding {
+                    physical_control_id: 3,
+                    logical_control_id: "button-1".to_string(),
+                }],
+            },
+            DeviceRoleAssignment {
+                device_id: " A ".to_string(),
+                role_id: "left-ddi".to_string(),
+                bindings: vec![
+                    PhysicalToLogicalBinding {
+                        physical_control_id: 3,
+                        logical_control_id: "button-1".to_string(),
+                    },
+                    PhysicalToLogicalBinding {
+                        physical_control_id: 4,
+                        logical_control_id: "button-2".to_string(),
+                    },
+                ],
             },
             DeviceRoleAssignment {
                 device_id: "B".to_string(),
-                role: DeviceRole::LeftDdi,
+                role_id: "left-ddi".to_string(),
+                bindings: vec![PhysicalToLogicalBinding {
+                    physical_control_id: 3,
+                    logical_control_id: "button-1".to_string(),
+                }],
             },
         ]);
 
-        assert_eq!(assignments.len(), 1);
-        assert_eq!(assignments[0].device_id, "B");
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(assignments[0].bindings.len(), 2);
+        assert_eq!(assignments[1].device_id, "B");
     }
 
     #[test]
-    fn sanitize_role_mappings_deduplicates_control_event_bindings() {
-        let mappings = sanitize_role_mappings(vec![RoleMappingConfig {
-            role: DeviceRole::LeftDdi,
+    fn learn_append_creates_a_new_device_role_binding() {
+        let request = LearnRequest {
+            role_id: "left-ddi".to_string(),
+            logical_control_id: "button-4".to_string(),
+            target_device_id: None,
+            expected_event_kind: None,
+            mode: LearnMode::Append,
+            timeout_ms: Some(10_000),
+        };
+
+        let assignments = apply_learn_binding(Vec::new(), &request, "device-new", 12);
+
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].device_id, "device-new");
+        assert_eq!(assignments[0].role_id, "left-ddi");
+        assert_eq!(
+            assignments[0].bindings,
+            vec![PhysicalToLogicalBinding {
+                physical_control_id: 12,
+                logical_control_id: "button-4".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn learn_replace_removes_only_the_selected_logical_route() {
+        let request = LearnRequest {
+            role_id: "left-ddi".to_string(),
+            logical_control_id: "button-1".to_string(),
+            target_device_id: None,
+            expected_event_kind: None,
+            mode: LearnMode::Replace,
+            timeout_ms: Some(10_000),
+        };
+        let assignments = vec![
+            DeviceRoleAssignment {
+                device_id: "device-a".to_string(),
+                role_id: "left-ddi".to_string(),
+                bindings: vec![
+                    PhysicalToLogicalBinding {
+                        physical_control_id: 1,
+                        logical_control_id: "button-1".to_string(),
+                    },
+                    PhysicalToLogicalBinding {
+                        physical_control_id: 2,
+                        logical_control_id: "button-2".to_string(),
+                    },
+                ],
+            },
+            DeviceRoleAssignment {
+                device_id: "device-a".to_string(),
+                role_id: "right-ddi".to_string(),
+                bindings: vec![PhysicalToLogicalBinding {
+                    physical_control_id: 1,
+                    logical_control_id: "button-1".to_string(),
+                }],
+            },
+        ];
+
+        let assignments = apply_learn_binding(assignments, &request, "device-b", 9);
+
+        assert_eq!(
+            assignments[0].bindings,
+            vec![PhysicalToLogicalBinding {
+                physical_control_id: 2,
+                logical_control_id: "button-2".to_string(),
+            }]
+        );
+        assert_eq!(assignments[1].bindings.len(), 1);
+        assert_eq!(assignments[2].device_id, "device-b");
+        assert_eq!(assignments[2].bindings[0].physical_control_id, 9);
+    }
+
+    #[test]
+    fn sanitize_adapter_mappings_keeps_multiple_actions_for_one_logical_input() {
+        let mappings = sanitize_adapter_mappings(vec![AdapterMappingConfig {
+            adapter_id: "dcs-bios".to_string(),
+            profile_id: "default".to_string(),
+            output_mappings: Vec::new(),
             mappings: vec![
-                RoleControlMapping {
-                    id: String::new(),
-                    control_id: 3,
-                    input_event: NormalizedControlEvent::ButtonPushed,
-                    action: DcsBiosMappedAction {
-                        identifier: "AAA".to_string(),
-                        argument: "1".to_string(),
+                AdapterControlMapping {
+                    role_id: "left-ddi".to_string(),
+                    logical_control_id: "button-3".to_string(),
+                    event_kind: EventKind::ButtonPushed,
+                    action: AdapterActionConfig {
+                        action_id: "control-command".to_string(),
+                        parameters: HashMap::from([
+                            ("identifier".to_string(), "AAA".to_string()),
+                            ("argument".to_string(), "1".to_string()),
+                        ]),
                     },
                 },
-                RoleControlMapping {
-                    id: String::new(),
-                    control_id: 3,
-                    input_event: NormalizedControlEvent::ButtonPushed,
-                    action: DcsBiosMappedAction {
-                        identifier: "BBB".to_string(),
-                        argument: "2".to_string(),
+                AdapterControlMapping {
+                    role_id: "left-ddi".to_string(),
+                    logical_control_id: "button-3".to_string(),
+                    event_kind: EventKind::ButtonPushed,
+                    action: AdapterActionConfig {
+                        action_id: "control-command".to_string(),
+                        parameters: HashMap::from([
+                            ("identifier".to_string(), "BBB".to_string()),
+                            ("argument".to_string(), "2".to_string()),
+                        ]),
                     },
                 },
             ],
         }]);
 
         assert_eq!(mappings.len(), 1);
-        assert_eq!(mappings[0].mappings.len(), 1);
-        assert_eq!(mappings[0].mappings[0].action.identifier, "AAA");
+        assert_eq!(mappings[0].mappings.len(), 2);
     }
 
     #[test]
-    fn find_mapping_action_matches_role_control_and_event() {
-        let action = find_mapping_action(
-            &[RoleMappingConfig {
-                role: DeviceRole::RightDdi,
-                mappings: vec![RoleControlMapping {
-                    id: "1".to_string(),
-                    control_id: 7,
-                    input_event: NormalizedControlEvent::ButtonDown,
-                    action: DcsBiosMappedAction {
-                        identifier: "MASTER_ARM".to_string(),
-                        argument: "1".to_string(),
+    fn legacy_state_migrates_to_schema_v2_and_identity_bindings() {
+        let (state, migrated) = normalize_manager_state_json(
+            r#"{
+                "deviceEndpoints": [],
+                "deviceRoleAssignments": [{"deviceId":"device-a","role":"LEFT_DDI"}],
+                "roleMappings": [{"role":"LEFT_DDI","mappings":[
+                    {"id":"old-1","controlId":3,"inputEvent":"BUTTON_PUSHED",
+                     "action":{"identifier":"MASTER_ARM_SW","argument":"1"}}
+                ]}]
+            }"#,
+        )
+        .expect("legacy state");
+
+        assert!(migrated);
+        assert_eq!(state.schema_version, STATE_SCHEMA_VERSION);
+        assert_eq!(
+            state.device_role_assignments[0].bindings[0].physical_control_id,
+            3
+        );
+        assert_eq!(
+            state.device_role_assignments[0].bindings[0].logical_control_id,
+            "button-3"
+        );
+        assert_eq!(state.adapter_mappings[0].adapter_id, "dcs-bios");
+        assert_eq!(
+            state.adapter_mappings[0].mappings[0].action.parameters["identifier"],
+            "MASTER_ARM_SW"
+        );
+    }
+
+    struct FakeAdapter {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl InputAdapter for FakeAdapter {
+        fn dispatch_input(
+            &self,
+            _config: &DcsBiosConnectionConfig,
+            action: &AdapterActionConfig,
+        ) -> Result<(), String> {
+            self.calls.lock().unwrap().push(action.action_id.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn fake_adapters_receive_all_resolved_actions_without_game_io() {
+        let event = mapping::LogicalInputEvent {
+            device_id: "device-a".to_string(),
+            physical_control_id: 3,
+            role_id: "left-ddi".to_string(),
+            logical_control_id: "button-1".to_string(),
+            event_kind: EventKind::ButtonPushed,
+            value: ControlValue::Button { pressed: false },
+        };
+        let mappings = vec![
+            AdapterMappingConfig {
+                adapter_id: "fake-a".to_string(),
+                profile_id: "default".to_string(),
+                output_mappings: Vec::new(),
+                mappings: vec![AdapterControlMapping {
+                    role_id: "left-ddi".to_string(),
+                    logical_control_id: "button-1".to_string(),
+                    event_kind: EventKind::ButtonPushed,
+                    action: AdapterActionConfig {
+                        action_id: "fake-a-action".to_string(),
+                        parameters: HashMap::new(),
                     },
                 }],
-            }],
-            DeviceRole::RightDdi,
-            7,
-            NormalizedControlEvent::ButtonDown,
-        )
-        .expect("action");
+            },
+            AdapterMappingConfig {
+                adapter_id: "fake-b".to_string(),
+                profile_id: "default".to_string(),
+                output_mappings: Vec::new(),
+                mappings: vec![AdapterControlMapping {
+                    role_id: "left-ddi".to_string(),
+                    logical_control_id: "button-1".to_string(),
+                    event_kind: EventKind::ButtonPushed,
+                    action: AdapterActionConfig {
+                        action_id: "fake-b-action".to_string(),
+                        parameters: HashMap::new(),
+                    },
+                }],
+            },
+        ];
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = AdapterRegistry {
+            adapters: HashMap::new(),
+        };
+        registry.adapters.insert(
+            "fake-a",
+            Box::new(FakeAdapter {
+                calls: calls.clone(),
+            }),
+        );
+        registry.adapters.insert(
+            "fake-b",
+            Box::new(FakeAdapter {
+                calls: calls.clone(),
+            }),
+        );
 
-        assert_eq!(action.identifier, "MASTER_ARM");
+        for resolved in resolve_adapter_actions(&mappings, &event) {
+            registry
+                .get(&resolved.adapter_id)
+                .expect("fake adapter is registered")
+                .dispatch_input(&DcsBiosConnectionConfig::default(), &resolved.action)
+                .expect("fake adapter dispatch must succeed");
+        }
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["fake-a-action".to_string(), "fake-b-action".to_string()]
+        );
     }
 
     #[test]
@@ -2201,15 +3150,76 @@ mod tests {
     }
 
     #[test]
-    fn dcsbios_export_packet_updates_memory_map() {
+    fn dcsbios_memory_updates_write_memory_map() {
         let memory = Arc::new(Mutex::new(VecMemoryMap::default()));
         let packet = vec![0x55, 0x55, 0x55, 0x55, 0x00, 0x10, 0x02, 0x00, 0x34, 0x12];
+        let mut decoder = DcsBiosStreamDecoder::default();
+        let updates = decoder.feed(&packet);
 
-        apply_dcsbios_export_packet(memory.clone(), packet).expect("packet must decode");
+        apply_dcsbios_memory_updates(memory.clone(), &updates).expect("packet must decode");
 
         let binding = memory.lock().unwrap();
         let bytes = binding.read(0x1000..=0x1001).expect("bytes must exist");
         assert_eq!(bytes, &[0x34, 0x12]);
+    }
+
+    #[test]
+    fn dcsbios_stream_decoder_skips_noise_and_recovers_from_bad_length() {
+        let packet = [
+            0x01, 0x02, 0x03, 0x55, 0x55, 0x55, 0x55, 0x00, 0x10, 0xFF, 0xFF, 0x55, 0x55, 0x55,
+            0x55, 0x00, 0x20, 0x01, 0x00, 0x7F,
+        ];
+        let mut decoder = DcsBiosStreamDecoder::default();
+
+        assert_eq!(
+            decoder.feed(&packet),
+            vec![DcsBiosMemoryUpdate {
+                address: 0x2000,
+                data: vec![0x7F],
+            }]
+        );
+    }
+
+    #[test]
+    fn dcsbios_stream_decoder_reassembles_datagram_boundaries() {
+        let packet = [0x55, 0x55, 0x55, 0x55, 0x00, 0x10, 0x02, 0x00, 0x34, 0x12];
+        let mut decoder = DcsBiosStreamDecoder::default();
+
+        assert!(decoder.feed(&packet[..7]).is_empty());
+        assert_eq!(
+            decoder.feed(&packet[7..]),
+            vec![DcsBiosMemoryUpdate {
+                address: 0x1000,
+                data: vec![0x34, 0x12],
+            }]
+        );
+    }
+
+    #[test]
+    fn dcsbios_stream_decoder_handles_multiple_writes_and_frames() {
+        let bytes = [
+            0x55, 0x55, 0x55, 0x55, 0x00, 0x10, 0x01, 0x00, 0xAA, 0x10, 0x10, 0x01, 0x00, 0xBB,
+            0x55, 0x55, 0x55, 0x55, 0x20, 0x10, 0x01, 0x00, 0xCC,
+        ];
+        let mut decoder = DcsBiosStreamDecoder::default();
+
+        assert_eq!(
+            decoder.feed(&bytes),
+            vec![
+                DcsBiosMemoryUpdate {
+                    address: 0x1000,
+                    data: vec![0xAA],
+                },
+                DcsBiosMemoryUpdate {
+                    address: 0x1010,
+                    data: vec![0xBB],
+                },
+                DcsBiosMemoryUpdate {
+                    address: 0x1020,
+                    data: vec![0xCC],
+                },
+            ]
+        );
     }
 
     #[test]
@@ -2221,15 +3231,16 @@ mod tests {
         let released = pressed_buttons.remove(&(device_id, 5));
 
         assert!(released);
-        assert_eq!(
-            [
-                NormalizedControlEvent::ButtonUp,
-                NormalizedControlEvent::ButtonPushed
-            ],
-            [
-                NormalizedControlEvent::ButtonUp,
-                NormalizedControlEvent::ButtonPushed
-            ]
-        );
+        let events = control_event_kinds(&ControlValue::Button { pressed: false }, released);
+        assert_eq!(events, [EventKind::ButtonUp, EventKind::ButtonPushed]);
+    }
+
+    #[test]
+    fn display_sequence_is_monotonic_per_device() {
+        let state = RuntimeState::new();
+
+        assert_eq!(state.next_display_sequence("device-a"), 1);
+        assert_eq!(state.next_display_sequence("device-b"), 1);
+        assert_eq!(state.next_display_sequence("device-a"), 2);
     }
 }

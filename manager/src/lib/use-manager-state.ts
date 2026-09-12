@@ -13,9 +13,11 @@ import {
   type DcsBiosStatus,
   type DeviceRoleAssignment,
   type DeviceEndpointConfig,
+  type AdapterMappingConfig,
+  type LearnRequest,
+  type LearnSessionStatus,
   type ManagerLogEntry,
   type ManagedDeviceSummary,
-  type RoleMappingConfig,
 } from "@/lib/manager-types";
 
 export function useManagerState() {
@@ -52,8 +54,12 @@ export function useManagerState() {
     setSnapshot((current) => ({ ...current, deviceRoleAssignments }));
   }, []);
 
-  const mergeRoleMappings = useCallback((roleMappings: RoleMappingConfig[]) => {
-    setSnapshot((current) => ({ ...current, roleMappings }));
+  const mergeAdapterMappings = useCallback((adapterMappings: AdapterMappingConfig[]) => {
+    setSnapshot((current) => ({ ...current, adapterMappings }));
+  }, []);
+
+  const mergeLearnSession = useCallback((learnSession: LearnSessionStatus) => {
+    setSnapshot((current) => ({ ...current, learnSession }));
   }, []);
 
   const refreshSnapshot = useCallback(async () => {
@@ -196,16 +202,16 @@ export function useManagerState() {
     [replaceSnapshot, runAction],
   );
 
-  const saveRoleMappings = useCallback(
-    async (roleMappings: RoleMappingConfig[]) => {
+  const saveAdapterMappings = useCallback(
+    async (adapterMappings: AdapterMappingConfig[]) => {
       if (!isTauri()) {
-        setSnapshot((current) => ({ ...current, roleMappings }));
+        setSnapshot((current) => ({ ...current, adapterMappings }));
         return;
       }
 
       try {
-        const next = await runAction("save-role-mappings", () =>
-          invoke<AppSnapshot>("save_role_mappings", { roleMappings }),
+        const next = await runAction("save-adapter-mappings", () =>
+          invoke<AppSnapshot>("save_adapter_mappings", { adapterMappings }),
         );
         replaceSnapshot(next);
       } catch (error) {
@@ -214,6 +220,58 @@ export function useManagerState() {
     },
     [replaceSnapshot, runAction],
   );
+
+  const startLearn = useCallback(
+    async (request: LearnRequest) => {
+      if (!isTauri()) {
+        setSnapshot((current) => ({
+          ...current,
+          learnSession: {
+            active: true,
+            roleId: request.roleId,
+            logicalControlId: request.logicalControlId,
+            targetDeviceId: request.targetDeviceId ?? null,
+            expectedEventKind: request.expectedEventKind ?? null,
+            mode: request.mode,
+            armedAt: new Date().toISOString(),
+            timeoutMs: request.timeoutMs ?? 10_000,
+            capturedDeviceId: null,
+            capturedPhysicalControlId: null,
+          },
+        }));
+        return;
+      }
+
+      try {
+        const next = await runAction("start-learn", () =>
+          invoke<AppSnapshot>("start_learn", { request }),
+        );
+        replaceSnapshot(next);
+      } catch (error) {
+        setRuntimeError(String(error));
+      }
+    },
+    [replaceSnapshot, runAction],
+  );
+
+  const cancelLearn = useCallback(async () => {
+    if (!isTauri()) {
+      setSnapshot((current) => ({
+        ...current,
+        learnSession: defaultSnapshot.learnSession,
+      }));
+      return;
+    }
+
+    try {
+      const next = await runAction("cancel-learn", () =>
+        invoke<AppSnapshot>("cancel_learn"),
+      );
+      replaceSnapshot(next);
+    } catch (error) {
+      setRuntimeError(String(error));
+    }
+  }, [replaceSnapshot, runAction]);
 
   const sendCommand = useCallback(
     async (request: DcsBiosCommandRequest) => {
@@ -271,9 +329,14 @@ export function useManagerState() {
             mergeDeviceRoleAssignments(event.payload);
           }
         }),
-        listen<RoleMappingConfig[]>("role-mappings-changed", (event) => {
+        listen<AdapterMappingConfig[]>("adapter-mappings-changed", (event) => {
           if (!disposed) {
-            mergeRoleMappings(event.payload);
+            mergeAdapterMappings(event.payload);
+          }
+        }),
+        listen<LearnSessionStatus>("learn-session-changed", (event) => {
+          if (!disposed) {
+            mergeLearnSession(event.payload);
           }
         }),
       ]);
@@ -294,7 +357,8 @@ export function useManagerState() {
     mergeDeviceRoleAssignments,
     mergeDevices,
     mergeLog,
-    mergeRoleMappings,
+    mergeAdapterMappings,
+    mergeLearnSession,
     mergeStatus,
     refreshSerialPorts,
     refreshSnapshot,
@@ -311,7 +375,9 @@ export function useManagerState() {
     refreshDevices,
     saveDeviceEndpoints,
     saveDeviceRoleAssignments,
-    saveRoleMappings,
+    saveAdapterMappings,
+    startLearn,
+    cancelLearn,
     refreshSerialPorts,
     sendCommand,
     refreshSnapshot,

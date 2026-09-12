@@ -28,7 +28,9 @@ export default function ManagerTabs() {
         refreshDevices,
         saveDeviceEndpoints,
         saveDeviceRoleAssignments,
-        saveRoleMappings,
+        saveAdapterMappings,
+        startLearn,
+        cancelLearn,
     } = useManagerState();
 
     const tabs = [
@@ -57,6 +59,7 @@ export default function ManagerTabs() {
                     devices={snapshot.devices}
                     deviceEndpoints={snapshot.deviceEndpoints}
                     deviceRoleAssignments={snapshot.deviceRoleAssignments}
+                    roleDefinitions={snapshot.roleDefinitions}
                     serialPorts={serialPorts}
                     busyAction={busyAction}
                     onRefresh={refreshDevices}
@@ -72,10 +75,15 @@ export default function ManagerTabs() {
             content: (
                 <MappingSettings
                     devices={snapshot.devices}
+                    roleDefinitions={snapshot.roleDefinitions}
                     deviceRoleAssignments={snapshot.deviceRoleAssignments}
-                    roleMappings={snapshot.roleMappings}
+                    adapterMappings={snapshot.adapterMappings}
+                    learnSession={snapshot.learnSession}
                     busyAction={busyAction}
-                    onSaveRoleMappings={saveRoleMappings}
+                    onSaveDeviceRoleAssignments={saveDeviceRoleAssignments}
+                    onSaveAdapterMappings={saveAdapterMappings}
+                    onStartLearn={startLearn}
+                    onCancelLearn={cancelLearn}
                 />
             ),
         },

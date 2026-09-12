@@ -2111,6 +2111,7 @@ dependencies = [
  "chrono",
  "dcs-bios",
  "hcp",
+ "heapless",
  "imcp",
  "serde",
  "serde_json",

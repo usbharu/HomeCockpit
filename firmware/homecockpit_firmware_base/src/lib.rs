@@ -2,7 +2,7 @@
 
 use hcp::{
     APP_PROTOCOL_VERSION, AppPacketError, AppPacketKind, Capabilities, ControlEvent, ControlValue,
-    DeviceHello, DeviceKind, Version, encode_set_packet,
+    DeviceHello, DeviceKind, DisplayData, Version, encode_set_packet,
 };
 use imcp::frame::{Address, Frame, FramePayload};
 
@@ -21,6 +21,7 @@ pub enum FirmwareBaseError {
 pub struct DeviceRuntimeState {
     address: Option<u8>,
     next_control_seq: u16,
+    last_display_seq: Option<u16>,
 }
 
 impl DeviceRuntimeState {
@@ -28,6 +29,7 @@ impl DeviceRuntimeState {
         Self {
             address: None,
             next_control_seq: 0,
+            last_display_seq: None,
         }
     }
 
@@ -38,6 +40,7 @@ impl DeviceRuntimeState {
     pub fn assign_address(&mut self, address: u8) {
         self.address = Some(address);
         self.next_control_seq = 0;
+        self.last_display_seq = None;
     }
 
     pub fn take_next_control_seq(&mut self) -> Result<u16, FirmwareBaseError> {
@@ -48,6 +51,16 @@ impl DeviceRuntimeState {
         let seq = self.next_control_seq;
         self.next_control_seq = self.next_control_seq.wrapping_add(1);
         Ok(seq)
+    }
+
+    pub fn accept_display_data(&mut self, display: &DisplayData) -> bool {
+        let accepted = self
+            .last_display_seq
+            .is_none_or(|previous| display.supersedes(previous));
+        if accepted {
+            self.last_display_seq = Some(display.seq);
+        }
+        accepted
     }
 }
 
@@ -152,6 +165,26 @@ mod tests {
                 event: ControlValue::Button { pressed: true },
             })
         );
+    }
+
+    #[test]
+    fn display_sequence_accepts_newer_and_rejects_older_packets() {
+        let mut state = DeviceRuntimeState::new();
+        let newer = hcp::DisplayData {
+            seq: 4,
+            target: hcp::DisplayTarget::Screen(0),
+            payload: hcp::DisplayPayload::Bytes {
+                encoding: hcp::ByteEncoding::Utf8Text,
+                data: Default::default(),
+            },
+        };
+        let older = hcp::DisplayData {
+            seq: 3,
+            ..newer.clone()
+        };
+
+        assert!(state.accept_display_data(&newer));
+        assert!(!state.accept_display_data(&older));
     }
 
     #[test]
