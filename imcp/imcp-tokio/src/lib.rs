@@ -36,6 +36,7 @@ impl imcp::channel::Sender for TokioSender {
 }
 
 impl TokioSender {
+    #[allow(clippy::result_large_err)]
     pub async fn try_send(
         &mut self,
         frame: Frame,
