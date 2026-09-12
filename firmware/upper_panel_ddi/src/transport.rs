@@ -119,10 +119,10 @@ impl ImcpTransport {
             offset += packet_len;
         }
 
-        if needs_zero_length_packet(data.len(), packet_size) {
-            if let Err(error) = self.usb_sender.write_packet(&[]).await {
-                return self.handle_usb_write_error(error);
-            }
+        if needs_zero_length_packet(data.len(), packet_size)
+            && let Err(error) = self.usb_sender.write_packet(&[]).await
+        {
+            return self.handle_usb_write_error(error);
         }
 
         WriteEvent::Sent

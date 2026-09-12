@@ -5,7 +5,7 @@ pub(crate) fn next_packet_len(total_len: usize, offset: usize, packet_size: usiz
 }
 
 pub(crate) fn needs_zero_length_packet(total_len: usize, packet_size: usize) -> bool {
-    packet_size != 0 && total_len != 0 && total_len % packet_size == 0
+    packet_size != 0 && total_len != 0 && total_len.is_multiple_of(packet_size)
 }
 
 #[cfg(test)]

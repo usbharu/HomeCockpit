@@ -96,7 +96,11 @@ async fn main(spawner: Spawner) {
     usb_config.manufacturer = Some("HomeCockpit");
     usb_config.product = Some("Upper Panel DDI");
     usb_config.max_power = 100;
-    usb_config.max_packet_size_0 = USB_MAX_PACKET_SIZE as u8;
+    let usb_max_packet_size_0 =
+        u8::try_from(USB_MAX_PACKET_SIZE).expect("USB packet size must fit in endpoint 0");
+    let usb_max_packet_size =
+        u16::try_from(USB_MAX_PACKET_SIZE).expect("USB packet size must fit in CDC endpoint");
+    usb_config.max_packet_size_0 = usb_max_packet_size_0;
 
     let usb_config_descriptor = USB_CONFIG_DESCRIPTOR_CELL.init([0; 256]);
     let usb_bos_descriptor = USB_BOS_DESCRIPTOR_CELL.init([0; 256]);
@@ -110,7 +114,7 @@ async fn main(spawner: Spawner) {
         &mut [],
         usb_control_buf,
     );
-    let cdc_class = CdcAcmClass::new(&mut usb_builder, cdc_state, USB_MAX_PACKET_SIZE as u16);
+    let cdc_class = CdcAcmClass::new(&mut usb_builder, cdc_state, usb_max_packet_size);
     let (usb_sender, usb_receiver) = cdc_class.split();
     let usb_receiver =
         usb_receiver.into_buffered(USB_RX_BUFFER_CELL.init([0; USB_MAX_PACKET_SIZE]));
