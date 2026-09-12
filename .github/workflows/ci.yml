@@ -767,6 +767,139 @@ jobs:
             printf '\n[Download the KiCad reports and annotated image](%s)\n' "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+  kicad-pr-comment:
+    name: Comment KiCad violations on PR
+    needs:
+      - kicad-upper
+      - kicad-button
+    if: >-
+      ${{
+        always() &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (needs.kicad-upper.result == 'failure' || needs.kicad-button.result == 'failure')
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Download KiCad reports
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-reports'
+          path: ${{ runner.temp }}/kicad-reports
+          merge-multiple: true
+
+      - name: Create or update KiCad PR comment
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          REPORT_DIR: ${{ runner.temp }}/kicad-reports
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const marker = '<!-- homecockpit-kicad-ci -->';
+            const reportDir = process.env.REPORT_DIR;
+
+            function findSummaryFiles(directory) {
+              if (!fs.existsSync(directory)) {
+                return [];
+              }
+
+              const files = [];
+              for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                const entryPath = path.join(directory, entry.name);
+                if (entry.isDirectory()) {
+                  files.push(...findSummaryFiles(entryPath));
+                } else if (entry.isFile() && entry.name.endsWith('.summary.md')) {
+                  files.push(entryPath);
+                }
+              }
+              return files.sort();
+            }
+
+            const summaries = findSummaryFiles(reportDir)
+              .map((file) => fs.readFileSync(file, 'utf8').trim())
+              .filter(Boolean);
+            let details = summaries.join('\n\n---\n\n');
+            if (!details) {
+              details = 'KiCad の詳細レポートを取得できませんでした。Actions の実行ログを確認してください。';
+            }
+
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              },
+            );
+            const reportArtifacts = artifacts
+              .filter((artifact) => artifact.name.endsWith('-reports'))
+              .sort((a, b) => a.name.localeCompare(b.name));
+            const artifactLinks = reportArtifacts.length
+              ? reportArtifacts
+                  .map((artifact) => `- [${artifact.name}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/artifacts/${artifact.id})`)
+                  .join('\n')
+              : '- KiCad artifact は利用できません。';
+
+            const maxDetailsLength = 48000;
+            if (details.length > maxDetailsLength) {
+              details = `${details.slice(0, maxDetailsLength)}\n\n…詳細は artifact のレポートを確認してください。`;
+            }
+
+            const body = [
+              marker,
+              '## ❌ KiCad ERC/DRC check failed',
+              '',
+              'error-level の ERC/DRC 違反を検出しました。番号付きマーカー付きの基板・回路図 SVG と詳細レポートを artifact に保存しています。',
+              '',
+              `- [Actions の実行結果を開く](${runUrl})`,
+              '- Reports / annotated images:',
+              artifactLinks,
+              '',
+              details,
+              '',
+              `_このコメントは CI run #${context.runNumber} が自動更新しています。_`,
+            ].join('\n');
+
+            const issueNumber = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+            const existing = comments.find(
+              (comment) => comment.user?.login === 'github-actions[bot]' && comment.body?.includes(marker),
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`Updated KiCad PR comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+              });
+              core.info('Created KiCad PR comment');
+            }
+
   ci-status:
     name: CI status
     if: always()
