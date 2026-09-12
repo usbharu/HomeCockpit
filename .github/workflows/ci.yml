@@ -494,11 +494,81 @@ jobs:
             -w /workspace \
             ghcr.io/kicad/kicad:9.0.9 \
             kicad-cli "$TOOL" "$CHECK" \
+              --format json \
               --severity-error \
               --exit-code-violations \
-              --output "/reports/${REPORT_NAME}.error.rpt" \
+              --output "/reports/${REPORT_NAME}.error.json" \
               "/workspace/$INPUT"
           error_status=$?
+
+          visualization_status=0
+          if [[ "$TOOL" == "pcb" ]]; then
+            docker run --rm \
+              -e HOME=/tmp/kicad-home \
+              -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              -v "$report_dir:/reports" \
+              -w /workspace \
+              ghcr.io/kicad/kicad:9.0.9 \
+              kicad-cli pcb export svg \
+                --page-size-mode 1 \
+                --exclude-drawing-sheet \
+                --mode-single \
+                --layers "F.Cu,B.Cu,F.Silkscreen,B.Silkscreen,Edge.Cuts" \
+                --output "/reports/${REPORT_NAME}.base.svg" \
+                "/workspace/$INPUT"
+            svg_status=$?
+
+            if [[ "$svg_status" -eq 0 && -s "$report_dir/${REPORT_NAME}.base.svg" ]]; then
+              python3 "$GITHUB_WORKSPACE/.github/scripts/render-kicad-violations.py" \
+                --kind pcb \
+                --svg "$report_dir/${REPORT_NAME}.base.svg" \
+                --report "$report_dir/${REPORT_NAME}.error.json" \
+                --output "$report_dir/${REPORT_NAME}.violations.svg" \
+                --summary "$report_dir/${REPORT_NAME}.summary.md" \
+                --source "$GITHUB_WORKSPACE/$INPUT" \
+                --title "$REPORT_NAME"
+              visualization_status=$?
+            else
+              visualization_status="$svg_status"
+            fi
+          else
+            schematic_dir="$report_dir/${REPORT_NAME}-schematic"
+            mkdir -p "$schematic_dir"
+            chmod 777 "$schematic_dir"
+            docker run --rm \
+              -e HOME=/tmp/kicad-home \
+              -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              -v "$report_dir:/reports" \
+              -w /workspace \
+              ghcr.io/kicad/kicad:9.0.9 \
+              kicad-cli sch export svg \
+                --exclude-drawing-sheet \
+                --output "/reports/${REPORT_NAME}-schematic" \
+                "/workspace/$INPUT"
+            svg_status=$?
+            schematic_svg="$(find "$schematic_dir" -type f -name '*.svg' -print -quit)"
+
+            if [[ "$svg_status" -eq 0 && -n "$schematic_svg" && -s "$report_dir/${REPORT_NAME}.error.json" ]]; then
+              cp "$schematic_svg" "$report_dir/${REPORT_NAME}.base.svg"
+              python3 "$GITHUB_WORKSPACE/.github/scripts/render-kicad-violations.py" \
+                --kind sch \
+                --svg "$report_dir/${REPORT_NAME}.base.svg" \
+                --report "$report_dir/${REPORT_NAME}.error.json" \
+                --output "$report_dir/${REPORT_NAME}.violations.svg" \
+                --summary "$report_dir/${REPORT_NAME}.summary.md" \
+                --title "$REPORT_NAME"
+              visualization_status=$?
+            else
+              visualization_status="$svg_status"
+            fi
+          fi
+
+          if [[ ! -f "$report_dir/${REPORT_NAME}.summary.md" ]]; then
+            printf '%s\n\n%s\n' \
+              "## KiCad visualization: ${REPORT_NAME}" \
+              "The annotated SVG could not be generated (status ${visualization_status})." \
+              > "$report_dir/${REPORT_NAME}.summary.md"
+          fi
 
           printf 'full_status=%s\nerror_status=%s\n' "$full_status" "$error_status" \
             > "$report_dir/${REPORT_NAME}.status"
@@ -513,11 +583,25 @@ jobs:
           exit "$failure"
       - name: Upload KiCad reports
         if: always()
+        id: upload
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}-reports
           path: ${{ runner.temp }}/kicad/${{ matrix.name }}.*
           if-no-files-found: warn
+      - name: Publish KiCad summary
+        if: always()
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          if [[ -f "${{ runner.temp }}/kicad/${{ matrix.name }}.summary.md" ]]; then
+            cat "${{ runner.temp }}/kicad/${{ matrix.name }}.summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' "KiCad visualization summary was not generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -n "${ARTIFACT_URL:-}" ]]; then
+            printf '\n[Download the KiCad reports and annotated image](%s)\n' "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   kicad-button:
     name: KiCad button panel ${{ matrix.check }}
@@ -570,11 +654,81 @@ jobs:
             -w /workspace \
             ghcr.io/kicad/kicad:9.0.9 \
             kicad-cli "$TOOL" "$CHECK" \
+              --format json \
               --severity-error \
               --exit-code-violations \
-              --output "/reports/${REPORT_NAME}.error.rpt" \
+              --output "/reports/${REPORT_NAME}.error.json" \
               "/workspace/$INPUT"
           error_status=$?
+
+          visualization_status=0
+          if [[ "$TOOL" == "pcb" ]]; then
+            docker run --rm \
+              -e HOME=/tmp/kicad-home \
+              -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              -v "$report_dir:/reports" \
+              -w /workspace \
+              ghcr.io/kicad/kicad:9.0.9 \
+              kicad-cli pcb export svg \
+                --page-size-mode 1 \
+                --exclude-drawing-sheet \
+                --mode-single \
+                --layers "F.Cu,B.Cu,F.Silkscreen,B.Silkscreen,Edge.Cuts" \
+                --output "/reports/${REPORT_NAME}.base.svg" \
+                "/workspace/$INPUT"
+            svg_status=$?
+
+            if [[ "$svg_status" -eq 0 && -s "$report_dir/${REPORT_NAME}.base.svg" ]]; then
+              python3 "$GITHUB_WORKSPACE/.github/scripts/render-kicad-violations.py" \
+                --kind pcb \
+                --svg "$report_dir/${REPORT_NAME}.base.svg" \
+                --report "$report_dir/${REPORT_NAME}.error.json" \
+                --output "$report_dir/${REPORT_NAME}.violations.svg" \
+                --summary "$report_dir/${REPORT_NAME}.summary.md" \
+                --source "$GITHUB_WORKSPACE/$INPUT" \
+                --title "$REPORT_NAME"
+              visualization_status=$?
+            else
+              visualization_status="$svg_status"
+            fi
+          else
+            schematic_dir="$report_dir/${REPORT_NAME}-schematic"
+            mkdir -p "$schematic_dir"
+            chmod 777 "$schematic_dir"
+            docker run --rm \
+              -e HOME=/tmp/kicad-home \
+              -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              -v "$report_dir:/reports" \
+              -w /workspace \
+              ghcr.io/kicad/kicad:9.0.9 \
+              kicad-cli sch export svg \
+                --exclude-drawing-sheet \
+                --output "/reports/${REPORT_NAME}-schematic" \
+                "/workspace/$INPUT"
+            svg_status=$?
+            schematic_svg="$(find "$schematic_dir" -type f -name '*.svg' -print -quit)"
+
+            if [[ "$svg_status" -eq 0 && -n "$schematic_svg" && -s "$report_dir/${REPORT_NAME}.error.json" ]]; then
+              cp "$schematic_svg" "$report_dir/${REPORT_NAME}.base.svg"
+              python3 "$GITHUB_WORKSPACE/.github/scripts/render-kicad-violations.py" \
+                --kind sch \
+                --svg "$report_dir/${REPORT_NAME}.base.svg" \
+                --report "$report_dir/${REPORT_NAME}.error.json" \
+                --output "$report_dir/${REPORT_NAME}.violations.svg" \
+                --summary "$report_dir/${REPORT_NAME}.summary.md" \
+                --title "$REPORT_NAME"
+              visualization_status=$?
+            else
+              visualization_status="$svg_status"
+            fi
+          fi
+
+          if [[ ! -f "$report_dir/${REPORT_NAME}.summary.md" ]]; then
+            printf '%s\n\n%s\n' \
+              "## KiCad visualization: ${REPORT_NAME}" \
+              "The annotated SVG could not be generated (status ${visualization_status})." \
+              > "$report_dir/${REPORT_NAME}.summary.md"
+          fi
 
           printf 'full_status=%s\nerror_status=%s\n' "$full_status" "$error_status" \
             > "$report_dir/${REPORT_NAME}.status"
@@ -589,11 +743,25 @@ jobs:
           exit "$failure"
       - name: Upload KiCad reports
         if: always()
+        id: upload
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}-reports
           path: ${{ runner.temp }}/kicad/${{ matrix.name }}.*
           if-no-files-found: warn
+      - name: Publish KiCad summary
+        if: always()
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          if [[ -f "${{ runner.temp }}/kicad/${{ matrix.name }}.summary.md" ]]; then
+            cat "${{ runner.temp }}/kicad/${{ matrix.name }}.summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' "KiCad visualization summary was not generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -n "${ARTIFACT_URL:-}" ]]; then
+            printf '\n[Download the KiCad reports and annotated image](%s)\n' "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   ci-status:
     name: CI status
