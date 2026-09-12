@@ -4,6 +4,13 @@
 use defmt::{debug, info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
+use embassy_rp::{
+    Peri, bind_interrupts,
+    gpio::{Input, Level, Output},
+    pac::UART0,
+    peripherals::UART0,
+    uart::{BufferedUart, Config},
+};
 #[cfg(feature = "rp2040")]
 use embassy_rp::{
     clocks::RoscRng,
@@ -16,14 +23,6 @@ use embassy_rp::{
     peripherals::{FLASH, TRNG},
     trng::{Config as TrngConfig, InterruptHandler as TrngInterruptHandler, Trng},
 };
-use embassy_rp::{
-    bind_interrupts,
-    gpio::{Input, Level, Output},
-    pac::UART0,
-    peripherals::UART0,
-    uart::{BufferedUart, Config},
-    Peri,
-};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, mutex::Mutex};
 use embassy_time::Timer;
 use embedded_io_async::{Read, Write};
@@ -33,10 +32,7 @@ use homecockpit_firmware_base::{
     build_device_hello_packet, control_id_from_matrix_position, encode_set_frame,
     try_assign_address_from_frame,
 };
-use imcp::{
-    Imcp,
-    frame::Frame,
-};
+use imcp::{Imcp, frame::Frame};
 use imcp_embassy::{EmbassyReceiver, EmbassySender, new};
 use imcp_embedded::{ImcpEmbedded, RpUartCarrierSense};
 use static_cell::StaticCell;
@@ -133,19 +129,27 @@ async fn main(spawner: Spawner) {
 
     let imcp = Imcp::new_client(tx_receiver, tx_sender, rx_buffer, parser_frame_buffer);
 
-    spawner
-        .spawn(imcp_task(imcp, imcp_embedded, device_identity).expect("failed spawn imcp_task"));
+    spawner.spawn(imcp_task(imcp, imcp_embedded, device_identity).expect("failed spawn imcp_task"));
 
     loop {
         if let Ok(g) = RESULT.try_lock() {
             for (r_index, (g_row, o_row)) in g.iter().zip(old.iter()).enumerate() {
+                let Ok(row_index) = u8::try_from(r_index) else {
+                    warn!("matrix row index does not fit in a u8: {}", r_index);
+                    continue;
+                };
+
                 for (c_index, (g_col, o_col)) in g_row.iter().zip(o_row.iter()).enumerate() {
                     if g_col != o_col {
                         info!("r:{} c{} {} → {}", r_index, c_index, o_col, g_col);
+                        let Ok(column_index) = u8::try_from(c_index) else {
+                            warn!("matrix column index does not fit in a u8: {}", c_index);
+                            continue;
+                        };
                         enqueue_control_event(
                             &sender2,
-                            r_index as u8,
-                            c_index as u8,
+                            row_index,
+                            column_index,
                             bool::from(*g_col),
                         );
                     }
@@ -273,7 +277,7 @@ fn device_descriptor() -> DeviceDescriptor {
             displays: 0,
             controls: u16::from(CONTROL_MATRIX_ROWS) * u16::from(CONTROL_MATRIX_COLUMNS),
             features: FEATURE_CONTROL_EVENTS,
-        }
+        },
     }
 }
 

@@ -36,6 +36,7 @@ impl imcp::channel::Sender for TokioSender {
 }
 
 impl TokioSender {
+    #[allow(clippy::result_large_err)]
     pub async fn try_send(
         &mut self,
         frame: Frame,
@@ -55,5 +56,15 @@ impl imcp::channel::Receiver for TokioReceiver {
 impl TokioReceiver {
     pub async fn try_receive(&mut self) -> Option<Frame> {
         self.receiver.recv().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TokioChannelError;
+
+    #[test]
+    fn closed_channel_has_a_stable_display_message() {
+        assert_eq!(TokioChannelError::Closed.to_string(), "channel closed");
     }
 }
