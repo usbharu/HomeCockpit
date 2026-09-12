@@ -76,10 +76,7 @@ pub fn control_id_from_matrix_position(row: u8, column: u8, columns: u8) -> u16 
     u16::from(row) * u16::from(columns) + u16::from(column)
 }
 
-pub fn try_assign_address_from_frame(
-    state: &mut DeviceRuntimeState,
-    frame: &Frame,
-) -> Option<u8> {
+pub fn try_assign_address_from_frame(state: &mut DeviceRuntimeState, frame: &Frame) -> Option<u8> {
     match frame.payload() {
         FramePayload::SetAddress { address, .. } => {
             state.assign_address(*address);

@@ -178,13 +178,22 @@ async fn main(spawner: Spawner) {
     loop {
         if let Ok(g) = RESULT.try_lock() {
             for (r_index, (g_row, o_row)) in g.iter().zip(old.iter()).enumerate() {
+                let Ok(row_index) = u8::try_from(r_index) else {
+                    warn!("matrix row index does not fit in a u8: {}", r_index);
+                    continue;
+                };
+
                 for (c_index, (g_col, o_col)) in g_row.iter().zip(o_row.iter()).enumerate() {
                     if g_col != o_col {
                         info!("r:{} c{} {} → {}", r_index, c_index, o_col, g_col);
+                        let Ok(column_index) = u8::try_from(c_index) else {
+                            warn!("matrix column index does not fit in a u8: {}", c_index);
+                            continue;
+                        };
                         enqueue_control_event(
                             &sender2,
-                            r_index as u8,
-                            c_index as u8,
+                            row_index,
+                            column_index,
                             bool::from(*g_col),
                         );
                     }

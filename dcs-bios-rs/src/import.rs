@@ -43,7 +43,8 @@ impl<'a> ImportCommand<'a> {
 
     pub fn encode(&self) -> String {
         let mut buffer = String::with_capacity(self.encoded_len());
-        self.write_command(&mut buffer).expect("writing to String cannot fail");
+        self.write_command(&mut buffer)
+            .expect("writing to String cannot fail");
         buffer
     }
 
@@ -55,7 +56,7 @@ impl<'a> ImportCommand<'a> {
     }
 
     fn write_command(&self, buffer: &mut String) -> Result<(), Error> {
-        write!(buffer, "{} {}\n", self.identifier, self.argument)
+        writeln!(buffer, "{} {}", self.identifier, self.argument)
             .map_err(|_| Error::BufferTooSmall())
     }
 }
