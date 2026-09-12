@@ -12,7 +12,7 @@ Keep the investigation centered on DCS-BIOS. Manager details are only an integra
 
 - Read `references/dcs-bios-protocol.md` for endpoints, `BIOSConfig.lua`, frame layout, values, or commands.
 - Read `references/connection-debug.md` for installation, LAN/multicast/unicast checks, or a no-packet diagnosis.
-- Read `references/fa18c-controls.md` for F/A-18C control-reference lookup, LEFT_DDI identifiers, accepted import arguments, and export verification.
+- Read `references/control-identifiers.md` for generic control-identifier lookup, the GitHub fallback when DCS is unavailable locally, and the F/A-18C example.
 - Read `references/homecockpit.md` only when changing or interpreting Manager code.
 - Run `scripts/detect_dcs_bios.py` for a live export check; do not write a new socket probe.
 
@@ -31,9 +31,11 @@ Do not infer connectivity from a successful UDP send. Prove export reception wit
 5. Configure Manager's export endpoint separately from its command destination. The expected local state is `stopped → connecting → listening → receiving`.
 6. Send an import command only when explicitly requested, using the aircraft's current control reference. Never invent identifiers or arguments.
 
-### Aircraft control lookup (F/A-18C primary)
+### Control identifier lookup (generic; F/A-18C as an example)
 
-F/A-18C is the primary aircraft for this repository's current cockpit work, but DCS-BIOS supports other aircraft modules as well. When the active aircraft is F/A-18C, read `references/fa18c-controls.md` before sending a command. For any other aircraft, apply the same lookup workflow with that aircraft's own installed control reference; never reuse F/A-18C identifiers or argument ranges without verification. Confirm the exact `_ACFT_NAME` and installed DCS-BIOS release first, then obtain the identifier and argument contract from the installed control reference or aircraft module definition. The upstream module is a useful cross-check, not a substitute for the installed release. For LEFT_DDI, verify both the identifier and its input range (`LEFT_DDI_BRT_SELECT`, `LEFT_DDI_BRT_CTL`, `LEFT_DDI_CONT_CTL`, or `LEFT_DDI_PB_01` through `LEFT_DDI_PB_20`) before constructing an LF-terminated import line.
+Control identifiers are specific to an aircraft module and DCS-BIOS release. This workflow is intended for any identifier; F/A-18C is the primary aircraft for the current HomeCockpit work, but its LEFT_DDI controls are examples only and must not become the assumed target. First identify the active module and exact DCS-BIOS release, then use that module's control reference or source definition to obtain the identifier and argument contract. Never reuse an identifier or range from another aircraft.
+
+The agent terminal may not have DCS installed. Distinguish the agent terminal from the DCS host: if the DCS host's files are unavailable, retrieve the exact release or commit from the official DCS-BIOS GitHub repository and inspect the corresponding module source. Do not require a local Saved Games directory, and do not treat the current `main` branch as proof for an older installed release. Read `references/control-identifiers.md` for the source-selection, GitHub retrieval, search, and verification procedure.
 
 ## Code-change rules
 
