@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use defmt::{info, warn};
+use defmt::{debug, info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
 #[cfg(feature = "rp2040")]
@@ -197,16 +197,18 @@ async fn imcp_task(
     loop {
         match select(imcp_embedded.read(&mut read_buffer), imcp.write_tick()).await {
             embassy_futures::select::Either::First(Ok(s)) => {
+                debug!("uart rx {} bytes: {:?}", s, &read_buffer[..s]);
                 let frame = imcp.read_tick(&read_buffer[..s]).await.unwrap_or_else(|e| {
-                    warn!("failed parse frame{:?}", e);
+                    warn!("failed parse frame {:?}, bytes: {:?}", e, &read_buffer[..s]);
                     None
                 });
                 if let Some(frame) = frame {
                     handle_incoming_frame(&tx_sender, &frame, device_identity.device_id);
                 }
-                info!("read: {}", s)
             }
-            embassy_futures::select::Either::First(Err(e)) => warn!("read error {:?}", e),
+            embassy_futures::select::Either::First(Err(e)) => {
+                debug!("uart rx error: {:?}", e)
+            }
             embassy_futures::select::Either::Second(Ok(v)) => {
                 imcp_embedded.write(&v).await.unwrap_or_else(|e| {
                     warn!("uart write error {:?}", e);

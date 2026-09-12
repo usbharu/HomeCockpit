@@ -26,8 +26,9 @@ pub enum DecodeError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum ProtocolError{
+pub enum ProtocolError {
     InvalidFrameType(FrameType),
+    InvalidAddress(u8),
     UnexpectedAck,
     NodeNotReady,
     AddressPoolExhausted,
