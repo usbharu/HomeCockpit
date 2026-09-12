@@ -781,6 +781,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: read
+      contents: write
       issues: write
       pull-requests: write
     steps:
@@ -824,6 +825,23 @@ jobs:
               return files.sort();
             }
 
+            function findImageFiles(directory) {
+              if (!fs.existsSync(directory)) {
+                return [];
+              }
+
+              const files = [];
+              for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                const entryPath = path.join(directory, entry.name);
+                if (entry.isDirectory()) {
+                  files.push(...findImageFiles(entryPath));
+                } else if (entry.isFile() && entry.name.endsWith('.violations.svg')) {
+                  files.push(entryPath);
+                }
+              }
+              return files.sort();
+            }
+
             const summaries = findSummaryFiles(reportDir)
               .map((file) => fs.readFileSync(file, 'utf8').trim())
               .filter(Boolean);
@@ -851,6 +869,81 @@ jobs:
                   .join('\n')
               : '- KiCad artifact は利用できません。';
 
+            const issueNumber = context.payload.pull_request.number;
+            const imageFiles = findImageFiles(reportDir);
+            const imageLinks = [];
+            if (imageFiles.length > 0) {
+              const imageBranch = `ci-artifacts/pr-${issueNumber}`;
+              let branchHead;
+              try {
+                const ref = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `heads/${imageBranch}`,
+                });
+                branchHead = ref.data.object.sha;
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+              }
+
+              const tree = [];
+              for (const imageFile of imageFiles) {
+                const imageName = path.basename(imageFile);
+                const blob = await github.rest.git.createBlob({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  content: fs.readFileSync(imageFile).toString('base64'),
+                  encoding: 'base64',
+                });
+                tree.push({
+                  path: imageName,
+                  mode: '100644',
+                  type: 'blob',
+                  sha: blob.data.sha,
+                });
+              }
+
+              const treeResponse = await github.rest.git.createTree({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tree,
+              });
+              const commitResponse = await github.rest.git.createCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                message: `ci: update KiCad images for PR #${issueNumber}`,
+                tree: treeResponse.data.sha,
+                parents: [branchHead || context.payload.pull_request.base.sha],
+              });
+
+              if (branchHead) {
+                await github.rest.git.updateRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `heads/${imageBranch}`,
+                  sha: commitResponse.data.sha,
+                  force: true,
+                });
+              } else {
+                await github.rest.git.createRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `refs/heads/${imageBranch}`,
+                  sha: commitResponse.data.sha,
+                });
+              }
+
+              const imageBaseUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/raw/${commitResponse.data.sha}`;
+              for (const imageFile of imageFiles) {
+                const imageName = path.basename(imageFile);
+                const label = imageName.replace(/\.violations\.svg$/, '');
+                imageLinks.push(`![${label}](${imageBaseUrl}/${encodeURIComponent(imageName)})`);
+              }
+              core.info(`Published ${imageLinks.length} KiCad images to ${imageBranch}`);
+            }
+
             const maxDetailsLength = 48000;
             if (details.length > maxDetailsLength) {
               details = `${details.slice(0, maxDetailsLength)}\n\n…詳細は artifact のレポートを確認してください。`;
@@ -863,6 +956,9 @@ jobs:
               'error-level の ERC/DRC 違反を検出しました。番号付きマーカー付きの基板・回路図 SVG と詳細レポートを artifact に保存しています。',
               '',
               `- [Actions の実行結果を開く](${runUrl})`,
+              imageLinks.length > 0 ? '### Annotated images' : '',
+              ...imageLinks,
+              '',
               '- Reports / annotated images:',
               artifactLinks,
               '',
@@ -871,7 +967,6 @@ jobs:
               `_このコメントは CI run #${context.runNumber} が自動更新しています。_`,
             ].join('\n');
 
-            const issueNumber = context.payload.pull_request.number;
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
