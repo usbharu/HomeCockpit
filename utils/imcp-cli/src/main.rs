@@ -159,6 +159,12 @@ struct FrameQueueReceiver(FrameQueue);
 #[derive(Debug)]
 struct FrameQueueEmpty;
 
+enum StdinEvent {
+    Line(String),
+    Eof,
+    Error(String),
+}
+
 #[derive(Debug, Default)]
 struct MasterRetryState {
     expected_ack: Option<u8>,
@@ -350,7 +356,17 @@ fn watch(watch_args: WatchArgs) -> Result<(), String> {
         let ports = serialport::available_ports()
             .map_err(|error| format!("failed to list serial ports: {error}"))?;
         for port in ports {
-            println!("{} {:?}", port.port_name, port.port_type);
+            match watch_args.format {
+                OutputFormat::Debug => println!("{} {:?}", port.port_name, port.port_type),
+                OutputFormat::Json => println!(
+                    "{}",
+                    json!({
+                        "event": "port",
+                        "port": port.port_name,
+                        "port_type": format!("{:?}", port.port_type),
+                    })
+                ),
+            }
         }
         return Ok(());
     }
@@ -568,9 +584,9 @@ fn master(master_args: MasterArgs) -> Result<(), String> {
         let mut serial_buf = vec![0; 1024];
         loop {
             if let Some(receiver) = control_receiver.as_ref() {
-                for line in receiver.try_iter() {
-                    match line {
-                        Ok(line) => {
+                for event in receiver.try_iter() {
+                    match event {
+                        StdinEvent::Line(line) => {
                             let trimmed = line.trim();
                             if trimmed.is_empty() {
                                 continue;
@@ -578,10 +594,11 @@ fn master(master_args: MasterArgs) -> Result<(), String> {
                             let frame_hex = trimmed.strip_prefix("send ").unwrap_or(trimmed);
                             match decode_single_wire_frame(frame_hex) {
                                 Ok(frame) => enqueue_frames(&queue, &[frame]),
-                                Err(error) => eprintln!("control input error: {error}"),
+                                Err(error) => print_error(format, "control", &error),
                             }
                         }
-                        Err(error) => eprintln!("control stdin error: {error}"),
+                        StdinEvent::Error(error) => print_error(format, "control", &error),
+                        StdinEvent::Eof => {}
                     }
                 }
                 let mut transmit = |bytes: &[u8]| transmit_serial(&mut *port, format, bytes);
@@ -650,32 +667,113 @@ fn run_master_stdin(
     enqueue_frames(queue, send_frames);
     flush_master_tx(imcp, queue, retry_state, Instant::now(), &mut transmit)?;
 
-    for line in io::stdin().lock().lines() {
-        let line = line.map_err(|error| format!("stdin read error: {error}"))?;
-        let trimmed_line = line.trim();
-        if trimmed_line.is_empty() {
+    let receiver = spawn_control_reader();
+    let mut input_closed = false;
+    let mut pending_event = None;
+    loop {
+        if let Some(event) = pending_event.take() {
+            input_closed |= process_master_stdin_event(
+                event,
+                imcp,
+                wire_parser,
+                queue,
+                format,
+                retry_state,
+                &mut transmit,
+            )?;
+        }
+        for event in receiver.try_iter() {
+            input_closed |= process_master_stdin_event(
+                event,
+                imcp,
+                wire_parser,
+                queue,
+                format,
+                retry_state,
+                &mut transmit,
+            )?;
+        }
+
+        if retry_state.is_due(Instant::now()) {
+            let can_flush_queue =
+                retry_master_frame(imcp, retry_state, Instant::now(), &mut transmit)?;
+            if can_flush_queue {
+                flush_master_tx(imcp, queue, retry_state, Instant::now(), &mut transmit)?;
+            }
+        }
+
+        if input_closed && retry_state.next_retry_at.is_none() {
+            break;
+        }
+        if input_closed {
+            if let Some(deadline) = retry_state.next_retry_at {
+                let wait = deadline.saturating_duration_since(Instant::now());
+                if !wait.is_zero() {
+                    thread::sleep(wait);
+                }
+            }
             continue;
         }
 
-        let bytes = match hex::decode(trimmed_line) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                print_error(format, "input", &error);
-                continue;
-            }
-        };
-        process_master_bytes(
-            imcp,
-            wire_parser,
-            queue,
-            &bytes,
-            format,
-            retry_state,
-            &mut transmit,
-        )?;
+        match retry_state
+            .next_retry_at
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        {
+            Some(wait) => match receiver.recv_timeout(wait) {
+                Ok(event) => pending_event = Some(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => input_closed = true,
+            },
+            None => match receiver.recv() {
+                Ok(event) => pending_event = Some(event),
+                Err(mpsc::RecvError) => input_closed = true,
+            },
+        }
     }
 
     Ok(())
+}
+
+fn process_master_stdin_event(
+    event: StdinEvent,
+    imcp: &mut Imcp<'_, '_, FrameQueueReceiver, FrameQueueSender>,
+    wire_parser: &mut FrameParser<'_, '_>,
+    queue: &FrameQueue,
+    format: OutputFormat,
+    retry_state: &mut MasterRetryState,
+    transmit: &mut impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<bool, String> {
+    match event {
+        StdinEvent::Line(line) => {
+            let trimmed_line = line.trim();
+            if trimmed_line.is_empty() {
+                return Ok(false);
+            }
+
+            let bytes = match hex::decode(trimmed_line) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    print_error(format, "input", &error);
+                    return Ok(false);
+                }
+            };
+            process_master_bytes(
+                imcp,
+                wire_parser,
+                queue,
+                &bytes,
+                format,
+                retry_state,
+                transmit,
+            )?;
+            Ok(false)
+        }
+        StdinEvent::Eof => Ok(true),
+        StdinEvent::Error(error) => {
+            print_error(format, "input", &error);
+            Ok(true)
+        }
+    }
 }
 
 fn process_master_bytes(
@@ -730,15 +828,23 @@ fn enqueue_frames(queue: &FrameQueue, frames: &[Frame]) {
     queue.borrow_mut().extend(frames.iter().cloned());
 }
 
-fn spawn_control_reader() -> mpsc::Receiver<Result<String, String>> {
+fn spawn_control_reader() -> mpsc::Receiver<StdinEvent> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         for line in io::stdin().lock().lines() {
-            let result = line.map_err(|error| error.to_string());
-            if sender.send(result).is_err() {
-                break;
+            match line {
+                Ok(line) => {
+                    if sender.send(StdinEvent::Line(line)).is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(StdinEvent::Error(error.to_string()));
+                    return;
+                }
             }
         }
+        let _ = sender.send(StdinEvent::Eof);
     });
     receiver
 }
