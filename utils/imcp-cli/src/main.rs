@@ -2,10 +2,12 @@ use std::{
     cell::RefCell,
     collections::VecDeque,
     convert::Infallible,
-    io::{self, BufRead, IsTerminal, Read, Write},
+    io::{self, BufRead, IsTerminal, Read},
     process,
     rc::Rc,
-    time::Duration,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
 };
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -112,6 +114,14 @@ struct MasterArgs {
     #[arg(long, conflicts_with = "port")]
     stdin: bool,
 
+    /// 起動時にmasterから送信するエンコード済みフレーム。複数指定できます。
+    #[arg(long = "send", value_name = "HEX", action = ArgAction::Append)]
+    send: Vec<String>,
+
+    /// シリアル接続中に標準入力から `send HEX` を受け取り送信します。
+    #[arg(long, requires = "port", conflicts_with = "stdin")]
+    control_stdin: bool,
+
     #[arg(long, value_enum, default_value_t = OutputFormat::Debug)]
     format: OutputFormat,
 }
@@ -138,6 +148,9 @@ enum PacketType {
 
 type FrameQueue = Rc<RefCell<VecDeque<Frame>>>;
 
+const MASTER_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const MASTER_MAX_RETRIES: u8 = 3;
+
 #[derive(Clone)]
 struct FrameQueueSender(FrameQueue);
 
@@ -145,6 +158,46 @@ struct FrameQueueReceiver(FrameQueue);
 
 #[derive(Debug)]
 struct FrameQueueEmpty;
+
+#[derive(Debug, Default)]
+struct MasterRetryState {
+    expected_ack: Option<u8>,
+    attempts: u8,
+    next_retry_at: Option<Instant>,
+}
+
+impl MasterRetryState {
+    fn is_due(&self, now: Instant) -> bool {
+        self.next_retry_at.is_some_and(|deadline| now >= deadline)
+    }
+
+    fn clear(&mut self) {
+        self.expected_ack = None;
+        self.attempts = 0;
+        self.next_retry_at = None;
+    }
+
+    fn observe_ack(&mut self, address: u8) {
+        if self.expected_ack == Some(address) {
+            self.clear();
+        }
+    }
+
+    fn observe_transmit(&mut self, frame: &Frame, now: Instant) {
+        match frame.payload() {
+            FramePayload::SetAddress { .. } => {
+                self.expected_ack = Some(0x00);
+                self.attempts = self.attempts.saturating_add(1);
+                self.next_retry_at = Some(now + MASTER_RETRY_INTERVAL);
+            }
+            FramePayload::Join(_) | FramePayload::Set(_) => {
+                self.expected_ack = Some(frame.to_address().as_byte());
+                self.next_retry_at = None;
+            }
+            _ => {}
+        }
+    }
+}
 
 impl Sender for FrameQueueSender {
     type Error = Infallible;
@@ -421,6 +474,30 @@ fn parse_payload(
         .map_err(|_| format!("--data is too large; maximum payload is {MAX_PAYLOAD_SIZE} bytes"))
 }
 
+fn decode_single_wire_bytes(bytes: &[u8]) -> Result<Frame, String> {
+    let mut rx_buffer = vec![0; MAX_ENCODED_FRAME_SIZE * 2];
+    let mut frame_buffer = vec![0; MAX_ENCODED_FRAME_SIZE * 2];
+    let mut parser = FrameParser::new(&mut rx_buffer, &mut frame_buffer);
+    parser
+        .write_data(bytes)
+        .map_err(|error| format!("invalid frame for --send: {error:?}"))?;
+    let frame = match parser.next_frame() {
+        Some(Ok(frame)) => frame,
+        Some(Err(error)) => return Err(format!("invalid frame for --send: {error:?}")),
+        None => return Err("--send must contain one complete IMCP frame".to_string()),
+    };
+    if parser.next_frame().is_some() {
+        return Err("--send must contain exactly one IMCP frame".to_string());
+    }
+    Ok(frame)
+}
+
+fn decode_single_wire_frame(hex_data: &str) -> Result<Frame, String> {
+    let bytes = hex::decode(hex_data.trim())
+        .map_err(|error| format!("invalid frame hex for --send: {error}"))?;
+    decode_single_wire_bytes(&bytes)
+}
+
 fn master(master_args: MasterArgs) -> Result<(), String> {
     let queue = Rc::new(RefCell::new(VecDeque::new()));
     let sender = FrameQueueSender(Rc::clone(&queue));
@@ -438,9 +515,23 @@ fn master(master_args: MasterArgs) -> Result<(), String> {
     let mut wire_rx_buffer = vec![0; 1024];
     let mut wire_frame_buffer = vec![0; 1024];
     let mut wire_parser = FrameParser::new(&mut wire_rx_buffer, &mut wire_frame_buffer);
+    let format = master_args.format;
+    let mut retry_state = MasterRetryState::default();
+    let send_frames = master_args
+        .send
+        .iter()
+        .map(|frame| decode_single_wire_frame(frame))
+        .collect::<Result<Vec<_>, _>>()?;
 
     if master_args.stdin {
-        run_master_stdin(&mut imcp, &mut wire_parser, &queue, master_args.format)
+        run_master_stdin(
+            &mut imcp,
+            &mut wire_parser,
+            &queue,
+            format,
+            &send_frames,
+            &mut retry_state,
+        )
     } else {
         let port_name = master_args
             .port
@@ -457,31 +548,84 @@ fn master(master_args: MasterArgs) -> Result<(), String> {
             master_args.baud
         );
 
+        enqueue_frames(&queue, &send_frames);
+        {
+            let mut transmit = |bytes: &[u8]| transmit_serial(&mut *port, format, bytes);
+            flush_master_tx(
+                &mut imcp,
+                &queue,
+                &mut retry_state,
+                Instant::now(),
+                &mut transmit,
+            )?;
+        }
+
+        let control_receiver = if master_args.control_stdin {
+            Some(spawn_control_reader())
+        } else {
+            None
+        };
         let mut serial_buf = vec![0; 1024];
         loop {
+            if let Some(receiver) = control_receiver.as_ref() {
+                for line in receiver.try_iter() {
+                    match line {
+                        Ok(line) => {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            let frame_hex = trimmed.strip_prefix("send ").unwrap_or(trimmed);
+                            match decode_single_wire_frame(frame_hex) {
+                                Ok(frame) => enqueue_frames(&queue, &[frame]),
+                                Err(error) => eprintln!("control input error: {error}"),
+                            }
+                        }
+                        Err(error) => eprintln!("control stdin error: {error}"),
+                    }
+                }
+                let mut transmit = |bytes: &[u8]| transmit_serial(&mut *port, format, bytes);
+                flush_master_tx(
+                    &mut imcp,
+                    &queue,
+                    &mut retry_state,
+                    Instant::now(),
+                    &mut transmit,
+                )?;
+            }
+
             match port.read(serial_buf.as_mut_slice()) {
                 Ok(bytes_read) if bytes_read > 0 => {
                     log::debug!("read uart: {} {:?}", bytes_read, &serial_buf[..bytes_read]);
-                    let mut transmit = |bytes: &[u8]| {
-                        port.write_all(bytes)
-                            .map_err(|error| format!("port write error: {error}"))?;
-                        port.flush()
-                            .map_err(|error| format!("port flush error: {error}"))?;
-                        print_bytes(master_args.format, "tx", bytes);
-                        Ok(())
-                    };
+                    let mut transmit = |bytes: &[u8]| transmit_serial(&mut *port, format, bytes);
                     process_master_bytes(
                         &mut imcp,
                         &mut wire_parser,
                         &queue,
                         &serial_buf[..bytes_read],
-                        master_args.format,
+                        format,
+                        &mut retry_state,
                         &mut transmit,
                     )?;
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
                 Err(error) => return Err(format!("port read error: {error}")),
+            }
+
+            if retry_state.is_due(Instant::now()) {
+                let mut transmit = |bytes: &[u8]| transmit_serial(&mut *port, format, bytes);
+                let can_flush_queue =
+                    retry_master_frame(&mut imcp, &mut retry_state, Instant::now(), &mut transmit)?;
+                if can_flush_queue {
+                    flush_master_tx(
+                        &mut imcp,
+                        &queue,
+                        &mut retry_state,
+                        Instant::now(),
+                        &mut transmit,
+                    )?;
+                }
             }
         }
     }
@@ -492,10 +636,19 @@ fn run_master_stdin(
     wire_parser: &mut FrameParser<'_, '_>,
     queue: &FrameQueue,
     format: OutputFormat,
+    send_frames: &[Frame],
+    retry_state: &mut MasterRetryState,
 ) -> Result<(), String> {
     if io::stdin().is_terminal() {
         return Err("--stdin requires a non-interactive stdin pipeline".to_string());
     }
+
+    let mut transmit = |bytes: &[u8]| {
+        print_bytes(format, "tx", bytes);
+        Ok(())
+    };
+    enqueue_frames(queue, send_frames);
+    flush_master_tx(imcp, queue, retry_state, Instant::now(), &mut transmit)?;
 
     for line in io::stdin().lock().lines() {
         let line = line.map_err(|error| format!("stdin read error: {error}"))?;
@@ -511,11 +664,15 @@ fn run_master_stdin(
                 continue;
             }
         };
-        let mut transmit = |bytes: &[u8]| {
-            print_bytes(format, "tx", bytes);
-            Ok(())
-        };
-        process_master_bytes(imcp, wire_parser, queue, &bytes, format, &mut transmit)?;
+        process_master_bytes(
+            imcp,
+            wire_parser,
+            queue,
+            &bytes,
+            format,
+            retry_state,
+            &mut transmit,
+        )?;
     }
 
     Ok(())
@@ -527,6 +684,7 @@ fn process_master_bytes(
     queue: &FrameQueue,
     bytes: &[u8],
     format: OutputFormat,
+    retry_state: &mut MasterRetryState,
     transmit: &mut impl FnMut(&[u8]) -> Result<(), String>,
 ) -> Result<(), String> {
     if let Err(error) = wire_parser.write_data(bytes) {
@@ -553,18 +711,110 @@ fn process_master_bytes(
             .encode(&mut encoded)
             .map_err(|error| format!("failed to re-encode received frame: {error:?}"))?;
         match block_on(imcp.read_tick(&encoded[..encoded_len])) {
-            Ok(Some(_)) | Ok(None) => {}
+            Ok(Some(_)) => {
+                if let FramePayload::Ack(address) = frame.payload() {
+                    retry_state.observe_ack(*address);
+                }
+            }
+            Ok(None) => {}
             Err(error) => print_error(format, "protocol", &error),
         }
 
-        while queue_has_frames(queue) {
-            let encoded = block_on(imcp.write_tick())
-                .map_err(|error| format!("failed to encode master response: {error:?}"))?;
-            transmit(encoded.as_slice())?;
-        }
+        flush_master_tx(imcp, queue, retry_state, Instant::now(), transmit)?;
     }
 
     Ok(())
+}
+
+fn enqueue_frames(queue: &FrameQueue, frames: &[Frame]) {
+    queue.borrow_mut().extend(frames.iter().cloned());
+}
+
+fn spawn_control_reader() -> mpsc::Receiver<Result<String, String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            let result = line.map_err(|error| error.to_string());
+            if sender.send(result).is_err() {
+                break;
+            }
+        }
+    });
+    receiver
+}
+
+fn transmit_serial(
+    port: &mut dyn serialport::SerialPort,
+    format: OutputFormat,
+    bytes: &[u8],
+) -> Result<(), String> {
+    port.write_all(bytes)
+        .map_err(|error| format!("port write error: {error}"))?;
+    port.flush()
+        .map_err(|error| format!("port flush error: {error}"))?;
+    print_bytes(format, "tx", bytes);
+    Ok(())
+}
+
+fn flush_master_tx(
+    imcp: &mut Imcp<'_, '_, FrameQueueReceiver, FrameQueueSender>,
+    queue: &FrameQueue,
+    retry_state: &mut MasterRetryState,
+    now: Instant,
+    transmit: &mut impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    if retry_state.expected_ack.is_some() {
+        return Ok(());
+    }
+
+    while queue_has_frames(queue) {
+        let encoded = block_on(imcp.write_tick())
+            .map_err(|error| format!("failed to encode master response: {error:?}"))?;
+        let frame = decode_single_wire_bytes(encoded.as_slice())?;
+        transmit(encoded.as_slice())?;
+        retry_state.observe_transmit(&frame, now);
+        if frame_requires_ack(&frame) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn frame_requires_ack(frame: &Frame) -> bool {
+    matches!(
+        frame.payload(),
+        FramePayload::Join(_) | FramePayload::SetAddress { .. } | FramePayload::Set(_)
+    )
+}
+
+fn retry_master_frame(
+    imcp: &mut Imcp<'_, '_, FrameQueueReceiver, FrameQueueSender>,
+    retry_state: &mut MasterRetryState,
+    now: Instant,
+    transmit: &mut impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<bool, String> {
+    if retry_state.attempts < MASTER_MAX_RETRIES {
+        let encoded = block_on(imcp.write_tick())
+            .map_err(|error| format!("failed to encode master retry: {error:?}"))?;
+        let frame = decode_single_wire_bytes(encoded.as_slice())?;
+        transmit(encoded.as_slice())?;
+        retry_state.observe_transmit(&frame, now);
+        return Ok(false);
+    }
+
+    // Let the core state machine consume its exhausted SetAddress pending
+    // frame. It reports an empty queue after clearing that state.
+    retry_state.clear();
+    match block_on(imcp.write_tick()) {
+        Err(imcp::error::ImcpError::ReceiveError(FrameQueueEmpty)) => Ok(true),
+        Ok(encoded) => {
+            let frame = decode_single_wire_bytes(encoded.as_slice())?;
+            transmit(encoded.as_slice())?;
+            retry_state.observe_transmit(&frame, now);
+            Ok(!frame_requires_ack(&frame))
+        }
+        Err(error) => Err(format!("failed to expire master retry: {error:?}")),
+    }
 }
 
 fn queue_has_frames(queue: &FrameQueue) -> bool {
@@ -574,7 +824,8 @@ fn queue_has_frames(queue: &FrameQueue) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Commands, GlobalOptions, MasterArgs, OutputFormat, PackArgs, process_master_bytes,
+        Commands, GlobalOptions, MasterArgs, MasterRetryState, OutputFormat, PackArgs,
+        flush_master_tx, process_master_bytes, retry_master_frame,
     };
     use clap::Parser;
     use imcp::{
@@ -582,7 +833,12 @@ mod tests {
         frame::{Address, Frame, FramePayload, MAX_ENCODED_FRAME_SIZE},
         parser::FrameParser,
     };
-    use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+    use std::{
+        cell::RefCell,
+        collections::VecDeque,
+        rc::Rc,
+        time::{Duration, Instant},
+    };
 
     fn encode(frame: &Frame) -> Vec<u8> {
         let mut buffer = [0u8; MAX_ENCODED_FRAME_SIZE];
@@ -632,17 +888,25 @@ mod tests {
 
     #[test]
     fn parses_master_stdin_json_arguments() {
-        let parsed =
-            GlobalOptions::try_parse_from(["imcp-cli", "master", "--stdin", "--format", "json"])
-                .expect("master args should parse");
+        let parsed = GlobalOptions::try_parse_from([
+            "imcp-cli",
+            "master",
+            "--stdin",
+            "--format",
+            "json",
+            "--send",
+            "FE020100000003FF",
+        ])
+        .expect("master args should parse");
 
         assert!(matches!(
             parsed.command,
             Commands::Master(MasterArgs {
                 stdin: true,
                 format: OutputFormat::Json,
+                send,
                 ..
-            })
+            }) if send == vec!["FE020100000003FF".to_string()]
         ));
     }
 
@@ -662,9 +926,9 @@ mod tests {
             0x00,
             FramePayload::Join(0xCAFE_BABE),
         ));
-        let mut transmitted = Vec::new();
+        let transmitted = RefCell::new(Vec::new());
         let mut transmit = |bytes: &[u8]| {
-            transmitted.push(bytes.to_vec());
+            transmitted.borrow_mut().push(bytes.to_vec());
             Ok(())
         };
 
@@ -674,11 +938,13 @@ mod tests {
             &queue,
             &join,
             super::OutputFormat::Debug,
+            &mut MasterRetryState::default(),
             &mut transmit,
         )
         .expect("master should process join");
 
-        assert_eq!(transmitted.len(), 1);
+        assert_eq!(transmitted.borrow().len(), 1);
+        let transmitted = transmitted.borrow();
         assert_eq!(
             decode(&transmitted[0]).payload(),
             &FramePayload::SetAddress {
@@ -708,9 +974,9 @@ mod tests {
             0x02,
             FramePayload::Ping,
         ));
-        let mut transmitted = Vec::new();
+        let transmitted = RefCell::new(Vec::new());
         let mut transmit = |bytes: &[u8]| {
-            transmitted.push(bytes.to_vec());
+            transmitted.borrow_mut().push(bytes.to_vec());
             Ok(())
         };
 
@@ -720,14 +986,135 @@ mod tests {
             &queue,
             &ping,
             super::OutputFormat::Debug,
+            &mut MasterRetryState::default(),
             &mut transmit,
         )
         .expect("master should process ping");
 
-        assert_eq!(transmitted.len(), 1);
-        let pong = decode(&transmitted[0]);
+        assert_eq!(transmitted.borrow().len(), 1);
+        let pong = decode(&transmitted.borrow()[0]);
         assert_eq!(pong.to_address(), Address::Unicast(0x02));
         assert_eq!(pong.from_address(), 0x01);
         assert_eq!(pong.payload(), &FramePayload::Pong);
+    }
+
+    #[test]
+    fn master_does_not_retry_pending_frame_while_flushing_queue() {
+        let queue = Rc::new(RefCell::new(VecDeque::from([
+            Frame::new(
+                Address::Unicast(0x00),
+                0x01,
+                FramePayload::SetAddress {
+                    address: 0x02,
+                    id: 0xCAFE_BABE,
+                },
+            ),
+            Frame::new(Address::Unicast(0x02), 0x01, FramePayload::Ping),
+        ])));
+        let sender = super::FrameQueueSender(Rc::clone(&queue));
+        let receiver = super::FrameQueueReceiver(Rc::clone(&queue));
+        let mut imcp = Imcp::new_master(
+            receiver,
+            sender,
+            Box::leak(Box::new([0u8; 128])),
+            Box::leak(Box::new([0u8; 128])),
+        );
+        let mut retry_state = MasterRetryState::default();
+        let transmitted = RefCell::new(Vec::new());
+        let mut transmit = |bytes: &[u8]| {
+            transmitted.borrow_mut().push(bytes.to_vec());
+            Ok(())
+        };
+
+        flush_master_tx(
+            &mut imcp,
+            &queue,
+            &mut retry_state,
+            Instant::now(),
+            &mut transmit,
+        )
+        .expect("master should send the first pending frame");
+        flush_master_tx(
+            &mut imcp,
+            &queue,
+            &mut retry_state,
+            Instant::now(),
+            &mut transmit,
+        )
+        .expect("master should wait for the pending frame ACK");
+
+        assert_eq!(transmitted.borrow().len(), 1);
+        assert_eq!(queue.borrow().len(), 1);
+    }
+
+    #[test]
+    fn master_retries_set_address_after_lost_ack() {
+        let queue = Rc::new(RefCell::new(VecDeque::new()));
+        let sender = super::FrameQueueSender(Rc::clone(&queue));
+        let receiver = super::FrameQueueReceiver(Rc::clone(&queue));
+        let mut imcp = Imcp::new_master(
+            receiver,
+            sender,
+            Box::leak(Box::new([0u8; 128])),
+            Box::leak(Box::new([0u8; 128])),
+        );
+        let mut wire_parser = FrameParser::new(
+            Box::leak(Box::new([0u8; 128])),
+            Box::leak(Box::new([0u8; 128])),
+        );
+        let join = encode(&Frame::new(
+            Address::Unicast(0x01),
+            0x00,
+            FramePayload::Join(0xCAFE_BABE),
+        ));
+        let mut retry_state = MasterRetryState::default();
+        let transmitted = RefCell::new(Vec::new());
+        let mut transmit = |bytes: &[u8]| {
+            transmitted.borrow_mut().push(bytes.to_vec());
+            Ok(())
+        };
+        let now = Instant::now();
+
+        process_master_bytes(
+            &mut imcp,
+            &mut wire_parser,
+            &queue,
+            &join,
+            super::OutputFormat::Debug,
+            &mut retry_state,
+            &mut transmit,
+        )
+        .expect("master should process join");
+        assert_eq!(transmitted.borrow().len(), 1);
+
+        process_master_bytes(
+            &mut imcp,
+            &mut wire_parser,
+            &queue,
+            &join,
+            super::OutputFormat::Debug,
+            &mut retry_state,
+            &mut transmit,
+        )
+        .expect("master should process duplicate join");
+        assert_eq!(transmitted.borrow().len(), 1);
+
+        retry_state.next_retry_at = Some(now - Duration::from_millis(1));
+        retry_master_frame(&mut imcp, &mut retry_state, Instant::now(), &mut transmit)
+            .expect("master should retry set address");
+        assert_eq!(transmitted.borrow().len(), 2);
+        assert_eq!(transmitted.borrow()[0], transmitted.borrow()[1]);
+
+        retry_state.next_retry_at = Some(now - Duration::from_millis(1));
+        retry_master_frame(&mut imcp, &mut retry_state, Instant::now(), &mut transmit)
+            .expect("master should send the final retry");
+        assert_eq!(transmitted.borrow().len(), 3);
+
+        retry_state.next_retry_at = Some(now - Duration::from_millis(1));
+        let can_flush_queue =
+            retry_master_frame(&mut imcp, &mut retry_state, Instant::now(), &mut transmit)
+                .expect("master should expire the retry");
+        assert!(can_flush_queue);
+        assert!(retry_state.expected_ack.is_none());
     }
 }
