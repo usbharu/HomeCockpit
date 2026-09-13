@@ -8,6 +8,7 @@ import type {
   AdapterControlMapping,
   AdapterMappingConfig,
   AdapterOutputMapping,
+  DcsBiosReferenceCatalog,
   DeviceRoleAssignment,
   EventKind,
   LearnRequest,
@@ -21,10 +22,12 @@ type MappingSettingsProps = {
   roleDefinitions: RoleDefinition[];
   deviceRoleAssignments: DeviceRoleAssignment[];
   adapterMappings: AdapterMappingConfig[];
+  dcsbiosReference: DcsBiosReferenceCatalog;
   learnSession: LearnSessionStatus;
   busyAction: string | null;
   onSaveDeviceRoleAssignments: (assignments: DeviceRoleAssignment[]) => Promise<void>;
   onSaveAdapterMappings: (adapterMappings: AdapterMappingConfig[]) => Promise<void>;
+  onLoadDcsBiosReference: () => Promise<void>;
   onStartLearn: (request: LearnRequest) => Promise<void>;
   onCancelLearn: () => Promise<void>;
 };
@@ -40,12 +43,15 @@ const eventLabels: Record<EventKind, string> = {
 };
 
 const emptyAdapterDraft = () => ({
-  adapterId: "dcs-bios",
-  profileId: "default",
+  profileId: "",
+  category: "",
+  identifier: "",
+  inputId: "",
+  inputInterface: "",
+  argument: "",
+  argumentMode: "fixed" as "fixed" | "event-value",
   logicalControlId: "",
   eventKind: "button-pushed" as EventKind,
-  identifier: "",
-  argument: "",
 });
 
 export function MappingSettings({
@@ -53,10 +59,12 @@ export function MappingSettings({
   roleDefinitions,
   deviceRoleAssignments,
   adapterMappings,
+  dcsbiosReference,
   learnSession,
   busyAction,
   onSaveDeviceRoleAssignments,
   onSaveAdapterMappings,
+  onLoadDcsBiosReference,
   onStartLearn,
   onCancelLearn,
 }: MappingSettingsProps) {
@@ -69,11 +77,11 @@ export function MappingSettings({
   const [learnExpectedEventKind, setLearnExpectedEventKind] = useState<EventKind | "">("");
   const [adapterDraft, setAdapterDraft] = useState(emptyAdapterDraft);
   const [outputDraft, setOutputDraft] = useState({
-    adapterId: "dcs-bios",
-    profileId: "default",
+    profileId: "",
+    category: "",
+    identifier: "",
+    outputId: "",
     logicalControlId: "",
-    address: "",
-    length: "",
     encoding: "segment-map",
   });
 
@@ -105,6 +113,52 @@ export function MappingSettings({
   const selectedEventKind = adapterSelectedControl?.supportedEvents.includes(adapterDraft.eventKind)
     ? adapterDraft.eventKind
     : adapterSelectedControl?.supportedEvents[0] ?? "button-pushed";
+  const dcsBiosModules = dcsbiosReference.modules;
+  const dcsBiosModuleControls = useMemo(
+    () => dcsbiosReference.controls.filter((control) => control.moduleId === adapterDraft.profileId),
+    [adapterDraft.profileId, dcsbiosReference.controls],
+  );
+  const dcsBiosCategories = useMemo(
+    () => Array.from(new Set(dcsBiosModuleControls.map((control) => control.category))).sort(),
+    [dcsBiosModuleControls],
+  );
+  const dcsBiosInputControls = useMemo(
+    () =>
+      dcsBiosModuleControls.filter(
+        (control) => control.category === adapterDraft.category && control.inputs.length > 0,
+      ),
+    [adapterDraft.category, dcsBiosModuleControls],
+  );
+  const selectedDcsBiosInputControl =
+    dcsBiosInputControls.find((control) => control.identifier === adapterDraft.identifier) ?? null;
+  const dcsBiosInputs = selectedDcsBiosInputControl?.inputs ?? [];
+  const selectedDcsBiosInput =
+    dcsBiosInputs.find((input) => input.inputId === adapterDraft.inputId) ?? null;
+  const dcsBiosArgumentOptions = selectedDcsBiosInput?.argumentOptions ?? [];
+  const supportsSelectedEventValue =
+    selectedDcsBiosInput?.supportsEventValue === true &&
+    ((selectedDcsBiosInput.interface === "set_state" && selectedEventKind === "absolute-changed") ||
+      (selectedDcsBiosInput.interface === "variable_step" && selectedEventKind === "encoder-delta"));
+  const dcsBiosOutputModuleControls = useMemo(
+    () => dcsbiosReference.controls.filter((control) => control.moduleId === outputDraft.profileId),
+    [dcsbiosReference.controls, outputDraft.profileId],
+  );
+  const dcsBiosOutputCategories = useMemo(
+    () => Array.from(new Set(dcsBiosOutputModuleControls.map((control) => control.category))).sort(),
+    [dcsBiosOutputModuleControls],
+  );
+  const dcsBiosOutputControls = useMemo(
+    () =>
+      dcsBiosOutputModuleControls.filter(
+        (control) => control.category === outputDraft.category && control.outputs.length > 0,
+      ),
+    [dcsBiosOutputModuleControls, outputDraft.category],
+  );
+  const selectedDcsBiosOutputControl =
+    dcsBiosOutputControls.find((control) => control.identifier === outputDraft.identifier) ?? null;
+  const dcsBiosOutputs = selectedDcsBiosOutputControl?.outputs ?? [];
+  const selectedDcsBiosOutput =
+    dcsBiosOutputs.find((output) => output.outputId === outputDraft.outputId) ?? null;
 
   useEffect(() => {
     if (!roleDefinitions.some((definition) => definition.roleId === selectedRoleId)) {
@@ -154,6 +208,131 @@ export function MappingSettings({
       }));
     }
   }, [adapterDraft.eventKind, adapterSelectedControl]);
+
+  useEffect(() => {
+    if (dcsBiosModules.length === 0) {
+      return;
+    }
+    if (!dcsBiosModules.some((module) => module.moduleId === adapterDraft.profileId)) {
+      setAdapterDraft((current) => ({
+        ...current,
+        profileId: dcsBiosModules[0].moduleId,
+        category: "",
+        identifier: "",
+        inputId: "",
+        inputInterface: "",
+        argument: "",
+      }));
+    }
+    if (!dcsBiosModules.some((module) => module.moduleId === outputDraft.profileId)) {
+      setOutputDraft((current) => ({
+        ...current,
+        profileId: dcsBiosModules[0].moduleId,
+        category: "",
+        identifier: "",
+        outputId: "",
+      }));
+    }
+  }, [adapterDraft.profileId, dcsBiosModules, outputDraft.profileId]);
+
+  useEffect(() => {
+    if (dcsBiosCategories.length > 0 && !dcsBiosCategories.includes(adapterDraft.category)) {
+      setAdapterDraft((current) => ({
+        ...current,
+        category: dcsBiosCategories[0],
+        identifier: "",
+        inputId: "",
+        inputInterface: "",
+        argument: "",
+      }));
+    }
+    if (
+      dcsBiosOutputCategories.length > 0 &&
+      !dcsBiosOutputCategories.includes(outputDraft.category)
+    ) {
+      setOutputDraft((current) => ({
+        ...current,
+        category: dcsBiosOutputCategories[0],
+        identifier: "",
+        outputId: "",
+      }));
+    }
+  }, [
+    adapterDraft.category,
+    dcsBiosCategories,
+    dcsBiosOutputCategories,
+    outputDraft.category,
+  ]);
+
+  useEffect(() => {
+    const firstInputControl = dcsBiosInputControls[0];
+    if (!firstInputControl) {
+      return;
+    }
+    if (!dcsBiosInputControls.some((control) => control.identifier === adapterDraft.identifier)) {
+      setAdapterDraft((current) => ({
+        ...current,
+        identifier: firstInputControl.identifier,
+        inputId: "",
+        inputInterface: "",
+        argument: "",
+      }));
+    }
+  }, [adapterDraft.identifier, dcsBiosInputControls]);
+
+  useEffect(() => {
+    const firstInput = dcsBiosInputs[0];
+    if (!firstInput) {
+      return;
+    }
+    if (!dcsBiosInputs.some((input) => input.inputId === adapterDraft.inputId)) {
+      setAdapterDraft((current) => ({
+        ...current,
+        inputId: firstInput.inputId,
+        inputInterface: firstInput.interface,
+        argument: firstInput.argumentOptions[0]?.value ?? (firstInput.supportsEventValue ? "$event-value" : ""),
+        argumentMode: firstInput.argumentOptions.length > 0 ? "fixed" : "event-value",
+      }));
+    }
+  }, [adapterDraft.inputId, dcsBiosInputs]);
+
+  useEffect(() => {
+    if (!selectedDcsBiosInput) {
+      return;
+    }
+    const isFixedArgument = dcsBiosArgumentOptions.some((option) => option.value === adapterDraft.argument);
+    if (!isFixedArgument && !(selectedDcsBiosInput.supportsEventValue && adapterDraft.argument === "$event-value")) {
+      setAdapterDraft((current) => ({
+        ...current,
+        argument: dcsBiosArgumentOptions[0]?.value ?? (selectedDcsBiosInput.supportsEventValue ? "$event-value" : ""),
+        argumentMode: dcsBiosArgumentOptions.length > 0 ? "fixed" : "event-value",
+      }));
+    }
+  }, [adapterDraft.argument, dcsBiosArgumentOptions, selectedDcsBiosInput]);
+
+  useEffect(() => {
+    const outputControl = dcsBiosOutputControls[0];
+    if (!outputControl) {
+      return;
+    }
+    if (!dcsBiosOutputControls.some((control) => control.identifier === outputDraft.identifier)) {
+      setOutputDraft((current) => ({
+        ...current,
+        identifier: outputControl.identifier,
+        outputId: "",
+      }));
+    }
+  }, [dcsBiosOutputControls, outputDraft.identifier]);
+
+  useEffect(() => {
+    const output = dcsBiosOutputs[0];
+    if (!output) {
+      return;
+    }
+    if (!dcsBiosOutputs.some((candidate) => candidate.outputId === outputDraft.outputId)) {
+      setOutputDraft((current) => ({ ...current, outputId: output.outputId }));
+    }
+  }, [dcsBiosOutputs, outputDraft.outputId]);
 
   useEffect(() => {
     if (!roleControls.some((control) => control.logicalControlId === outputDraft.logicalControlId)) {
@@ -238,11 +417,13 @@ export function MappingSettings({
 
   const addAdapterMapping = async () => {
     if (
-      !adapterDraft.adapterId.trim() ||
       !adapterDraft.profileId.trim() ||
       !adapterDraft.logicalControlId ||
       !adapterDraft.identifier.trim() ||
-      !adapterDraft.argument.trim()
+      !adapterDraft.inputInterface.trim() ||
+      !adapterDraft.argument.trim() ||
+      !selectedDcsBiosInputControl ||
+      !selectedDcsBiosInput
     ) {
       return;
     }
@@ -254,8 +435,20 @@ export function MappingSettings({
       action: {
         actionId: "control-command",
         parameters: {
-          identifier: adapterDraft.identifier.trim(),
+          identifier: selectedDcsBiosInputControl.identifier,
           argument: adapterDraft.argument.trim(),
+          argumentMode: adapterDraft.argumentMode,
+          referenceModule: selectedDcsBiosInputControl.moduleId,
+          referenceCategory: selectedDcsBiosInputControl.category,
+          referenceControl: selectedDcsBiosInputControl.identifier,
+          referenceInput: selectedDcsBiosInput.inputId,
+          referenceInterface: selectedDcsBiosInput.interface,
+          ...(selectedDcsBiosInput.maxValue === null
+            ? {}
+            : { maxValue: String(selectedDcsBiosInput.maxValue) }),
+          ...(selectedDcsBiosInput.suggestedStep === null
+            ? {}
+            : { suggestedStep: String(selectedDcsBiosInput.suggestedStep) }),
         },
       },
     };
@@ -264,21 +457,18 @@ export function MappingSettings({
       mappings: [...config.mappings],
     }));
     const configIndex = next.findIndex(
-      (config) =>
-        config.adapterId === adapterDraft.adapterId.trim() &&
-        config.profileId === adapterDraft.profileId.trim(),
+      (config) => config.adapterId === "dcs-bios" && config.profileId === adapterDraft.profileId.trim(),
     );
     if (configIndex >= 0) {
       next[configIndex].mappings.push(mapping);
     } else {
       next.push({
-        adapterId: adapterDraft.adapterId.trim(),
+        adapterId: "dcs-bios",
         profileId: adapterDraft.profileId.trim(),
         mappings: [mapping],
       });
     }
     await onSaveAdapterMappings(next);
-    setAdapterDraft((current) => ({ ...current, identifier: "", argument: "" }));
   };
 
   const deleteAdapterMapping = async (configIndex: number, mappingIndex: number) => {
@@ -288,17 +478,18 @@ export function MappingSettings({
           ? { ...config, mappings: config.mappings.filter((_, index) => index !== mappingIndex) }
           : config,
       )
-      .filter((config) => config.mappings.length > 0);
+      .filter((config) => config.mappings.length > 0 || (config.outputMappings ?? []).length > 0);
     await onSaveAdapterMappings(next);
   };
 
   const addOutputMapping = async () => {
     if (
-      !outputDraft.adapterId.trim() ||
       !outputDraft.profileId.trim() ||
       !outputDraft.logicalControlId ||
-      !outputDraft.address.trim() ||
-      !outputDraft.length.trim()
+      !outputDraft.identifier.trim() ||
+      !outputDraft.outputId.trim() ||
+      !selectedDcsBiosOutputControl ||
+      !selectedDcsBiosOutput
     ) {
       return;
     }
@@ -306,10 +497,13 @@ export function MappingSettings({
     const outputMapping: AdapterOutputMapping = {
       roleId: selectedRoleId,
       logicalControlId: outputDraft.logicalControlId,
-      sourceId: "memory-range",
+      sourceId: "control-output",
       parameters: {
-        address: outputDraft.address.trim(),
-        length: outputDraft.length.trim(),
+        referenceModule: selectedDcsBiosOutputControl.moduleId,
+        referenceCategory: selectedDcsBiosOutputControl.category,
+        referenceControl: selectedDcsBiosOutputControl.identifier,
+        referenceOutput: selectedDcsBiosOutput.outputId,
+        outputType: selectedDcsBiosOutput.outputType,
         encoding: outputDraft.encoding,
       },
     };
@@ -319,22 +513,19 @@ export function MappingSettings({
       outputMappings: [...(config.outputMappings ?? [])],
     }));
     const configIndex = next.findIndex(
-      (config) =>
-        config.adapterId === outputDraft.adapterId.trim() &&
-        config.profileId === outputDraft.profileId.trim(),
+      (config) => config.adapterId === "dcs-bios" && config.profileId === outputDraft.profileId.trim(),
     );
     if (configIndex >= 0) {
       next[configIndex].outputMappings?.push(outputMapping);
     } else {
       next.push({
-        adapterId: outputDraft.adapterId.trim(),
+        adapterId: "dcs-bios",
         profileId: outputDraft.profileId.trim(),
         mappings: [],
         outputMappings: [outputMapping],
       });
     }
     await onSaveAdapterMappings(next);
-    setOutputDraft((current) => ({ ...current, address: "", length: "" }));
   };
 
   const deleteOutputMapping = async (configIndex: number, outputIndex: number) => {
@@ -660,86 +851,218 @@ export function MappingSettings({
                     <div>
                       <h3 className="text-xl font-semibold text-gray-900">Adapter Mapping</h3>
                       <p className="mt-1 text-sm text-gray-500">
-                        論理コントロールからゲーム固有アクションへの結線です。DCS-BIOS の identifier／argument はここだけで管理します。
+                        DCS-BIOSの参照データからコントロールと入力インターフェースを選びます。識別子や引数を手入力する必要はありません。
                       </p>
                     </div>
-                    <span className="rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm text-gray-700">
-                      {adapterMappings.reduce(
-                        (count, config) => count + config.mappings.filter((mapping) => mapping.roleId === selectedRoleId).length,
-                        0,
-                      )} mapping(s)
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <span className="rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm text-gray-700">
+                        {adapterMappings.reduce(
+                          (count, config) =>
+                            count + config.mappings.filter((mapping) => mapping.roleId === selectedRoleId).length,
+                          0,
+                        )} mapping(s)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void onLoadDcsBiosReference()}
+                        disabled={busyAction !== null}
+                        className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                      >
+                        定義を再読み込み
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="mt-5 grid gap-4 lg:grid-cols-[150px_150px_minmax(0,1fr)_180px_minmax(0,1fr)_140px_100px]">
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Adapter</span>
-                      <input
-                        value={adapterDraft.adapterId}
-                        onChange={(event) => setAdapterDraft((current) => ({ ...current, adapterId: event.target.value }))}
-                        className="w-full rounded-md border border-gray-300 px-3 py-2 outline-none transition focus:border-blue-500"
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Profile</span>
-                      <input
-                        value={adapterDraft.profileId}
-                        onChange={(event) => setAdapterDraft((current) => ({ ...current, profileId: event.target.value }))}
-                        className="w-full rounded-md border border-gray-300 px-3 py-2 outline-none transition focus:border-blue-500"
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Logical Control</span>
-                      <select
-                        value={adapterDraft.logicalControlId}
-                        onChange={(event) => setAdapterDraft((current) => ({ ...current, logicalControlId: event.target.value }))}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
-                      >
-                        {roleControls.map((control) => (
-                          <option key={control.logicalControlId} value={control.logicalControlId}>{control.label}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Event</span>
-                      <select
-                        value={selectedEventKind}
-                        onChange={(event) => setAdapterDraft((current) => ({ ...current, eventKind: event.target.value as EventKind }))}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
-                      >
-                        {(adapterSelectedControl?.supportedEvents ?? []).map((event) => (
-                          <option key={event} value={event}>{eventLabels[event]}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>DCS-BIOS Identifier</span>
-                      <input
-                        value={adapterDraft.identifier}
-                        onChange={(event) => setAdapterDraft((current) => ({ ...current, identifier: event.target.value }))}
-                        placeholder="UFC_COMM1_CHANNEL_SELECT"
-                        className="w-full rounded-md border border-gray-300 px-3 py-2 outline-none transition focus:border-blue-500"
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Argument</span>
-                      <input
-                        value={adapterDraft.argument}
-                        onChange={(event) => setAdapterDraft((current) => ({ ...current, argument: event.target.value }))}
-                        placeholder="1"
-                        className="w-full rounded-md border border-gray-300 px-3 py-2 outline-none transition focus:border-blue-500"
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => void addAdapterMapping()}
-                      disabled={busyAction !== null || !adapterDraft.logicalControlId}
-                      className="inline-flex h-10 items-center justify-center gap-2 self-end rounded-md bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <Plus size={16} />
-                      追加
-                    </button>
+                  <div className="mt-5 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm">
+                    {dcsbiosReference.state === "loaded" ? (
+                      <>
+                        <div className="flex flex-wrap items-center gap-2 text-gray-700">
+                          <span className="rounded-full border border-green-200 bg-green-50 px-3 py-1 text-green-800">
+                            DCS-BIOS定義を読み込み済み
+                          </span>
+                          <span>{dcsbiosReference.modules.length} module(s)</span>
+                          <span>·</span>
+                          <span>{dcsbiosReference.controls.length} control(s)</span>
+                          {dcsbiosReference.sourcePath && (
+                            <span className="truncate text-gray-500" title={dcsbiosReference.sourcePath}>
+                              · {dcsbiosReference.sourcePath}
+                            </span>
+                          )}
+                        </div>
+                        {dcsbiosReference.error && (
+                          <p className="mt-2 text-amber-700">{dcsbiosReference.error}</p>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-amber-800">
+                        DCS-BIOSの参照データがありません。標準インストール先を自動検索しています。
+                        {dcsbiosReference.error ? " " + dcsbiosReference.error : ""}
+                      </p>
+                    )}
                   </div>
+
+                  {dcsbiosReference.state === "loaded" && (
+                    <div className="mt-5 grid gap-4 lg:grid-cols-2">
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>DCS-BIOS Module</span>
+                        <select
+                          value={adapterDraft.profileId}
+                          onChange={(event) =>
+                            setAdapterDraft((current) => ({
+                              ...current,
+                              profileId: event.target.value,
+                              category: "",
+                              identifier: "",
+                              inputId: "",
+                              inputInterface: "",
+                              argument: "",
+                            }))
+                          }
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                        >
+                          {dcsBiosModules.map((module) => (
+                            <option key={module.moduleId} value={module.moduleId}>
+                              {module.label} ({module.controlCount})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Category / Panel</span>
+                        <select
+                          value={adapterDraft.category}
+                          onChange={(event) =>
+                            setAdapterDraft((current) => ({
+                              ...current,
+                              category: event.target.value,
+                              identifier: "",
+                              inputId: "",
+                              inputInterface: "",
+                              argument: "",
+                            }))
+                          }
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                        >
+                          {dcsBiosCategories.map((category) => (
+                            <option key={category} value={category}>{category}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Control</span>
+                        <select
+                          value={adapterDraft.identifier}
+                          onChange={(event) =>
+                            setAdapterDraft((current) => ({
+                              ...current,
+                              identifier: event.target.value,
+                              inputId: "",
+                              inputInterface: "",
+                              argument: "",
+                            }))
+                          }
+                          disabled={dcsBiosInputControls.length === 0}
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
+                        >
+                          {dcsBiosInputControls.map((control) => (
+                            <option key={control.identifier} value={control.identifier}>
+                              {control.identifier} — {control.description || control.controlType}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Input Interface</span>
+                        <select
+                          value={adapterDraft.inputId}
+                          onChange={(event) =>
+                            setAdapterDraft((current) => {
+                              const input = dcsBiosInputs.find(
+                                (candidate) => candidate.inputId === event.target.value,
+                              );
+                              return {
+                                ...current,
+                                inputId: event.target.value,
+                                inputInterface: input?.interface ?? "",
+                                argument: input?.argumentOptions[0]?.value ??
+                                  (input?.supportsEventValue ? "$event-value" : ""),
+                                argumentMode: input?.argumentOptions.length ? "fixed" : "event-value",
+                              };
+                            })
+                          }
+                          disabled={dcsBiosInputs.length === 0}
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
+                        >
+                          {dcsBiosInputs.map((input) => (
+                            <option key={input.inputId} value={input.inputId}>
+                              {input.interface} — {input.description}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Argument</span>
+                        <select
+                          value={adapterDraft.argument}
+                          onChange={(event) =>
+                            setAdapterDraft((current) => ({
+                              ...current,
+                              argument: event.target.value,
+                              argumentMode: event.target.value === "$event-value" ? "event-value" : "fixed",
+                            }))
+                          }
+                          disabled={!selectedDcsBiosInput || (dcsBiosArgumentOptions.length === 0 && !supportsSelectedEventValue)}
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
+                        >
+                          {dcsBiosArgumentOptions.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                          {supportsSelectedEventValue && (
+                            <option value="$event-value">物理イベントの値を送る</option>
+                          )}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Logical Control</span>
+                        <select
+                          value={adapterDraft.logicalControlId}
+                          onChange={(event) => setAdapterDraft((current) => ({ ...current, logicalControlId: event.target.value }))}
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                        >
+                          {roleControls.map((control) => (
+                            <option key={control.logicalControlId} value={control.logicalControlId}>{control.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Manager Event</span>
+                        <select
+                          value={selectedEventKind}
+                          onChange={(event) => setAdapterDraft((current) => ({ ...current, eventKind: event.target.value as EventKind }))}
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                        >
+                          {(adapterSelectedControl?.supportedEvents ?? []).map((event) => (
+                            <option key={event} value={event}>{eventLabels[event]}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void addAdapterMapping()}
+                        disabled={
+                          busyAction !== null ||
+                          !adapterDraft.logicalControlId ||
+                          !selectedDcsBiosInputControl ||
+                          !selectedDcsBiosInput ||
+                          !adapterDraft.argument
+                        }
+                        className="inline-flex h-10 items-center justify-center gap-2 self-end rounded-md bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <Plus size={16} />
+                        参照から追加
+                      </button>
+                    </div>
+                  )}
 
                   <div className="mt-5 space-y-3">
                     {adapterMappings.flatMap((config, configIndex) =>
@@ -762,7 +1085,15 @@ export function MappingSettings({
                               <span className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700">{mapping.logicalControlId}</span>
                               <span className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700">{eventLabels[mapping.eventKind]}</span>
                               <span className="truncate rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700">
-                                {mapping.action.parameters.identifier ?? mapping.action.actionId} {mapping.action.parameters.argument ?? ""}
+                                {mapping.action.parameters.referenceControl ??
+                                  mapping.action.parameters.identifier ??
+                                  mapping.action.actionId}
+                                {" · "}
+                                {mapping.action.parameters.referenceInterface ?? ""}
+                                {" · "}
+                                {mapping.action.parameters.argument === "$event-value"
+                                  ? "物理イベントの値"
+                                  : mapping.action.parameters.argument ?? ""}
                               </span>
                               <button
                                 type="button"
@@ -784,78 +1115,132 @@ export function MappingSettings({
                   <div>
                     <h3 className="text-xl font-semibold text-gray-900">Adapter Output Mapping</h3>
                     <p className="mt-1 text-sm text-gray-500">
-                      ゲーム状態の出力を論理出力へ変換します。DCS-BIOS の memory-range は指定アドレスの更新を同じ論理 Role の全デバイスへ送ります。
+                      DCS-BIOSの出力定義を選ぶと、アドレス・マスク・文字列長は参照データから自動的に設定されます。
                     </p>
                   </div>
-                  <div className="mt-5 grid gap-4 lg:grid-cols-[150px_150px_minmax(0,1fr)_160px_120px_160px_100px]">
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Adapter</span>
-                      <input
-                        value={outputDraft.adapterId}
-                        onChange={(event) => setOutputDraft((current) => ({ ...current, adapterId: event.target.value }))}
-                        className="w-full rounded-md border border-gray-300 px-3 py-2 outline-none transition focus:border-blue-500"
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Profile</span>
-                      <input
-                        value={outputDraft.profileId}
-                        onChange={(event) => setOutputDraft((current) => ({ ...current, profileId: event.target.value }))}
-                        className="w-full rounded-md border border-gray-300 px-3 py-2 outline-none transition focus:border-blue-500"
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Logical Output</span>
-                      <select
-                        value={outputDraft.logicalControlId}
-                        onChange={(event) => setOutputDraft((current) => ({ ...current, logicalControlId: event.target.value }))}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                  {dcsbiosReference.state === "loaded" ? (
+                    <div className="mt-5 grid gap-4 lg:grid-cols-2">
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>DCS-BIOS Module</span>
+                        <select
+                          value={outputDraft.profileId}
+                          onChange={(event) =>
+                            setOutputDraft((current) => ({
+                              ...current,
+                              profileId: event.target.value,
+                              category: "",
+                              identifier: "",
+                              outputId: "",
+                            }))
+                          }
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                        >
+                          {dcsBiosModules.map((module) => (
+                            <option key={module.moduleId} value={module.moduleId}>
+                              {module.label} ({module.controlCount})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Category / Panel</span>
+                        <select
+                          value={outputDraft.category}
+                          onChange={(event) =>
+                            setOutputDraft((current) => ({
+                              ...current,
+                              category: event.target.value,
+                              identifier: "",
+                              outputId: "",
+                            }))
+                          }
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                        >
+                          {dcsBiosOutputCategories.map((category) => (
+                            <option key={category} value={category}>{category}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Output Control</span>
+                        <select
+                          value={outputDraft.identifier}
+                          onChange={(event) =>
+                            setOutputDraft((current) => ({
+                              ...current,
+                              identifier: event.target.value,
+                              outputId: "",
+                            }))
+                          }
+                          disabled={dcsBiosOutputControls.length === 0}
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
+                        >
+                          {dcsBiosOutputControls.map((control) => (
+                            <option key={control.identifier} value={control.identifier}>
+                              {control.identifier} — {control.description || control.controlType}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>DCS-BIOS Output</span>
+                        <select
+                          value={outputDraft.outputId}
+                          onChange={(event) => setOutputDraft((current) => ({ ...current, outputId: event.target.value }))}
+                          disabled={dcsBiosOutputs.length === 0}
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
+                        >
+                          {dcsBiosOutputs.map((output) => (
+                            <option key={output.outputId} value={output.outputId}>
+                              {output.description || output.outputId} ({output.outputType})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Logical Output</span>
+                        <select
+                          value={outputDraft.logicalControlId}
+                          onChange={(event) => setOutputDraft((current) => ({ ...current, logicalControlId: event.target.value }))}
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                        >
+                          {roleControls.map((control) => (
+                            <option key={control.logicalControlId} value={control.logicalControlId}>{control.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>HCP Encoding</span>
+                        <select
+                          value={outputDraft.encoding}
+                          onChange={(event) => setOutputDraft((current) => ({ ...current, encoding: event.target.value }))}
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                        >
+                          <option value="segment-map">Segment Map</option>
+                          <option value="mono-bitmap">Mono Bitmap</option>
+                          <option value="utf8-text">UTF-8 Text</option>
+                        </select>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void addOutputMapping()}
+                        disabled={
+                          busyAction !== null ||
+                          !outputDraft.logicalControlId ||
+                          !selectedDcsBiosOutputControl ||
+                          !selectedDcsBiosOutput
+                        }
+                        className="inline-flex h-10 items-center justify-center gap-2 self-end rounded-md bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        {roleControls.map((control) => (
-                          <option key={control.logicalControlId} value={control.logicalControlId}>{control.label}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Memory Address</span>
-                      <input
-                        value={outputDraft.address}
-                        onChange={(event) => setOutputDraft((current) => ({ ...current, address: event.target.value }))}
-                        placeholder="0x1000"
-                        className="w-full rounded-md border border-gray-300 px-3 py-2 outline-none transition focus:border-blue-500"
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Length</span>
-                      <input
-                        value={outputDraft.length}
-                        onChange={(event) => setOutputDraft((current) => ({ ...current, length: event.target.value }))}
-                        placeholder="2"
-                        className="w-full rounded-md border border-gray-300 px-3 py-2 outline-none transition focus:border-blue-500"
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Encoding</span>
-                      <select
-                        value={outputDraft.encoding}
-                        onChange={(event) => setOutputDraft((current) => ({ ...current, encoding: event.target.value }))}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
-                      >
-                        <option value="segment-map">Segment Map</option>
-                        <option value="mono-bitmap">Mono Bitmap</option>
-                        <option value="utf8-text">UTF-8 Text</option>
-                      </select>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => void addOutputMapping()}
-                      disabled={busyAction !== null || !outputDraft.logicalControlId}
-                      className="inline-flex h-10 items-center justify-center gap-2 self-end rounded-md bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <Plus size={16} />
-                      追加
-                    </button>
-                  </div>
+                        <Plus size={16} />
+                        参照から追加
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="mt-5 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
+                      DCS-BIOS定義を読み込むと、出力コントロールを選択できます。
+                    </div>
+                  )}
 
                   <div className="mt-5 space-y-3">
                     {adapterMappings.flatMap((config, configIndex) =>
@@ -878,7 +1263,9 @@ export function MappingSettings({
                               <span className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700">{mapping.logicalControlId}</span>
                               <span className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700">{mapping.sourceId}</span>
                               <span className="truncate rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700">
-                                {mapping.parameters.address} / {mapping.parameters.length} / {mapping.parameters.encoding}
+                                {mapping.parameters.referenceControl ?? mapping.parameters.address ?? mapping.sourceId}
+                                {" · "}
+                                {mapping.parameters.referenceOutput ?? mapping.parameters.encoding ?? ""}
                               </span>
                               <button
                                 type="button"

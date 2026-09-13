@@ -19,6 +19,60 @@ export type DcsBiosStatus = {
   diagnostics: string[];
 };
 
+export type DcsBiosReferenceState = "unavailable" | "loaded" | "error";
+
+export type DcsBiosArgumentOption = {
+  value: string;
+  label: string;
+};
+
+export type DcsBiosReferenceInput = {
+  inputId: string;
+  interface: string;
+  description: string;
+  maxValue: number | null;
+  suggestedStep: number | null;
+  argumentOptions: DcsBiosArgumentOption[];
+  supportsEventValue: boolean;
+};
+
+export type DcsBiosReferenceOutput = {
+  outputId: string;
+  outputType: string;
+  description: string;
+  address: number;
+  length: number | null;
+  mask: number | null;
+  shiftBy: number | null;
+  maxValue: number | null;
+  suffix: string;
+};
+
+export type DcsBiosReferenceControl = {
+  moduleId: string;
+  category: string;
+  identifier: string;
+  controlType: string;
+  description: string;
+  positions: string[];
+  inputs: DcsBiosReferenceInput[];
+  outputs: DcsBiosReferenceOutput[];
+};
+
+export type DcsBiosReferenceModule = {
+  moduleId: string;
+  label: string;
+  controlCount: number;
+};
+
+export type DcsBiosReferenceCatalog = {
+  state: DcsBiosReferenceState;
+  sourcePath: string | null;
+  modules: DcsBiosReferenceModule[];
+  controls: DcsBiosReferenceControl[];
+  error: string | null;
+};
+
 export type ManagerLogEntry = {
   id: number;
   at: string;
@@ -138,6 +192,7 @@ export type LearnSessionStatus = {
 export type AppSnapshot = {
   dcsbiosConfig: DcsBiosConnectionConfig;
   dcsbiosStatus: DcsBiosStatus;
+  dcsbiosReference: DcsBiosReferenceCatalog;
   logs: ManagerLogEntry[];
   devices: ManagedDeviceSummary[];
   deviceEndpoints: DeviceEndpointConfig[];
@@ -193,6 +248,13 @@ export const defaultSnapshot: AppSnapshot = {
     aircraftName: null,
     error: null,
     diagnostics: ["DCS-BIOS listener is stopped."],
+  },
+  dcsbiosReference: {
+    state: "unavailable",
+    sourcePath: null,
+    modules: [],
+    controls: [],
+    error: "DCS-BIOS control reference data has not been loaded.",
   },
   logs: [],
   devices: [],
