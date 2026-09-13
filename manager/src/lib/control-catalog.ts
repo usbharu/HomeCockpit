@@ -13,8 +13,8 @@ export type PhysicalControlDefinition = {
 
 const buttonEvents: EventKind[] = ["button-down", "button-up", "button-pushed"];
 
-function buildUpperPanelDdiCatalog(): PhysicalControlDefinition[] {
-  return Array.from({ length: 40 }, (_, index) => {
+function buildUpperPanelDdiCatalog(controlCount: number): PhysicalControlDefinition[] {
+  return Array.from({ length: controlCount }, (_, index) => {
     const row = Math.floor(index / 5) + 1;
     const column = (index % 5) + 1;
 
@@ -27,8 +27,8 @@ function buildUpperPanelDdiCatalog(): PhysicalControlDefinition[] {
   });
 }
 
-function buildButtonPanelCatalog(): PhysicalControlDefinition[] {
-  return Array.from({ length: 64 }, (_, index) => ({
+function buildButtonPanelCatalog(controlCount: number): PhysicalControlDefinition[] {
+  return Array.from({ length: controlCount }, (_, index) => ({
     physicalControlId: index,
     label: `Control ${index + 1}`,
     description: "Device-reported button panel control",
@@ -42,22 +42,27 @@ function buildButtonPanelCatalog(): PhysicalControlDefinition[] {
   }));
 }
 
-const catalogByDeviceKindId: Record<string, PhysicalControlDefinition[]> = {
-  "upper-panel-ddi": buildUpperPanelDdiCatalog(),
-  "button-panel": buildButtonPanelCatalog(),
-};
-
 export const deviceRoleLabels: Record<string, string> = {
   "left-ddi": "LEFT_DDI",
   "right-ddi": "RIGHT_DDI",
 };
 
-export function getPhysicalControlCatalog(deviceKindId: string | null): PhysicalControlDefinition[] {
-  if (!deviceKindId) {
+export function getPhysicalControlCatalog(
+  deviceKindId: string | null,
+  controlCount: number | null,
+): PhysicalControlDefinition[] {
+  if (!deviceKindId || controlCount === null || controlCount <= 0) {
     return [];
   }
 
-  return catalogByDeviceKindId[deviceKindId] ?? [];
+  switch (deviceKindId) {
+    case "upper-panel-ddi":
+      return buildUpperPanelDdiCatalog(controlCount);
+    case "button-panel":
+      return buildButtonPanelCatalog(controlCount);
+    default:
+      return [];
+  }
 }
 
 export function getRoleDefinition(
@@ -65,6 +70,25 @@ export function getRoleDefinition(
   roleDefinitions: RoleDefinition[] = defaultRoleDefinitions(),
 ): RoleDefinition | null {
   return roleDefinitions.find((definition) => definition.roleId === roleId) ?? null;
+}
+
+export function getImplementedRoleControls(
+  roleDefinition: RoleDefinition | null,
+  controlCount: number,
+): RoleDefinition["controls"] {
+  if (!roleDefinition || controlCount <= 0) {
+    return [];
+  }
+
+  if (roleDefinition.controls.length > 0) {
+    return roleDefinition.controls.slice(0, controlCount);
+  }
+
+  return Array.from({ length: controlCount }, (_, index) => ({
+    logicalControlId: `button-${index}`,
+    label: `Button ${index + 1}`,
+    supportedEvents: [...buttonEvents],
+  }));
 }
 
 export function getRoleDefinitions(

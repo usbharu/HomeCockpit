@@ -31,10 +31,10 @@ use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-mod dcsbios_reference;
+mod adapter_catalog;
 mod mapping;
 
-use dcsbios_reference::DcsBiosReferenceCatalog;
+use adapter_catalog::AdapterCatalog;
 use mapping::{
     control_event_kinds, default_role_definitions, resolve_adapter_actions,
     resolve_logical_input_events, resolve_output_devices, sanitize_adapter_mappings,
@@ -201,7 +201,7 @@ struct DcsBiosFrameEvent {
 struct AppSnapshot {
     dcsbios_config: DcsBiosConnectionConfig,
     dcsbios_status: DcsBiosStatus,
-    dcsbios_reference: DcsBiosReferenceCatalog,
+    adapter_catalog: AdapterCatalog,
     logs: Vec<ManagerLogEntry>,
     devices: Vec<ManagedDeviceSummary>,
     device_endpoints: Vec<DeviceEndpointConfig>,
@@ -343,7 +343,7 @@ struct PhysicalControlEvent {
     endpoint_id: String,
     source_address: u8,
     device_id: String,
-    device_kind: DeviceKind,
+    control_count: u16,
     control_event: ControlEvent,
 }
 
@@ -478,13 +478,13 @@ impl AdapterRegistry {
 #[derive(Debug, Clone)]
 struct KnownRuntimeDevice {
     device_id: String,
-    device_kind: DeviceKind,
+    control_count: u16,
 }
 
 struct RuntimeState {
     config: Mutex<DcsBiosConnectionConfig>,
     status: Mutex<DcsBiosStatus>,
-    dcsbios_reference: Mutex<DcsBiosReferenceCatalog>,
+    adapter_catalog: AdapterCatalog,
     logs: Mutex<VecDeque<ManagerLogEntry>>,
     devices: Mutex<Vec<ManagedDeviceSummary>>,
     device_endpoints: Mutex<Vec<DeviceEndpointConfig>>,
@@ -506,9 +506,7 @@ impl RuntimeState {
         Self {
             config: Mutex::new(DcsBiosConnectionConfig::default()),
             status: Mutex::new(DcsBiosStatus::default()),
-            dcsbios_reference: Mutex::new(DcsBiosReferenceCatalog::unavailable(
-                "DCS-BIOS control reference data has not been loaded.",
-            )),
+            adapter_catalog: AdapterCatalog::builtin(),
             logs: Mutex::new(VecDeque::new()),
             devices: Mutex::new(Vec::new()),
             device_endpoints: Mutex::new(Vec::new()),
@@ -530,7 +528,7 @@ impl RuntimeState {
         AppSnapshot {
             dcsbios_config: self.config.lock().unwrap().clone(),
             dcsbios_status: self.status.lock().unwrap().clone(),
-            dcsbios_reference: self.dcsbios_reference.lock().unwrap().clone(),
+            adapter_catalog: self.adapter_catalog.clone(),
             logs: self.logs.lock().unwrap().iter().cloned().collect(),
             devices: self.devices.lock().unwrap().clone(),
             device_endpoints: self.device_endpoints.lock().unwrap().clone(),
@@ -545,16 +543,6 @@ impl RuntimeState {
                 .map(|session| session.status.clone())
                 .unwrap_or_default(),
         }
-    }
-
-    fn set_dcsbios_reference(
-        &self,
-        app: &AppHandle,
-        reference: DcsBiosReferenceCatalog,
-    ) -> DcsBiosReferenceCatalog {
-        *self.dcsbios_reference.lock().unwrap() = reference.clone();
-        let _ = app.emit("dcsbios-reference-changed", reference.clone());
-        reference
     }
 
     fn set_status(
@@ -729,7 +717,6 @@ impl RuntimeState {
     fn dispatch_dcsbios_memory_update(&self, app: &AppHandle, update: &DcsBiosMemoryUpdate) {
         let adapter_mappings = self.adapter_mappings.lock().unwrap().clone();
         let assignments = self.device_role_assignments.lock().unwrap().clone();
-        let reference = self.dcsbios_reference.lock().unwrap().clone();
         for config in adapter_mappings
             .iter()
             .filter(|config| config.adapter_id == "dcs-bios")
@@ -738,7 +725,8 @@ impl RuntimeState {
                 if mapping.source_id != "control-output" && mapping.source_id != "memory-range" {
                     continue;
                 }
-                let Some((address, length)) = resolve_dcsbios_output_range(&reference, mapping)
+                let Some((address, length)) =
+                    resolve_dcsbios_output_range(&self.adapter_catalog, config, mapping)
                 else {
                     self.push_log(
                         app,
@@ -1225,44 +1213,6 @@ impl AppState {
 #[tauri::command]
 fn get_app_state(state: State<'_, AppState>) -> AppSnapshot {
     state.inner.snapshot()
-}
-
-#[tauri::command]
-fn load_dcsbios_reference(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    source_path: Option<String>,
-) -> Result<AppSnapshot, String> {
-    let reference = match source_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-    {
-        Some(path) => DcsBiosReferenceCatalog::load_from_path(PathBuf::from(path).as_path())?,
-        None => DcsBiosReferenceCatalog::discover(),
-    };
-
-    let is_loaded = matches!(
-        reference.state,
-        dcsbios_reference::DcsBiosReferenceState::Loaded
-    );
-    state.inner.set_dcsbios_reference(&app, reference.clone());
-    if is_loaded {
-        state.inner.push_log(
-            &app,
-            "SUCCESS",
-            "dcsbios",
-            format!(
-                "Loaded DCS-BIOS control reference: {} module(s), {} control(s) from {}.",
-                reference.modules.len(),
-                reference.controls.len(),
-                reference.source_path.as_deref().unwrap_or("unknown path")
-            ),
-        );
-    } else if let Some(error) = &reference.error {
-        state.inner.push_log(&app, "WARN", "dcsbios", error.clone());
-    }
-    Ok(state.inner.snapshot())
 }
 
 #[tauri::command]
@@ -2232,29 +2182,6 @@ fn resolve_dcsbios_argument(
     }
 }
 
-fn control_supported_events(
-    device_kind: DeviceKind,
-    control_id: u16,
-) -> Option<&'static [EventKind]> {
-    match device_kind {
-        DeviceKind::UpperPanelDdi if control_id < 40 => Some(&[
-            EventKind::ButtonDown,
-            EventKind::ButtonUp,
-            EventKind::ButtonPushed,
-        ]),
-        DeviceKind::ButtonPanel if control_id < 64 => Some(&[
-            EventKind::ButtonDown,
-            EventKind::ButtonUp,
-            EventKind::ButtonPushed,
-            EventKind::EncoderDelta,
-            EventKind::AbsoluteChanged,
-            EventKind::ToggleOn,
-            EventKind::ToggleOff,
-        ]),
-        _ => None,
-    }
-}
-
 fn apply_dcsbios_memory_updates(
     memory_map: Arc<Mutex<VecMemoryMap>>,
     updates: &[DcsBiosMemoryUpdate],
@@ -2283,27 +2210,24 @@ fn parse_u16_value(value: &str) -> Option<u16> {
 }
 
 fn resolve_dcsbios_output_range(
-    reference: &DcsBiosReferenceCatalog,
+    catalog: &AdapterCatalog,
+    config: &AdapterMappingConfig,
     mapping: &AdapterOutputMapping,
 ) -> Option<(u16, Option<usize>)> {
     if mapping.source_id == "control-output" {
-        let module_id = mapping.parameters.get("referenceModule");
-        let identifier = mapping.parameters.get("referenceControl");
+        let profile_id = mapping
+            .parameters
+            .get("referenceProfile")
+            .or_else(|| mapping.parameters.get("referenceModule"));
+        let identifier = mapping
+            .parameters
+            .get("referenceControl")
+            .or_else(|| mapping.parameters.get("identifier"));
         let output_id = mapping.parameters.get("referenceOutput");
-        return module_id.zip(identifier).zip(output_id).and_then(
-            |((module_id, identifier), output_id)| {
-                reference
-                    .controls
-                    .iter()
-                    .find(|control| {
-                        control.module_id == *module_id && control.identifier == *identifier
-                    })
-                    .and_then(|control| {
-                        control
-                            .outputs
-                            .iter()
-                            .find(|output| output.output_id == *output_id)
-                    })
+        return profile_id.zip(identifier).zip(output_id).and_then(
+            |((profile_id, identifier), output_id)| {
+                catalog
+                    .find_output(&config.adapter_id, profile_id, identifier, output_id)
                     .map(|output| (output.address, output.length.map(usize::from)))
             },
         );
@@ -2359,19 +2283,16 @@ fn process_control_event(
     pressed_buttons: &mut HashSet<(String, u16)>,
     physical_event: &PhysicalControlEvent,
 ) {
-    if control_supported_events(
-        physical_event.device_kind,
-        physical_event.control_event.control_id,
-    )
-    .is_none()
-    {
+    if physical_event.control_event.control_id >= physical_event.control_count {
         context.state.push_log(
             context.app,
             "WARN",
             "devices",
             format!(
-                "Ignoring control {} from unsupported catalog device {}.",
-                physical_event.control_event.control_id, physical_event.device_id
+                "Ignoring control {} from device {} because the device advertises only {} controls.",
+                physical_event.control_event.control_id,
+                physical_event.device_id,
+                physical_event.control_count
             ),
         );
         return;
@@ -2661,7 +2582,7 @@ fn run_endpoint_listener(
                                     source_address,
                                     KnownRuntimeDevice {
                                         device_id: probed.device_id.clone(),
-                                        device_kind: probed.device_kind,
+                                        control_count: probed.controls,
                                     },
                                 );
                                 state.register_display_sender(
@@ -2708,7 +2629,7 @@ fn run_endpoint_listener(
                                     endpoint_id: endpoint.id.clone(),
                                     source_address,
                                     device_id: device.device_id.clone(),
-                                    device_kind: device.device_kind,
+                                    control_count: device.control_count,
                                     control_event,
                                 };
                                 match dispatch_sender.try_send(physical_event) {
@@ -2853,18 +2774,6 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let state = app.state::<AppState>().inner.clone();
 
-            let dcsbios_reference = DcsBiosReferenceCatalog::discover();
-            let reference_loaded = matches!(
-                dcsbios_reference.state,
-                dcsbios_reference::DcsBiosReferenceState::Loaded
-            );
-            state.set_dcsbios_reference(&app_handle, dcsbios_reference.clone());
-            if !reference_loaded {
-                if let Some(error) = dcsbios_reference.error {
-                    state.push_log(&app_handle, "WARN", "dcsbios", error);
-                }
-            }
-
             match load_manager_state(&app_handle) {
                 Ok(manager_state) => {
                     state.set_device_endpoints(&app_handle, manager_state.device_endpoints.clone());
@@ -2901,7 +2810,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
-            load_dcsbios_reference,
             update_dcsbios_config,
             start_dcsbios,
             stop_dcsbios,
@@ -3382,50 +3290,31 @@ mod tests {
     }
 
     #[test]
-    fn dcsbios_output_mapping_resolves_address_from_reference_identity() {
-        let reference = DcsBiosReferenceCatalog {
-            state: dcsbios_reference::DcsBiosReferenceState::Loaded,
-            source_path: Some("/tmp/reference".to_string()),
-            modules: Vec::new(),
-            controls: vec![dcsbios_reference::DcsBiosReferenceControl {
-                module_id: "F-16C_50".to_string(),
-                category: "DED".to_string(),
-                identifier: "DED_L1".to_string(),
-                control_type: "display".to_string(),
-                description: "DED line 1".to_string(),
-                positions: Vec::new(),
-                inputs: Vec::new(),
-                outputs: vec![dcsbios_reference::DcsBiosReferenceOutput {
-                    output_id: "F_16C_50_DED_L1_A".to_string(),
-                    output_type: "string".to_string(),
-                    description: "Line 1".to_string(),
-                    address: 0x4650,
-                    length: Some(24),
-                    mask: None,
-                    shift_by: None,
-                    max_value: None,
-                    suffix: String::new(),
-                }],
-            }],
-            error: None,
+    fn dcsbios_output_mapping_resolves_address_from_adapter_identity() {
+        let catalog = AdapterCatalog::builtin();
+        let config = AdapterMappingConfig {
+            adapter_id: "dcs-bios".to_string(),
+            profile_id: "F-16C_50".to_string(),
+            mappings: Vec::new(),
+            output_mappings: Vec::new(),
         };
         let mapping = AdapterOutputMapping {
             role_id: "left-ddi".to_string(),
             logical_control_id: "button-0".to_string(),
             source_id: "control-output".to_string(),
             parameters: HashMap::from([
-                ("referenceModule".to_string(), "F-16C_50".to_string()),
-                ("referenceControl".to_string(), "DED_L1".to_string()),
+                ("referenceProfile".to_string(), "F-16C_50".to_string()),
+                ("referenceControl".to_string(), "MFD_L_1".to_string()),
                 (
                     "referenceOutput".to_string(),
-                    "F_16C_50_DED_L1_A".to_string(),
+                    "F_16C_50_MFD_L_1".to_string(),
                 ),
             ]),
         };
 
         assert_eq!(
-            resolve_dcsbios_output_range(&reference, &mapping),
-            Some((0x4650, Some(24)))
+            resolve_dcsbios_output_range(&catalog, &config, &mapping),
+            Some((17_502, Some(2)))
         );
     }
 

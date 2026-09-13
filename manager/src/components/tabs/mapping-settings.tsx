@@ -3,12 +3,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowRightLeft, ChevronRight, Plus, Radio, Trash2 } from "lucide-react";
 
-import { deviceRoleLabels, getPhysicalControlCatalog, getRoleDefinition } from "@/lib/control-catalog";
+import {
+  deviceRoleLabels,
+  getImplementedRoleControls,
+  getPhysicalControlCatalog,
+  getRoleDefinition,
+} from "@/lib/control-catalog";
 import type {
   AdapterControlMapping,
   AdapterMappingConfig,
   AdapterOutputMapping,
-  DcsBiosReferenceCatalog,
+  AdapterCatalog,
   DeviceRoleAssignment,
   EventKind,
   LearnRequest,
@@ -22,12 +27,11 @@ type MappingSettingsProps = {
   roleDefinitions: RoleDefinition[];
   deviceRoleAssignments: DeviceRoleAssignment[];
   adapterMappings: AdapterMappingConfig[];
-  dcsbiosReference: DcsBiosReferenceCatalog;
+  adapterCatalog: AdapterCatalog;
   learnSession: LearnSessionStatus;
   busyAction: string | null;
   onSaveDeviceRoleAssignments: (assignments: DeviceRoleAssignment[]) => Promise<void>;
   onSaveAdapterMappings: (adapterMappings: AdapterMappingConfig[]) => Promise<void>;
-  onLoadDcsBiosReference: () => Promise<void>;
   onStartLearn: (request: LearnRequest) => Promise<void>;
   onCancelLearn: () => Promise<void>;
 };
@@ -43,6 +47,7 @@ const eventLabels: Record<EventKind, string> = {
 };
 
 const emptyAdapterDraft = () => ({
+  adapterId: "",
   profileId: "",
   category: "",
   identifier: "",
@@ -59,12 +64,11 @@ export function MappingSettings({
   roleDefinitions,
   deviceRoleAssignments,
   adapterMappings,
-  dcsbiosReference,
+  adapterCatalog,
   learnSession,
   busyAction,
   onSaveDeviceRoleAssignments,
   onSaveAdapterMappings,
-  onLoadDcsBiosReference,
   onStartLearn,
   onCancelLearn,
 }: MappingSettingsProps) {
@@ -77,6 +81,7 @@ export function MappingSettings({
   const [learnExpectedEventKind, setLearnExpectedEventKind] = useState<EventKind | "">("");
   const [adapterDraft, setAdapterDraft] = useState(emptyAdapterDraft);
   const [outputDraft, setOutputDraft] = useState({
+    adapterId: "",
     profileId: "",
     category: "",
     identifier: "",
@@ -89,11 +94,15 @@ export function MappingSettings({
     () => getRoleDefinition(selectedRoleId, roleDefinitions),
     [roleDefinitions, selectedRoleId],
   );
-  const roleControls = roleDefinition?.controls ?? [];
   const roleAssignments = useMemo(
     () => deviceRoleAssignments.filter((entry) => entry.roleId === selectedRoleId),
     [deviceRoleAssignments, selectedRoleId],
   );
+  const roleControlCapacity = roleAssignments.reduce((maximum, assignment) => {
+    const device = devices.find((entry) => entry.deviceId === assignment.deviceId);
+    return Math.max(maximum, device?.controls ?? 0);
+  }, 0);
+  const roleControls = getImplementedRoleControls(roleDefinition, roleControlCapacity);
   const learnDevices = useMemo(
     () =>
       devices.filter(
@@ -109,14 +118,29 @@ export function MappingSettings({
     (control) => control.logicalControlId === adapterDraft.logicalControlId,
   );
   const selectedDevice = devices.find((device) => device.deviceId === selectedDeviceId) ?? null;
-  const selectedPhysicalControls = getPhysicalControlCatalog(selectedDevice?.deviceKindId ?? null);
+  const selectedPhysicalControls = getPhysicalControlCatalog(
+    selectedDevice?.deviceKindId ?? null,
+    selectedDevice?.controls ?? null,
+  );
   const selectedEventKind = adapterSelectedControl?.supportedEvents.includes(adapterDraft.eventKind)
     ? adapterDraft.eventKind
     : adapterSelectedControl?.supportedEvents[0] ?? "button-pushed";
-  const dcsBiosModules = dcsbiosReference.modules;
+  const adapterDefinitions = adapterCatalog.adapters;
+  const selectedAdapter = adapterDefinitions.find(
+    (adapter) => adapter.adapterId === adapterDraft.adapterId,
+  );
+  const adapterProfiles = selectedAdapter?.profiles ?? [];
+  const selectedAdapterProfile = adapterProfiles.find(
+    (profile) => profile.profileId === adapterDraft.profileId,
+  );
+  const dcsBiosModules = adapterProfiles.map((profile) => ({
+    moduleId: profile.profileId,
+    label: profile.label,
+    controlCount: profile.controlCount,
+  }));
   const dcsBiosModuleControls = useMemo(
-    () => dcsbiosReference.controls.filter((control) => control.moduleId === adapterDraft.profileId),
-    [adapterDraft.profileId, dcsbiosReference.controls],
+    () => selectedAdapterProfile?.controls ?? [],
+    [selectedAdapterProfile],
   );
   const dcsBiosCategories = useMemo(
     () => Array.from(new Set(dcsBiosModuleControls.map((control) => control.category))).sort(),
@@ -130,7 +154,7 @@ export function MappingSettings({
     [adapterDraft.category, dcsBiosModuleControls],
   );
   const selectedDcsBiosInputControl =
-    dcsBiosInputControls.find((control) => control.identifier === adapterDraft.identifier) ?? null;
+    dcsBiosInputControls.find((control) => control.controlId === adapterDraft.identifier) ?? null;
   const dcsBiosInputs = selectedDcsBiosInputControl?.inputs ?? [];
   const selectedDcsBiosInput =
     dcsBiosInputs.find((input) => input.inputId === adapterDraft.inputId) ?? null;
@@ -140,8 +164,11 @@ export function MappingSettings({
     ((selectedDcsBiosInput.interface === "set_state" && selectedEventKind === "absolute-changed") ||
       (selectedDcsBiosInput.interface === "variable_step" && selectedEventKind === "encoder-delta"));
   const dcsBiosOutputModuleControls = useMemo(
-    () => dcsbiosReference.controls.filter((control) => control.moduleId === outputDraft.profileId),
-    [dcsbiosReference.controls, outputDraft.profileId],
+    () =>
+      adapterDefinitions
+        .find((adapter) => adapter.adapterId === outputDraft.adapterId)
+        ?.profiles.find((profile) => profile.profileId === outputDraft.profileId)?.controls ?? [],
+    [adapterDefinitions, outputDraft.adapterId, outputDraft.profileId],
   );
   const dcsBiosOutputCategories = useMemo(
     () => Array.from(new Set(dcsBiosOutputModuleControls.map((control) => control.category))).sort(),
@@ -155,7 +182,7 @@ export function MappingSettings({
     [dcsBiosOutputModuleControls, outputDraft.category],
   );
   const selectedDcsBiosOutputControl =
-    dcsBiosOutputControls.find((control) => control.identifier === outputDraft.identifier) ?? null;
+    dcsBiosOutputControls.find((control) => control.controlId === outputDraft.identifier) ?? null;
   const dcsBiosOutputs = selectedDcsBiosOutputControl?.outputs ?? [];
   const selectedDcsBiosOutput =
     dcsBiosOutputs.find((output) => output.outputId === outputDraft.outputId) ?? null;
@@ -210,10 +237,24 @@ export function MappingSettings({
   }, [adapterDraft.eventKind, adapterSelectedControl]);
 
   useEffect(() => {
-    if (dcsBiosModules.length === 0) {
+    const firstAdapter = adapterDefinitions[0];
+    if (!firstAdapter) {
       return;
     }
-    if (!dcsBiosModules.some((module) => module.moduleId === adapterDraft.profileId)) {
+    const selectedAdapterProfiles =
+      adapterDefinitions.find((adapter) => adapter.adapterId === adapterDraft.adapterId)?.profiles ?? [];
+    if (!adapterDefinitions.some((adapter) => adapter.adapterId === adapterDraft.adapterId)) {
+      setAdapterDraft((current) => ({
+        ...current,
+        adapterId: firstAdapter.adapterId,
+        profileId: "",
+        category: "",
+        identifier: "",
+        inputId: "",
+        inputInterface: "",
+        argument: "",
+      }));
+    } else if (!selectedAdapterProfiles.some((profile) => profile.profileId === adapterDraft.profileId)) {
       setAdapterDraft((current) => ({
         ...current,
         profileId: dcsBiosModules[0].moduleId,
@@ -224,7 +265,18 @@ export function MappingSettings({
         argument: "",
       }));
     }
-    if (!dcsBiosModules.some((module) => module.moduleId === outputDraft.profileId)) {
+    const outputAdapterProfiles =
+      adapterDefinitions.find((adapter) => adapter.adapterId === outputDraft.adapterId)?.profiles ?? [];
+    if (!adapterDefinitions.some((adapter) => adapter.adapterId === outputDraft.adapterId)) {
+      setOutputDraft((current) => ({
+        ...current,
+        adapterId: firstAdapter.adapterId,
+        profileId: "",
+        category: "",
+        identifier: "",
+        outputId: "",
+      }));
+    } else if (!outputAdapterProfiles.some((profile) => profile.profileId === outputDraft.profileId)) {
       setOutputDraft((current) => ({
         ...current,
         profileId: dcsBiosModules[0].moduleId,
@@ -233,7 +285,7 @@ export function MappingSettings({
         outputId: "",
       }));
     }
-  }, [adapterDraft.profileId, dcsBiosModules, outputDraft.profileId]);
+  }, [adapterDefinitions, adapterDraft.adapterId, adapterDraft.profileId, dcsBiosModules, outputDraft.adapterId, outputDraft.profileId]);
 
   useEffect(() => {
     if (dcsBiosCategories.length > 0 && !dcsBiosCategories.includes(adapterDraft.category)) {
@@ -269,10 +321,10 @@ export function MappingSettings({
     if (!firstInputControl) {
       return;
     }
-    if (!dcsBiosInputControls.some((control) => control.identifier === adapterDraft.identifier)) {
+    if (!dcsBiosInputControls.some((control) => control.controlId === adapterDraft.identifier)) {
       setAdapterDraft((current) => ({
         ...current,
-        identifier: firstInputControl.identifier,
+        identifier: firstInputControl.controlId,
         inputId: "",
         inputInterface: "",
         argument: "",
@@ -315,10 +367,10 @@ export function MappingSettings({
     if (!outputControl) {
       return;
     }
-    if (!dcsBiosOutputControls.some((control) => control.identifier === outputDraft.identifier)) {
+    if (!dcsBiosOutputControls.some((control) => control.controlId === outputDraft.identifier)) {
       setOutputDraft((current) => ({
         ...current,
-        identifier: outputControl.identifier,
+        identifier: outputControl.controlId,
         outputId: "",
       }));
     }
@@ -417,6 +469,7 @@ export function MappingSettings({
 
   const addAdapterMapping = async () => {
     if (
+      !adapterDraft.adapterId.trim() ||
       !adapterDraft.profileId.trim() ||
       !adapterDraft.logicalControlId ||
       !adapterDraft.identifier.trim() ||
@@ -435,12 +488,13 @@ export function MappingSettings({
       action: {
         actionId: "control-command",
         parameters: {
-          identifier: selectedDcsBiosInputControl.identifier,
+          identifier: selectedDcsBiosInputControl.controlId,
           argument: adapterDraft.argument.trim(),
           argumentMode: adapterDraft.argumentMode,
-          referenceModule: selectedDcsBiosInputControl.moduleId,
+          referenceAdapter: adapterDraft.adapterId,
+          referenceProfile: adapterDraft.profileId,
           referenceCategory: selectedDcsBiosInputControl.category,
-          referenceControl: selectedDcsBiosInputControl.identifier,
+          referenceControl: selectedDcsBiosInputControl.controlId,
           referenceInput: selectedDcsBiosInput.inputId,
           referenceInterface: selectedDcsBiosInput.interface,
           ...(selectedDcsBiosInput.maxValue === null
@@ -457,13 +511,15 @@ export function MappingSettings({
       mappings: [...config.mappings],
     }));
     const configIndex = next.findIndex(
-      (config) => config.adapterId === "dcs-bios" && config.profileId === adapterDraft.profileId.trim(),
+      (config) =>
+        config.adapterId === adapterDraft.adapterId.trim() &&
+        config.profileId === adapterDraft.profileId.trim(),
     );
     if (configIndex >= 0) {
       next[configIndex].mappings.push(mapping);
     } else {
       next.push({
-        adapterId: "dcs-bios",
+        adapterId: adapterDraft.adapterId.trim(),
         profileId: adapterDraft.profileId.trim(),
         mappings: [mapping],
       });
@@ -484,6 +540,7 @@ export function MappingSettings({
 
   const addOutputMapping = async () => {
     if (
+      !outputDraft.adapterId.trim() ||
       !outputDraft.profileId.trim() ||
       !outputDraft.logicalControlId ||
       !outputDraft.identifier.trim() ||
@@ -499,9 +556,10 @@ export function MappingSettings({
       logicalControlId: outputDraft.logicalControlId,
       sourceId: "control-output",
       parameters: {
-        referenceModule: selectedDcsBiosOutputControl.moduleId,
+        referenceAdapter: outputDraft.adapterId,
+        referenceProfile: outputDraft.profileId,
         referenceCategory: selectedDcsBiosOutputControl.category,
-        referenceControl: selectedDcsBiosOutputControl.identifier,
+        referenceControl: selectedDcsBiosOutputControl.controlId,
         referenceOutput: selectedDcsBiosOutput.outputId,
         outputType: selectedDcsBiosOutput.outputType,
         encoding: outputDraft.encoding,
@@ -513,13 +571,15 @@ export function MappingSettings({
       outputMappings: [...(config.outputMappings ?? [])],
     }));
     const configIndex = next.findIndex(
-      (config) => config.adapterId === "dcs-bios" && config.profileId === outputDraft.profileId.trim(),
+      (config) =>
+        config.adapterId === outputDraft.adapterId.trim() &&
+        config.profileId === outputDraft.profileId.trim(),
     );
     if (configIndex >= 0) {
       next[configIndex].outputMappings?.push(outputMapping);
     } else {
       next.push({
-        adapterId: "dcs-bios",
+        adapterId: outputDraft.adapterId.trim(),
         profileId: outputDraft.profileId.trim(),
         mappings: [],
         outputMappings: [outputMapping],
@@ -543,11 +603,19 @@ export function MappingSettings({
   };
 
   const labelForPhysicalControl = (device: ManagedDeviceSummary, physicalControlId: number) => {
-    const control = getPhysicalControlCatalog(device.deviceKindId).find(
+    const control = getPhysicalControlCatalog(device.deviceKindId, device.controls).find(
       (entry) => entry.physicalControlId === physicalControlId,
     );
     return control ? `${control.label} (${control.description})` : `Physical ${physicalControlId}`;
   };
+
+  const implementedControlCount = (roleId: string) =>
+    deviceRoleAssignments
+      .filter((assignment) => assignment.roleId === roleId)
+      .reduce((maximum, assignment) => {
+        const device = devices.find((entry) => entry.deviceId === assignment.deviceId);
+        return Math.max(maximum, device?.controls ?? 0);
+      }, 0);
 
   return (
     <div className="h-full overflow-y-auto p-8">
@@ -589,7 +657,9 @@ export function MappingSettings({
                           <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-600">
                             {assignmentCount} device(s)
                           </span>
-                          <span className="text-xs text-gray-400">{definition.controls.length} controls</span>
+                          <span className="text-xs text-gray-400">
+                            {implementedControlCount(definition.roleId)} implemented controls
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -851,7 +921,7 @@ export function MappingSettings({
                     <div>
                       <h3 className="text-xl font-semibold text-gray-900">Adapter Mapping</h3>
                       <p className="mt-1 text-sm text-gray-500">
-                        DCS-BIOSの参照データからコントロールと入力インターフェースを選びます。識別子や引数を手入力する必要はありません。
+                        Adapterが同梱する実装済みカタログからコントロールと入力インターフェースを選びます。ゲーム固有の識別子や引数を手入力する必要はありません。
                       </p>
                     </div>
                     <div className="flex items-center gap-3">
@@ -862,49 +932,60 @@ export function MappingSettings({
                           0,
                         )} mapping(s)
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => void onLoadDcsBiosReference()}
-                        disabled={busyAction !== null}
-                        className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
-                      >
-                        定義を再読み込み
-                      </button>
                     </div>
                   </div>
 
                   <div className="mt-5 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm">
-                    {dcsbiosReference.state === "loaded" ? (
+                    {adapterCatalog.state === "loaded" ? (
                       <>
                         <div className="flex flex-wrap items-center gap-2 text-gray-700">
                           <span className="rounded-full border border-green-200 bg-green-50 px-3 py-1 text-green-800">
-                            DCS-BIOS定義を読み込み済み
+                            Adapterカタログを内蔵
                           </span>
-                          <span>{dcsbiosReference.modules.length} module(s)</span>
+                          <span>{adapterDefinitions.length} adapter(s)</span>
                           <span>·</span>
-                          <span>{dcsbiosReference.controls.length} control(s)</span>
-                          {dcsbiosReference.sourcePath && (
-                            <span className="truncate text-gray-500" title={dcsbiosReference.sourcePath}>
-                              · {dcsbiosReference.sourcePath}
-                            </span>
-                          )}
+                          <span>{adapterProfiles.length} profile(s)</span>
                         </div>
-                        {dcsbiosReference.error && (
-                          <p className="mt-2 text-amber-700">{dcsbiosReference.error}</p>
+                        {adapterCatalog.error && (
+                          <p className="mt-2 text-amber-700">{adapterCatalog.error}</p>
                         )}
                       </>
                     ) : (
                       <p className="text-amber-800">
-                        DCS-BIOSの参照データがありません。標準インストール先を自動検索しています。
-                        {dcsbiosReference.error ? " " + dcsbiosReference.error : ""}
+                        Adapterカタログを読み込めません。{adapterCatalog.error ? " " + adapterCatalog.error : ""}
                       </p>
                     )}
                   </div>
 
-                  {dcsbiosReference.state === "loaded" && (
+                  {adapterCatalog.state === "loaded" && (
                     <div className="mt-5 grid gap-4 lg:grid-cols-2">
                       <label className="space-y-2 text-sm text-gray-700">
-                        <span>DCS-BIOS Module</span>
+                        <span>Adapter</span>
+                        <select
+                          value={adapterDraft.adapterId}
+                          onChange={(event) =>
+                            setAdapterDraft((current) => ({
+                              ...current,
+                              adapterId: event.target.value,
+                              profileId: "",
+                              category: "",
+                              identifier: "",
+                              inputId: "",
+                              inputInterface: "",
+                              argument: "",
+                            }))
+                          }
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                        >
+                          {adapterDefinitions.map((adapter) => (
+                            <option key={adapter.adapterId} value={adapter.adapterId}>
+                              {adapter.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Adapter Profile</span>
                         <select
                           value={adapterDraft.profileId}
                           onChange={(event) =>
@@ -965,8 +1046,8 @@ export function MappingSettings({
                           className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
                         >
                           {dcsBiosInputControls.map((control) => (
-                            <option key={control.identifier} value={control.identifier}>
-                              {control.identifier} — {control.description || control.controlType}
+                            <option key={control.controlId} value={control.controlId}>
+                              {control.controlId} — {control.description || control.controlType}
                             </option>
                           ))}
                         </select>
@@ -1115,13 +1196,36 @@ export function MappingSettings({
                   <div>
                     <h3 className="text-xl font-semibold text-gray-900">Adapter Output Mapping</h3>
                     <p className="mt-1 text-sm text-gray-500">
-                      DCS-BIOSの出力定義を選ぶと、アドレス・マスク・文字列長は参照データから自動的に設定されます。
+                      Adapterの出力定義を選ぶと、ゲーム固有のアドレス・マスク・文字列長はカタログから自動的に設定されます。
                     </p>
                   </div>
-                  {dcsbiosReference.state === "loaded" ? (
+                  {adapterCatalog.state === "loaded" ? (
                     <div className="mt-5 grid gap-4 lg:grid-cols-2">
                       <label className="space-y-2 text-sm text-gray-700">
-                        <span>DCS-BIOS Module</span>
+                        <span>Adapter</span>
+                        <select
+                          value={outputDraft.adapterId}
+                          onChange={(event) =>
+                            setOutputDraft((current) => ({
+                              ...current,
+                              adapterId: event.target.value,
+                              profileId: "",
+                              category: "",
+                              identifier: "",
+                              outputId: "",
+                            }))
+                          }
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                        >
+                          {adapterDefinitions.map((adapter) => (
+                            <option key={adapter.adapterId} value={adapter.adapterId}>
+                              {adapter.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-sm text-gray-700">
+                        <span>Adapter Profile</span>
                         <select
                           value={outputDraft.profileId}
                           onChange={(event) =>
@@ -1176,8 +1280,8 @@ export function MappingSettings({
                           className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
                         >
                           {dcsBiosOutputControls.map((control) => (
-                            <option key={control.identifier} value={control.identifier}>
-                              {control.identifier} — {control.description || control.controlType}
+                            <option key={control.controlId} value={control.controlId}>
+                              {control.controlId} — {control.description || control.controlType}
                             </option>
                           ))}
                         </select>
@@ -1238,7 +1342,7 @@ export function MappingSettings({
                     </div>
                   ) : (
                     <div className="mt-5 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
-                      DCS-BIOS定義を読み込むと、出力コントロールを選択できます。
+                      Adapterカタログが利用できると、出力コントロールを選択できます。
                     </div>
                   )}
 

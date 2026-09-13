@@ -118,17 +118,9 @@ pub fn default_role_definitions() -> Vec<RoleDefinition> {
         .map(|(role_id, _label)| RoleDefinition {
             role_id: role_id.to_string(),
             version: 1,
-            controls: (0..40)
-                .map(|index| RoleControlDefinition {
-                    logical_control_id: format!("button-{index}"),
-                    label: format!("Button {}", index + 1),
-                    supported_events: vec![
-                        EventKind::ButtonDown,
-                        EventKind::ButtonUp,
-                        EventKind::ButtonPushed,
-                    ],
-                })
-                .collect(),
+            // The physical device advertises its implemented control count in
+            // DeviceHello. The Manager must not invent a button list here.
+            controls: Vec::new(),
         })
         .collect()
 }

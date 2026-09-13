@@ -29,7 +29,6 @@ export default function ManagerTabs() {
         saveDeviceEndpoints,
         saveDeviceRoleAssignments,
         saveAdapterMappings,
-        loadDcsBiosReference,
         startLearn,
         cancelLearn,
     } = useManagerState();
@@ -79,12 +78,11 @@ export default function ManagerTabs() {
                     roleDefinitions={snapshot.roleDefinitions}
                     deviceRoleAssignments={snapshot.deviceRoleAssignments}
                     adapterMappings={snapshot.adapterMappings}
-                    dcsbiosReference={snapshot.dcsbiosReference}
+                    adapterCatalog={snapshot.adapterCatalog}
                     learnSession={snapshot.learnSession}
                     busyAction={busyAction}
                     onSaveDeviceRoleAssignments={saveDeviceRoleAssignments}
                     onSaveAdapterMappings={saveAdapterMappings}
-                    onLoadDcsBiosReference={loadDcsBiosReference}
                     onStartLearn={startLearn}
                     onCancelLearn={cancelLearn}
                 />

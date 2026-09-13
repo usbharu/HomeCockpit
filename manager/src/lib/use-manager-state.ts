@@ -58,10 +58,6 @@ export function useManagerState() {
     setSnapshot((current) => ({ ...current, adapterMappings }));
   }, []);
 
-  const mergeDcsBiosReference = useCallback((dcsbiosReference: AppSnapshot["dcsbiosReference"]) => {
-    setSnapshot((current) => ({ ...current, dcsbiosReference }));
-  }, []);
-
   const mergeLearnSession = useCallback((learnSession: LearnSessionStatus) => {
     setSnapshot((current) => ({ ...current, learnSession }));
   }, []);
@@ -225,21 +221,6 @@ export function useManagerState() {
     [replaceSnapshot, runAction],
   );
 
-  const loadDcsBiosReference = useCallback(async () => {
-    if (!isTauri()) {
-      return;
-    }
-
-    try {
-      const next = await runAction("load-dcsbios-reference", () =>
-        invoke<AppSnapshot>("load_dcsbios_reference"),
-      );
-      replaceSnapshot(next);
-    } catch (error) {
-      setRuntimeError(String(error));
-    }
-  }, [replaceSnapshot, runAction]);
-
   const startLearn = useCallback(
     async (request: LearnRequest) => {
       if (!isTauri()) {
@@ -353,11 +334,6 @@ export function useManagerState() {
             mergeAdapterMappings(event.payload);
           }
         }),
-        listen<AppSnapshot["dcsbiosReference"]>("dcsbios-reference-changed", (event) => {
-          if (!disposed) {
-            mergeDcsBiosReference(event.payload);
-          }
-        }),
         listen<LearnSessionStatus>("learn-session-changed", (event) => {
           if (!disposed) {
             mergeLearnSession(event.payload);
@@ -382,7 +358,6 @@ export function useManagerState() {
     mergeDevices,
     mergeLog,
     mergeAdapterMappings,
-    mergeDcsBiosReference,
     mergeLearnSession,
     mergeStatus,
     refreshSerialPorts,
@@ -401,7 +376,6 @@ export function useManagerState() {
     saveDeviceEndpoints,
     saveDeviceRoleAssignments,
     saveAdapterMappings,
-    loadDcsBiosReference,
     startLearn,
     cancelLearn,
     refreshSerialPorts,

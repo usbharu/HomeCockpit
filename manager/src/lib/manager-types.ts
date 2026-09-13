@@ -19,24 +19,24 @@ export type DcsBiosStatus = {
   diagnostics: string[];
 };
 
-export type DcsBiosReferenceState = "unavailable" | "loaded" | "error";
+export type AdapterCatalogState = "loaded" | "error";
 
-export type DcsBiosArgumentOption = {
+export type AdapterArgumentOption = {
   value: string;
   label: string;
 };
 
-export type DcsBiosReferenceInput = {
+export type AdapterInputDefinition = {
   inputId: string;
   interface: string;
   description: string;
   maxValue: number | null;
   suggestedStep: number | null;
-  argumentOptions: DcsBiosArgumentOption[];
+  argumentOptions: AdapterArgumentOption[];
   supportsEventValue: boolean;
 };
 
-export type DcsBiosReferenceOutput = {
+export type AdapterOutputDefinition = {
   outputId: string;
   outputType: string;
   description: string;
@@ -48,28 +48,32 @@ export type DcsBiosReferenceOutput = {
   suffix: string;
 };
 
-export type DcsBiosReferenceControl = {
-  moduleId: string;
+export type AdapterControlDefinition = {
   category: string;
-  identifier: string;
+  controlId: string;
   controlType: string;
   description: string;
   positions: string[];
-  inputs: DcsBiosReferenceInput[];
-  outputs: DcsBiosReferenceOutput[];
+  inputs: AdapterInputDefinition[];
+  outputs: AdapterOutputDefinition[];
 };
 
-export type DcsBiosReferenceModule = {
-  moduleId: string;
+export type AdapterProfile = {
+  profileId: string;
   label: string;
   controlCount: number;
+  controls: AdapterControlDefinition[];
 };
 
-export type DcsBiosReferenceCatalog = {
-  state: DcsBiosReferenceState;
-  sourcePath: string | null;
-  modules: DcsBiosReferenceModule[];
-  controls: DcsBiosReferenceControl[];
+export type AdapterDefinition = {
+  adapterId: string;
+  label: string;
+  profiles: AdapterProfile[];
+};
+
+export type AdapterCatalog = {
+  state: AdapterCatalogState;
+  adapters: AdapterDefinition[];
   error: string | null;
 };
 
@@ -192,7 +196,7 @@ export type LearnSessionStatus = {
 export type AppSnapshot = {
   dcsbiosConfig: DcsBiosConnectionConfig;
   dcsbiosStatus: DcsBiosStatus;
-  dcsbiosReference: DcsBiosReferenceCatalog;
+  adapterCatalog: AdapterCatalog;
   logs: ManagerLogEntry[];
   devices: ManagedDeviceSummary[];
   deviceEndpoints: DeviceEndpointConfig[];
@@ -217,17 +221,11 @@ export type LearnRequest = {
   timeoutMs?: number;
 };
 
-const defaultEventKinds: EventKind[] = ["button-down", "button-up", "button-pushed"];
-
 export function defaultRoleDefinitions(): RoleDefinition[] {
   return ["left-ddi", "right-ddi"].map((roleId) => ({
     roleId,
     version: 1,
-    controls: Array.from({ length: 40 }, (_, index) => ({
-      logicalControlId: `button-${index}`,
-      label: `Button ${index + 1}`,
-      supportedEvents: [...defaultEventKinds],
-    })),
+    controls: [],
   }));
 }
 
@@ -249,12 +247,10 @@ export const defaultSnapshot: AppSnapshot = {
     error: null,
     diagnostics: ["DCS-BIOS listener is stopped."],
   },
-  dcsbiosReference: {
-    state: "unavailable",
-    sourcePath: null,
-    modules: [],
-    controls: [],
-    error: "DCS-BIOS control reference data has not been loaded.",
+  adapterCatalog: {
+    state: "error",
+    adapters: [],
+    error: "Adapter catalog is not available.",
   },
   logs: [],
   devices: [],
