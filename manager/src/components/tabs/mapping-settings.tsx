@@ -102,7 +102,10 @@ export function MappingSettings({
     const device = devices.find((entry) => entry.deviceId === assignment.deviceId);
     return Math.max(maximum, device?.controls ?? 0);
   }, 0);
-  const roleControls = getImplementedRoleControls(roleDefinition, roleControlCapacity);
+  const roleControls = useMemo(
+    () => getImplementedRoleControls(roleDefinition, roleControlCapacity),
+    [roleControlCapacity, roleDefinition],
+  );
   const learnDevices = useMemo(
     () =>
       devices.filter(
@@ -118,9 +121,11 @@ export function MappingSettings({
     (control) => control.logicalControlId === adapterDraft.logicalControlId,
   );
   const selectedDevice = devices.find((device) => device.deviceId === selectedDeviceId) ?? null;
-  const selectedPhysicalControls = getPhysicalControlCatalog(
-    selectedDevice?.deviceKindId ?? null,
-    selectedDevice?.controls ?? null,
+  const selectedDeviceKindId = selectedDevice?.deviceKindId ?? null;
+  const selectedDeviceControlCount = selectedDevice?.controls ?? null;
+  const selectedPhysicalControls = useMemo(
+    () => getPhysicalControlCatalog(selectedDeviceKindId, selectedDeviceControlCount),
+    [selectedDeviceControlCount, selectedDeviceKindId],
   );
   const selectedEventKind = adapterSelectedControl?.supportedEvents.includes(adapterDraft.eventKind)
     ? adapterDraft.eventKind
@@ -129,15 +134,19 @@ export function MappingSettings({
   const selectedAdapter = adapterDefinitions.find(
     (adapter) => adapter.adapterId === adapterDraft.adapterId,
   );
-  const adapterProfiles = selectedAdapter?.profiles ?? [];
+  const adapterProfiles = useMemo(() => selectedAdapter?.profiles ?? [], [selectedAdapter]);
   const selectedAdapterProfile = adapterProfiles.find(
     (profile) => profile.profileId === adapterDraft.profileId,
   );
-  const dcsBiosModules = adapterProfiles.map((profile) => ({
-    moduleId: profile.profileId,
-    label: profile.label,
-    controlCount: profile.controlCount,
-  }));
+  const dcsBiosModules = useMemo(
+    () =>
+      adapterProfiles.map((profile) => ({
+        moduleId: profile.profileId,
+        label: profile.label,
+        controlCount: profile.controlCount,
+      })),
+    [adapterProfiles],
+  );
   const dcsBiosModuleControls = useMemo(
     () => selectedAdapterProfile?.controls ?? [],
     [selectedAdapterProfile],
@@ -155,10 +164,16 @@ export function MappingSettings({
   );
   const selectedDcsBiosInputControl =
     dcsBiosInputControls.find((control) => control.controlId === adapterDraft.identifier) ?? null;
-  const dcsBiosInputs = selectedDcsBiosInputControl?.inputs ?? [];
+  const dcsBiosInputs = useMemo(
+    () => selectedDcsBiosInputControl?.inputs ?? [],
+    [selectedDcsBiosInputControl],
+  );
   const selectedDcsBiosInput =
     dcsBiosInputs.find((input) => input.inputId === adapterDraft.inputId) ?? null;
-  const dcsBiosArgumentOptions = selectedDcsBiosInput?.argumentOptions ?? [];
+  const dcsBiosArgumentOptions = useMemo(
+    () => selectedDcsBiosInput?.argumentOptions ?? [],
+    [selectedDcsBiosInput],
+  );
   const supportsSelectedEventValue =
     selectedDcsBiosInput?.supportsEventValue === true &&
     ((selectedDcsBiosInput.interface === "set_state" && selectedEventKind === "absolute-changed") ||
@@ -183,7 +198,10 @@ export function MappingSettings({
   );
   const selectedDcsBiosOutputControl =
     dcsBiosOutputControls.find((control) => control.controlId === outputDraft.identifier) ?? null;
-  const dcsBiosOutputs = selectedDcsBiosOutputControl?.outputs ?? [];
+  const dcsBiosOutputs = useMemo(
+    () => selectedDcsBiosOutputControl?.outputs ?? [],
+    [selectedDcsBiosOutputControl],
+  );
   const selectedDcsBiosOutput =
     dcsBiosOutputs.find((output) => output.outputId === outputDraft.outputId) ?? null;
 
@@ -195,33 +213,45 @@ export function MappingSettings({
 
   useEffect(() => {
     const firstControl = roleControls[0]?.logicalControlId ?? "";
-    if (!roleControls.some((control) => control.logicalControlId === selectedLogicalControlId)) {
-      setSelectedLogicalControlId(firstControl);
-    }
-    if (roleAssignments.every((assignment) => assignment.deviceId !== selectedDeviceId)) {
-      setSelectedDeviceId(roleAssignments[0]?.deviceId ?? "");
-    }
-  }, [roleAssignments, roleControls, selectedDeviceId, selectedLogicalControlId]);
+    setSelectedLogicalControlId((current) =>
+      roleControls.some((control) => control.logicalControlId === current) ? current : firstControl,
+    );
+    setSelectedDeviceId((current) =>
+      roleAssignments.some((assignment) => assignment.deviceId === current)
+        ? current
+        : roleAssignments[0]?.deviceId ?? "",
+    );
+  }, [roleAssignments, roleControls]);
 
   useEffect(() => {
-    if (!selectedPhysicalControls.some((control) => String(control.physicalControlId) === selectedPhysicalControlId)) {
-      setSelectedPhysicalControlId(
-        selectedPhysicalControls[0] ? String(selectedPhysicalControls[0].physicalControlId) : "",
-      );
-    }
-  }, [selectedPhysicalControls, selectedPhysicalControlId]);
+    setSelectedPhysicalControlId((current) => {
+      if (selectedPhysicalControls.some((control) => String(control.physicalControlId) === current)) {
+        return current;
+      }
+      return selectedPhysicalControls[0] ? String(selectedPhysicalControls[0].physicalControlId) : "";
+    });
+  }, [selectedPhysicalControls]);
 
   useEffect(() => {
     if (!selectedControl) {
       return;
     }
-    setAdapterDraft((current) => ({
-      ...current,
-      logicalControlId: selectedControl.logicalControlId,
-      eventKind: selectedControl.supportedEvents.includes(current.eventKind)
+    setAdapterDraft((current) => {
+      const eventKind = selectedControl.supportedEvents.includes(current.eventKind)
         ? current.eventKind
-        : selectedControl.supportedEvents[0] ?? "button-pushed",
-    }));
+        : selectedControl.supportedEvents[0] ?? "button-pushed";
+      if (
+        current.logicalControlId === selectedControl.logicalControlId &&
+        current.eventKind === eventKind
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        logicalControlId: selectedControl.logicalControlId,
+        eventKind,
+      };
+    });
   }, [selectedControl]);
 
   useEffect(() => {
@@ -229,10 +259,10 @@ export function MappingSettings({
       return;
     }
     if (!adapterSelectedControl.supportedEvents.includes(adapterDraft.eventKind)) {
-      setAdapterDraft((current) => ({
-        ...current,
-        eventKind: adapterSelectedControl.supportedEvents[0] ?? "button-pushed",
-      }));
+      const eventKind = adapterSelectedControl.supportedEvents[0] ?? "button-pushed";
+      setAdapterDraft((current) =>
+        current.eventKind === eventKind ? current : { ...current, eventKind },
+      );
     }
   }, [adapterDraft.eventKind, adapterSelectedControl]);
 
@@ -354,11 +384,15 @@ export function MappingSettings({
     }
     const isFixedArgument = dcsBiosArgumentOptions.some((option) => option.value === adapterDraft.argument);
     if (!isFixedArgument && !(selectedDcsBiosInput.supportsEventValue && adapterDraft.argument === "$event-value")) {
-      setAdapterDraft((current) => ({
-        ...current,
-        argument: dcsBiosArgumentOptions[0]?.value ?? (selectedDcsBiosInput.supportsEventValue ? "$event-value" : ""),
-        argumentMode: dcsBiosArgumentOptions.length > 0 ? "fixed" : "event-value",
-      }));
+      const argument =
+        dcsBiosArgumentOptions[0]?.value ??
+        (selectedDcsBiosInput.supportsEventValue ? "$event-value" : "");
+      const argumentMode = dcsBiosArgumentOptions.length > 0 ? "fixed" : "event-value";
+      setAdapterDraft((current) =>
+        current.argument === argument && current.argumentMode === argumentMode
+          ? current
+          : { ...current, argument, argumentMode },
+      );
     }
   }, [adapterDraft.argument, dcsBiosArgumentOptions, selectedDcsBiosInput]);
 
@@ -382,16 +416,20 @@ export function MappingSettings({
       return;
     }
     if (!dcsBiosOutputs.some((candidate) => candidate.outputId === outputDraft.outputId)) {
-      setOutputDraft((current) => ({ ...current, outputId: output.outputId }));
+      setOutputDraft((current) =>
+        current.outputId === output.outputId ? current : { ...current, outputId: output.outputId },
+      );
     }
   }, [dcsBiosOutputs, outputDraft.outputId]);
 
   useEffect(() => {
     if (!roleControls.some((control) => control.logicalControlId === outputDraft.logicalControlId)) {
-      setOutputDraft((current) => ({
-        ...current,
-        logicalControlId: roleControls[0]?.logicalControlId ?? "",
-      }));
+      const logicalControlId = roleControls[0]?.logicalControlId ?? "";
+      setOutputDraft((current) =>
+        current.logicalControlId === logicalControlId
+          ? current
+          : { ...current, logicalControlId },
+      );
     }
   }, [outputDraft.logicalControlId, roleControls]);
 
