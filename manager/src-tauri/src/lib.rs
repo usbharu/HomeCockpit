@@ -1677,6 +1677,33 @@ fn enumerate_serial_endpoint(
     Ok(devices)
 }
 
+fn open_serial_endpoint(
+    endpoint: &DeviceEndpointConfig,
+) -> serialport::Result<Box<dyn serialport::SerialPort>> {
+    serialport::new(&endpoint.address, serial_endpoint_open_baud_rate(endpoint))
+        .timeout(IMCP_READ_TIMEOUT)
+        .open()
+}
+
+fn serial_endpoint_open_baud_rate(endpoint: &DeviceEndpointConfig) -> u32 {
+    #[cfg(target_os = "macos")]
+    if is_macos_pty_path(&endpoint.address) {
+        // serialport uses IOSSIOSPEED for every non-zero baud rate on macOS.
+        // That ioctl is unsupported by PTYs and fails with ENOTTY. A zero baud
+        // rate is the crate's documented way to leave a PTY's speed unchanged.
+        return 0;
+    }
+
+    endpoint.baud_rate
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_pty_path(path: &str) -> bool {
+    path.strip_prefix("/dev/ttys").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
 struct EndpointProbe {
     port: Box<dyn serialport::SerialPort>,
     root: ProbedImcpDevice,
@@ -1696,9 +1723,7 @@ struct ProbedImcpDevice {
 }
 
 fn probe_endpoint_root_device(endpoint: &DeviceEndpointConfig) -> Result<EndpointProbe, String> {
-    let mut port = serialport::new(&endpoint.address, endpoint.baud_rate)
-        .timeout(IMCP_READ_TIMEOUT)
-        .open()
+    let mut port = open_serial_endpoint(endpoint)
         .map_err(|error| format!("Failed to open {}: {error}", endpoint.address))?;
 
     let _ = port.clear(serialport::ClearBuffer::All);
@@ -2781,15 +2806,12 @@ fn run_endpoint_listener(
     display_receiver: Receiver<DisplayCommand>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let mut port = serialport::new(&endpoint.address, endpoint.baud_rate)
-        .timeout(IMCP_READ_TIMEOUT)
-        .open()
-        .map_err(|error| {
-            format!(
-                "Failed to open endpoint listener {}: {error}",
-                endpoint.address
-            )
-        })?;
+    let mut port = open_serial_endpoint(&endpoint).map_err(|error| {
+        format!(
+            "Failed to open endpoint listener {}: {error}",
+            endpoint.address
+        )
+    })?;
     let _ = port.clear(serialport::ClearBuffer::All);
 
     let mut serial_buffer = [0u8; 64];
@@ -3174,6 +3196,48 @@ mod tests {
         }]);
 
         assert_eq!(endpoints[0].baud_rate, DEFAULT_DEVICE_ENDPOINT_BAUD_RATE);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pty_endpoint_opens_without_applying_serial_baud_ioctl() {
+        let (_master, slave) = serialport::TTYPort::pair().expect("PTY pair");
+        let path = serialport::SerialPort::name(&slave).expect("PTY slave path");
+        drop(slave);
+        let endpoint = DeviceEndpointConfig {
+            id: "mock-ddi".to_string(),
+            name: "Mock DDI".to_string(),
+            transport: DeviceEndpointTransport::Serial,
+            address: path.clone(),
+            enabled: true,
+            baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
+            role_hint: EndpointRoleHint::DirectDevice,
+        };
+
+        assert!(is_macos_pty_path(&path));
+        assert_eq!(serial_endpoint_open_baud_rate(&endpoint), 0);
+        let reopened = open_serial_endpoint(&endpoint).expect("open PTY endpoint");
+        assert_eq!(reopened.name().as_deref(), Some(path.as_str()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_physical_serial_endpoint_keeps_configured_baud_rate() {
+        let endpoint = DeviceEndpointConfig {
+            id: "physical".to_string(),
+            name: "Physical device".to_string(),
+            transport: DeviceEndpointTransport::Serial,
+            address: "/dev/cu.usbmodem1234".to_string(),
+            enabled: true,
+            baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
+            role_hint: EndpointRoleHint::Auto,
+        };
+
+        assert!(!is_macos_pty_path(&endpoint.address));
+        assert_eq!(
+            serial_endpoint_open_baud_rate(&endpoint),
+            DEFAULT_DEVICE_ENDPOINT_BAUD_RATE
+        );
     }
 
     #[test]

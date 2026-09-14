@@ -1,2 +1,2 @@
 [workspace]
-members = ["imcp-cli"]
+members = ["imcp-cli", "upper-panel-ddi-mock"]
