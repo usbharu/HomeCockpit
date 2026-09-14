@@ -9,7 +9,11 @@ import {
   getPhysicalControlCatalog,
   getRoleDefinition,
 } from "@/lib/control-catalog";
+import { RoleIoMapping } from "@/components/role-io-mapping";
 import type {
+  AdapterCatalog,
+  AdapterMappingConfig,
+  DcsBiosCommandRequest,
   DeviceRoleAssignment,
   EventKind,
   LearnRequest,
@@ -24,7 +28,12 @@ type MappingSettingsProps = {
   deviceRoleAssignments: DeviceRoleAssignment[];
   learnSession: LearnSessionStatus;
   busyAction: string | null;
+  aircraftName: string | null;
+  adapterCatalog: AdapterCatalog;
+  adapterMappings: AdapterMappingConfig[];
   onSaveDeviceRoleAssignments: (assignments: DeviceRoleAssignment[]) => Promise<void>;
+  onSaveAdapterMappings: (mappings: AdapterMappingConfig[]) => Promise<void>;
+  onSendCommand: (request: DcsBiosCommandRequest) => Promise<void>;
   onStartLearn: (request: LearnRequest) => Promise<void>;
   onCancelLearn: () => Promise<void>;
 };
@@ -45,7 +54,12 @@ export function MappingSettings({
   deviceRoleAssignments,
   learnSession,
   busyAction,
+  aircraftName,
+  adapterCatalog,
+  adapterMappings,
   onSaveDeviceRoleAssignments,
+  onSaveAdapterMappings,
+  onSendCommand,
   onStartLearn,
   onCancelLearn,
 }: MappingSettingsProps) {
@@ -289,6 +303,17 @@ export function MappingSettings({
                     Adapterは現在の航空機を自動判定します。未知の航空機の定義は「Adapter設定」タブで作成してください。
                   </p>
                 </section>
+
+                <RoleIoMapping
+                  roleId={selectedRoleId}
+                  roleControls={roleControls}
+                  aircraftName={aircraftName}
+                  adapterCatalog={adapterCatalog}
+                  adapterMappings={adapterMappings}
+                  busyAction={busyAction}
+                  onSaveAdapterMappings={onSaveAdapterMappings}
+                  onSendCommand={onSendCommand}
+                />
 
                 <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
                   <div className="flex items-center justify-between gap-4">

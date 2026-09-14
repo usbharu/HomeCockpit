@@ -30,10 +30,12 @@ export default function ManagerTabs() {
         refreshDevices,
         saveDeviceEndpoints,
         saveDeviceRoleAssignments,
+        saveAdapterMappings,
         previewAdapterProfile,
         saveAdapterProfile,
         startLearn,
         cancelLearn,
+        sendCommand,
     } = useManagerState();
 
     const tabs = [
@@ -82,7 +84,12 @@ export default function ManagerTabs() {
                     deviceRoleAssignments={snapshot.deviceRoleAssignments}
                     learnSession={snapshot.learnSession}
                     busyAction={busyAction}
+                    aircraftName={snapshot.dcsbiosStatus.aircraftName}
+                    adapterCatalog={snapshot.adapterCatalog}
+                    adapterMappings={snapshot.adapterMappings}
                     onSaveDeviceRoleAssignments={saveDeviceRoleAssignments}
+                    onSaveAdapterMappings={saveAdapterMappings}
+                    onSendCommand={sendCommand}
                     onStartLearn={startLearn}
                     onCancelLearn={cancelLearn}
                 />

@@ -117,14 +117,22 @@ pub struct LogicalOutputEvent {
 }
 
 pub fn default_role_definitions() -> Vec<RoleDefinition> {
-    [("left-ddi", "Left DDI"), ("right-ddi", "Right DDI")]
+    ["left-ddi", "right-ddi"]
         .into_iter()
-        .map(|(role_id, _label)| RoleDefinition {
+        .map(|role_id| RoleDefinition {
             role_id: role_id.to_string(),
             version: 1,
-            // The physical device advertises its implemented control count in
-            // DeviceHello. The Manager must not invent a button list here.
-            controls: Vec::new(),
+            controls: (0..20)
+                .map(|index| RoleControlDefinition {
+                    logical_control_id: format!("button-{index}"),
+                    label: format!("Button {}", index + 1),
+                    supported_events: vec![
+                        EventKind::ButtonDown,
+                        EventKind::ButtonUp,
+                        EventKind::ButtonPushed,
+                    ],
+                })
+                .collect(),
         })
         .collect()
 }
@@ -353,6 +361,26 @@ pub fn sanitize_adapter_mappings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ddi_roles_always_expose_twenty_logical_inputs_and_outputs() {
+        let roles = default_role_definitions();
+
+        assert_eq!(roles.len(), 2);
+        for role in roles {
+            assert_eq!(role.controls.len(), 20);
+            assert_eq!(role.controls[0].logical_control_id, "button-0");
+            assert_eq!(role.controls[19].logical_control_id, "button-19");
+            assert_eq!(
+                role.controls[0].supported_events,
+                [
+                    EventKind::ButtonDown,
+                    EventKind::ButtonUp,
+                    EventKind::ButtonPushed,
+                ]
+            );
+        }
+    }
 
     fn action(action_id: &str, identifier: &str) -> AdapterActionConfig {
         AdapterActionConfig {

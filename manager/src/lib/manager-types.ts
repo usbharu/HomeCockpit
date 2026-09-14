@@ -242,7 +242,11 @@ export function defaultRoleDefinitions(): RoleDefinition[] {
   return ["left-ddi", "right-ddi"].map((roleId) => ({
     roleId,
     version: 1,
-    controls: [],
+    controls: Array.from({ length: 20 }, (_, index) => ({
+      logicalControlId: `button-${index}`,
+      label: `Button ${index + 1}`,
+      supportedEvents: ["button-down", "button-up", "button-pushed"],
+    })),
   }));
 }
 
