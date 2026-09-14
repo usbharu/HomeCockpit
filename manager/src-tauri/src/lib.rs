@@ -2412,62 +2412,83 @@ fn build_profile_adapter_mapping(
     adapter_id: &str,
     profile: &AdapterProfile,
 ) -> AdapterMappingConfig {
-    let mappings = profile
-        .role_bindings
-        .iter()
-        .flat_map(|binding| {
-            profile
-                .controls
-                .iter()
-                .filter(move |control| control.category == binding.category)
-                .filter_map(|control| {
-                    let input = control
-                        .inputs
+    let mut mappings = Vec::new();
+    for binding in &profile.role_bindings {
+        for (index, control) in profile
+            .controls
+            .iter()
+            .filter(|control| control.category == binding.category)
+            .enumerate()
+        {
+            let momentary_input = control.inputs.iter().find(|input| {
+                input.interface == "set_state"
+                    && input.max_value == Some(1)
+                    && input
+                        .argument_options
                         .iter()
-                        .find(|input| {
-                            input.interface == "action" && !input.argument_options.is_empty()
-                        })
-                        .or_else(|| {
-                            control
-                                .inputs
-                                .iter()
-                                .find(|input| !input.argument_options.is_empty())
-                        })?;
-                    let argument = input.argument_options.first()?.value.clone();
-                    Some((control, input, argument))
-                })
-                .enumerate()
-                .map(move |(index, (control, input, argument))| {
-                    let logical_control_id = format!("button-{index}");
-                    let mut parameters = HashMap::new();
-                    parameters.insert("identifier".to_string(), control.control_id.clone());
-                    parameters.insert("argument".to_string(), argument);
-                    parameters.insert("argumentMode".to_string(), "fixed".to_string());
-                    parameters.insert("referenceAdapter".to_string(), adapter_id.to_string());
-                    parameters.insert("referenceProfile".to_string(), profile.profile_id.clone());
-                    parameters.insert("referenceCategory".to_string(), control.category.clone());
-                    parameters.insert("referenceControl".to_string(), control.control_id.clone());
-                    parameters.insert("referenceInput".to_string(), input.input_id.clone());
-                    parameters.insert("referenceInterface".to_string(), input.interface.clone());
-                    if let Some(max_value) = input.max_value {
-                        parameters.insert("maxValue".to_string(), max_value.to_string());
-                    }
-                    if let Some(suggested_step) = input.suggested_step {
-                        parameters.insert("suggestedStep".to_string(), suggested_step.to_string());
-                    }
+                        .any(|option| option.value == "0")
+                    && input
+                        .argument_options
+                        .iter()
+                        .any(|option| option.value == "1")
+            });
+            let input = momentary_input.or_else(|| {
+                control
+                    .inputs
+                    .iter()
+                    .find(|input| input.interface == "action" && !input.argument_options.is_empty())
+                    .or_else(|| {
+                        control
+                            .inputs
+                            .iter()
+                            .find(|input| !input.argument_options.is_empty())
+                    })
+            });
+            let Some(input) = input else {
+                continue;
+            };
+            let logical_control_id = format!("button-{index}");
+            let event_arguments: Vec<(EventKind, String)> = if momentary_input.is_some() {
+                vec![
+                    (EventKind::ButtonDown, "1".to_string()),
+                    (EventKind::ButtonUp, "0".to_string()),
+                ]
+            } else if let Some(argument) = input.argument_options.first() {
+                vec![(EventKind::ButtonPushed, argument.value.clone())]
+            } else {
+                continue;
+            };
 
-                    AdapterControlMapping {
-                        role_id: binding.role_id.clone(),
-                        logical_control_id,
-                        event_kind: EventKind::ButtonPushed,
-                        action: AdapterActionConfig {
-                            action_id: "control-command".to_string(),
-                            parameters,
-                        },
-                    }
-                })
-        })
-        .collect();
+            for (event_kind, argument) in event_arguments {
+                let mut parameters = HashMap::new();
+                parameters.insert("identifier".to_string(), control.control_id.clone());
+                parameters.insert("argument".to_string(), argument);
+                parameters.insert("argumentMode".to_string(), "fixed".to_string());
+                parameters.insert("referenceAdapter".to_string(), adapter_id.to_string());
+                parameters.insert("referenceProfile".to_string(), profile.profile_id.clone());
+                parameters.insert("referenceCategory".to_string(), control.category.clone());
+                parameters.insert("referenceControl".to_string(), control.control_id.clone());
+                parameters.insert("referenceInput".to_string(), input.input_id.clone());
+                parameters.insert("referenceInterface".to_string(), input.interface.clone());
+                if let Some(max_value) = input.max_value {
+                    parameters.insert("maxValue".to_string(), max_value.to_string());
+                }
+                if let Some(suggested_step) = input.suggested_step {
+                    parameters.insert("suggestedStep".to_string(), suggested_step.to_string());
+                }
+
+                mappings.push(AdapterControlMapping {
+                    role_id: binding.role_id.clone(),
+                    logical_control_id: logical_control_id.clone(),
+                    event_kind,
+                    action: AdapterActionConfig {
+                        action_id: "control-command".to_string(),
+                        parameters,
+                    },
+                });
+            }
+        }
+    }
 
     AdapterMappingConfig {
         adapter_id: adapter_id.to_string(),
@@ -3789,7 +3810,7 @@ mod tests {
         let profile = AdapterCatalog::builtin().adapters[0].profiles[0].clone();
         let mapping = build_profile_adapter_mapping("dcs-bios", &profile);
 
-        assert_eq!(mapping.mappings.len(), 40);
+        assert_eq!(mapping.mappings.len(), 80);
         assert_eq!(
             mapping.mappings[0]
                 .action
@@ -3799,7 +3820,7 @@ mod tests {
             Some("MFD_L_1")
         );
         assert_eq!(
-            mapping.mappings[1]
+            mapping.mappings[2]
                 .action
                 .parameters
                 .get("referenceControl")
@@ -3807,12 +3828,30 @@ mod tests {
             Some("MFD_L_2")
         );
         assert_eq!(
-            mapping.mappings[20]
+            mapping.mappings[40]
                 .action
                 .parameters
                 .get("referenceControl")
                 .map(String::as_str),
             Some("MFD_R_1")
+        );
+        assert_eq!(mapping.mappings[0].event_kind, EventKind::ButtonDown);
+        assert_eq!(
+            mapping.mappings[0]
+                .action
+                .parameters
+                .get("argument")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(mapping.mappings[1].event_kind, EventKind::ButtonUp);
+        assert_eq!(
+            mapping.mappings[1]
+                .action
+                .parameters
+                .get("argument")
+                .map(String::as_str),
+            Some("0")
         );
     }
 

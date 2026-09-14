@@ -35,11 +35,11 @@ type RoleIoRowProps = {
   profileId: string;
   controls: AdapterControlDefinition[];
   suggestedControl: AdapterControlDefinition | null;
-  inputMapping: AdapterControlMapping | null;
+  inputMappings: AdapterControlMapping[];
   outputMapping: AdapterOutputMapping | null;
   inputPersisted: boolean;
   busy: boolean;
-  onSaveInput: (mapping: AdapterControlMapping) => Promise<void>;
+  onSaveInput: (mappings: AdapterControlMapping[]) => Promise<void>;
   onRemoveInput: () => Promise<void>;
   onSaveOutput: (mapping: AdapterOutputMapping) => Promise<void>;
   onRemoveOutput: () => Promise<void>;
@@ -58,6 +58,7 @@ const eventLabels: Record<EventKind, string> = {
 
 function preferredInput(control: AdapterControlDefinition): AdapterInputDefinition | null {
   return (
+    control.inputs.find(isMomentaryInput) ??
     control.inputs.find(
       (input) => input.interface === "action" && input.argumentOptions.length > 0,
     ) ??
@@ -65,6 +66,53 @@ function preferredInput(control: AdapterControlDefinition): AdapterInputDefiniti
     control.inputs[0] ??
     null
   );
+}
+
+function isMomentaryInput(input: AdapterInputDefinition): boolean {
+  return (
+    input.interface === "set_state" &&
+    input.maxValue === 1 &&
+    input.argumentOptions.some((option) => option.value === "0") &&
+    input.argumentOptions.some((option) => option.value === "1")
+  );
+}
+
+function buildControlMappings(
+  roleId: string,
+  logicalControlId: string,
+  adapterId: string,
+  profileId: string,
+  control: AdapterControlDefinition,
+  input: AdapterInputDefinition,
+): AdapterControlMapping[] {
+  if (isMomentaryInput(input)) {
+    return [
+      { eventKind: "button-down" as EventKind, argument: "1" },
+      { eventKind: "button-up" as EventKind, argument: "0" },
+    ].map(({ eventKind, argument }) => ({
+      roleId,
+      logicalControlId,
+      eventKind,
+      action: {
+        actionId: "control-command",
+        parameters: buildInputParameters(adapterId, profileId, control, input, argument),
+      },
+    }));
+  }
+
+  const argument = input.argumentOptions[0]?.value;
+  if (!argument) {
+    return [];
+  }
+  return [{
+    roleId,
+    logicalControlId,
+    eventKind: "button-pushed",
+    action: {
+      actionId: "control-command",
+      parameters: buildInputParameters(adapterId, profileId, control, input, argument),
+    },
+  }];
 }
 
 function buildInputParameters(
@@ -110,21 +158,16 @@ function buildDefaultConfig(
           index: number;
         } => entry.input !== null && entry.input.argumentOptions.length > 0,
       )
-      .map(({ control, input, index }) => ({
-        roleId: binding.roleId,
-        logicalControlId: `button-${index}`,
-        eventKind: "button-pushed" as EventKind,
-        action: {
-          actionId: "control-command",
-          parameters: buildInputParameters(
-            adapterId,
-            profile.profileId,
-            control,
-            input,
-            input.argumentOptions[0].value,
-          ),
-        },
-      })),
+      .flatMap(({ control, input, index }) =>
+        buildControlMappings(
+          binding.roleId,
+          `button-${index}`,
+          adapterId,
+          profile.profileId,
+          control,
+          input,
+        ),
+      ),
   );
 
   return {
@@ -144,7 +187,7 @@ function RoleIoRow({
   profileId,
   controls,
   suggestedControl,
-  inputMapping,
+  inputMappings,
   outputMapping,
   inputPersisted,
   busy,
@@ -162,6 +205,7 @@ function RoleIoRow({
     () => controls.filter((control) => control.outputs.length > 0),
     [controls],
   );
+  const inputMapping = inputMappings.find((mapping) => mapping.eventKind === "button-down") ?? inputMappings[0] ?? null;
   const initialInputControlId =
     inputMapping?.action.parameters.referenceControl ?? suggestedControl?.controlId ?? inputControls[0]?.controlId ?? "";
   const initialOutputControlId =
@@ -215,21 +259,31 @@ function RoleIoRow({
     if (!inputControl || !selectedInput || !argument) {
       return;
     }
-    await onSaveInput({
-      roleId,
-      logicalControlId: logicalControl.logicalControlId,
-      eventKind,
-      action: {
-        actionId: "control-command",
-        parameters: buildInputParameters(
+    const mappings = isMomentaryInput(selectedInput)
+      ? buildControlMappings(
+          roleId,
+          logicalControl.logicalControlId,
           adapterId,
           profileId,
           inputControl,
           selectedInput,
-          argument,
-        ),
-      },
-    });
+        )
+      : [{
+          roleId,
+          logicalControlId: logicalControl.logicalControlId,
+          eventKind,
+          action: {
+            actionId: "control-command",
+            parameters: buildInputParameters(
+              adapterId,
+              profileId,
+              inputControl,
+              selectedInput,
+              argument,
+            ),
+          },
+        }];
+    await onSaveInput(mappings);
     setNotice("Input mappingを保存しました。");
   };
 
@@ -269,6 +323,7 @@ function RoleIoRow({
   };
 
   const inputOptions = selectedInput?.argumentOptions ?? [];
+  const momentary = selectedInput ? isMomentaryInput(selectedInput) : false;
 
   return (
     <article className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
@@ -318,16 +373,21 @@ function RoleIoRow({
                 </option>
               ))}
             </select>
-            <select
-              value={eventKind}
-              onChange={(event) => setEventKind(event.target.value as EventKind)}
-              className="rounded-md border border-gray-300 bg-white px-2 py-2 text-xs"
-            >
-              {logicalControl.supportedEvents.map((event) => (
-                <option key={event} value={event}>{eventLabels[event]}</option>
-              ))}
-            </select>
-            {inputOptions.length > 0 ? (
+            {momentary ? (
+              <div className="rounded-md border border-blue-200 bg-white px-2 py-2 text-xs text-blue-800 sm:col-span-2">
+                Button Down → 1（押下） / Button Up → 0（解放）
+              </div>
+            ) : <>
+              <select
+                value={eventKind}
+                onChange={(event) => setEventKind(event.target.value as EventKind)}
+                className="rounded-md border border-gray-300 bg-white px-2 py-2 text-xs"
+              >
+                {logicalControl.supportedEvents.map((event) => (
+                  <option key={event} value={event}>{eventLabels[event]}</option>
+                ))}
+              </select>
+              {inputOptions.length > 0 ? (
               <select
                 value={argument}
                 onChange={(event) => setArgument(event.target.value)}
@@ -346,7 +406,8 @@ function RoleIoRow({
                 placeholder={selectedInput?.supportsEventValue ? "$event-value" : "argument"}
                 className="rounded-md border border-gray-300 bg-white px-2 py-2 text-xs"
               />
-            )}
+              )}
+            </>}
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
@@ -379,7 +440,13 @@ function RoleIoRow({
                   disabled={busy || sendingValue !== null || !option.value || option.value === "$event-value"}
                   className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs text-blue-700 transition active:scale-95 active:bg-blue-100 disabled:opacity-50"
                 >
-                  <Play size={12} /> {sendingValue === option.value ? "送信中…" : option.label || "送信"}
+                  <Play size={12} /> {sendingValue === option.value
+                    ? "送信中…"
+                    : momentary && option.value === "1"
+                      ? "押す (1)"
+                      : momentary && option.value === "0"
+                        ? "離す (0)"
+                        : option.label || "送信"}
                 </button>
               ))}
             </div>
@@ -527,12 +594,11 @@ export function RoleIoMapping({
       </div>
       <div className="space-y-3">
         {roleControls.map((logicalControl, index) => {
-          const inputMapping =
-            effectiveConfig.mappings.find(
-              (mapping) =>
-                mapping.roleId === roleId &&
-                mapping.logicalControlId === logicalControl.logicalControlId,
-            ) ?? null;
+          const inputMappings = effectiveConfig.mappings.filter(
+            (mapping) =>
+              mapping.roleId === roleId &&
+              mapping.logicalControlId === logicalControl.logicalControlId,
+          );
           const outputMapping =
             (effectiveConfig.outputMappings ?? []).find(
               (mapping) =>
@@ -555,11 +621,11 @@ export function RoleIoMapping({
               profileId={match.profile.profileId}
               controls={controls}
               suggestedControl={controls[index] ?? null}
-              inputMapping={inputMapping}
+              inputMappings={inputMappings}
               outputMapping={outputMapping}
               inputPersisted={inputPersisted}
               busy={busyAction !== null}
-              onSaveInput={async (mapping) => {
+              onSaveInput={async (mappings) => {
                 await saveConfig({
                   ...effectiveConfig,
                   aircraftName,
@@ -569,7 +635,7 @@ export function RoleIoMapping({
                         candidate.roleId !== roleId ||
                         candidate.logicalControlId !== logicalControl.logicalControlId,
                     ),
-                    mapping,
+                    ...mappings,
                   ],
                 });
               }}
