@@ -377,6 +377,12 @@ struct DcsBiosMemoryUpdate {
     data: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DcsBiosStreamEvent {
+    FrameBoundary,
+    MemoryUpdate(DcsBiosMemoryUpdate),
+}
+
 #[derive(Debug, Default)]
 struct DcsBiosStreamDecoder {
     buffer: Vec<u8>,
@@ -384,9 +390,9 @@ struct DcsBiosStreamDecoder {
 }
 
 impl DcsBiosStreamDecoder {
-    fn feed(&mut self, bytes: &[u8]) -> Vec<DcsBiosMemoryUpdate> {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<DcsBiosStreamEvent> {
         self.buffer.extend_from_slice(bytes);
-        let mut updates = Vec::new();
+        let mut events = Vec::new();
 
         loop {
             if !self.in_frame {
@@ -412,6 +418,7 @@ impl DcsBiosStreamDecoder {
 
             if self.buffer[..4] == [0x55; 4] {
                 self.buffer.drain(..4);
+                events.push(DcsBiosStreamEvent::FrameBoundary);
                 continue;
             }
 
@@ -431,14 +438,14 @@ impl DcsBiosStreamDecoder {
                 break;
             }
 
-            updates.push(DcsBiosMemoryUpdate {
+            events.push(DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                 address,
                 data: self.buffer[4..total].to_vec(),
-            });
+            }));
             self.buffer.drain(..total);
         }
 
-        updates
+        events
     }
 }
 
@@ -1183,6 +1190,7 @@ impl RuntimeState {
 
             let mut buf = [0_u8; 65535];
             let mut stream_decoder = DcsBiosStreamDecoder::default();
+            let mut aircraft_name_dirty = false;
             let mut last_rate_tick = Instant::now();
             let mut packets_in_window = 0_u32;
 
@@ -1190,16 +1198,35 @@ impl RuntimeState {
                 match socket.recv(&mut buf) {
                     Ok(size) => {
                         packets_in_window = packets_in_window.saturating_add(1);
-                        let updates = stream_decoder.feed(&buf[..size]);
-                        if let Err(error) =
-                            apply_dcsbios_memory_updates(dcsbios_memory.clone(), &updates)
-                        {
-                            state.push_log(&app_for_thread, "WARN", "dcsbios", error);
-                        }
-                        let aircraft_update =
-                            updates.iter().find_map(extract_aircraft_name_from_update);
-                        for update in updates {
-                            state.dispatch_dcsbios_memory_update(&app_for_thread, &update);
+                        let events = stream_decoder.feed(&buf[..size]);
+                        let mut aircraft_update = None;
+                        for event in events {
+                            match event {
+                                DcsBiosStreamEvent::FrameBoundary => {
+                                    if aircraft_name_dirty {
+                                        match extract_aircraft_name_from_memory(&dcsbios_memory) {
+                                            Ok(name) => aircraft_update = Some(name),
+                                            Err(error) => state.push_log(
+                                                &app_for_thread,
+                                                "WARN",
+                                                "dcsbios",
+                                                error,
+                                            ),
+                                        }
+                                        aircraft_name_dirty = false;
+                                    }
+                                }
+                                DcsBiosStreamEvent::MemoryUpdate(update) => {
+                                    aircraft_name_dirty |= update_overlaps_aircraft_name(&update);
+                                    if let Err(error) = apply_dcsbios_memory_updates(
+                                        dcsbios_memory.clone(),
+                                        std::slice::from_ref(&update),
+                                    ) {
+                                        state.push_log(&app_for_thread, "WARN", "dcsbios", error);
+                                    }
+                                    state.dispatch_dcsbios_memory_update(&app_for_thread, &update);
+                                }
+                            }
                         }
                         let now = now_iso8601();
                         let preview = extract_ascii_preview(&buf[..size]);
@@ -3048,23 +3075,35 @@ fn extract_ascii_preview(buf: &[u8]) -> Option<String> {
     segments.into_iter().max_by_key(|segment| segment.len())
 }
 
-fn extract_aircraft_name_from_update(update: &DcsBiosMemoryUpdate) -> Option<Option<String>> {
-    if update.address != DCS_BIOS_AIRCRAFT_NAME_ADDRESS {
-        return None;
-    }
+fn update_overlaps_aircraft_name(update: &DcsBiosMemoryUpdate) -> bool {
+    let update_start = usize::from(update.address);
+    let update_end = update_start.saturating_add(update.data.len());
+    let aircraft_start = usize::from(DCS_BIOS_AIRCRAFT_NAME_ADDRESS);
+    let aircraft_end = aircraft_start + DCS_BIOS_AIRCRAFT_NAME_LENGTH;
+    update_start < aircraft_end && update_end > aircraft_start
+}
 
-    let bytes = update
-        .data
+fn extract_aircraft_name_from_memory(
+    memory_map: &Arc<Mutex<VecMemoryMap>>,
+) -> Result<Option<String>, String> {
+    let memory_map = memory_map
+        .lock()
+        .map_err(|_| "DCS-BIOS memory map lock is poisoned.".to_string())?;
+    let end_address = DCS_BIOS_AIRCRAFT_NAME_ADDRESS
+        .saturating_add(DCS_BIOS_AIRCRAFT_NAME_LENGTH as u16)
+        .saturating_sub(1);
+    let bytes = memory_map
+        .read(DCS_BIOS_AIRCRAFT_NAME_ADDRESS..=end_address)
+        .ok_or_else(|| "DCS-BIOS aircraft name is incomplete.".to_string())?
         .iter()
-        .take(DCS_BIOS_AIRCRAFT_NAME_LENGTH)
         .copied()
         .take_while(|byte| *byte != 0)
         .collect::<Vec<_>>();
     let name = String::from_utf8_lossy(&bytes).trim().to_string();
     if name.is_empty() || name.eq_ignore_ascii_case("NONE") {
-        Some(None)
+        Ok(None)
     } else {
-        Some(Some(name))
+        Ok(Some(name))
     }
 }
 
@@ -3637,7 +3676,14 @@ mod tests {
         let memory = Arc::new(Mutex::new(VecMemoryMap::default()));
         let packet = vec![0x55, 0x55, 0x55, 0x55, 0x00, 0x10, 0x02, 0x00, 0x34, 0x12];
         let mut decoder = DcsBiosStreamDecoder::default();
-        let updates = decoder.feed(&packet);
+        let updates = decoder
+            .feed(&packet)
+            .into_iter()
+            .filter_map(|event| match event {
+                DcsBiosStreamEvent::MemoryUpdate(update) => Some(update),
+                DcsBiosStreamEvent::FrameBoundary => None,
+            })
+            .collect::<Vec<_>>();
 
         apply_dcsbios_memory_updates(memory.clone(), &updates).expect("packet must decode");
 
@@ -3647,28 +3693,45 @@ mod tests {
     }
 
     #[test]
-    fn aircraft_name_is_read_only_from_the_dcsbios_aircraft_memory_update() {
-        assert_eq!(
-            extract_aircraft_name_from_update(&DcsBiosMemoryUpdate {
+    fn aircraft_name_is_reassembled_from_split_memory_updates() {
+        let memory = Arc::new(Mutex::new(VecMemoryMap::default()));
+        let fa18_updates = [
+            DcsBiosMemoryUpdate {
                 address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS,
-                data: b"F-16C_50\0padding".to_vec(),
-            }),
-            Some(Some("F-16C_50".to_string()))
-        );
+                data: b"FA-18C_h".to_vec(),
+            },
+            DcsBiosMemoryUpdate {
+                address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS + 8,
+                data: b"ornet\0\0\0\0\0\0\0\0\0\0\0".to_vec(),
+            },
+        ];
+        assert!(fa18_updates.iter().all(update_overlaps_aircraft_name));
+        apply_dcsbios_memory_updates(memory.clone(), &fa18_updates).expect("FA-18 update");
         assert_eq!(
-            extract_aircraft_name_from_update(&DcsBiosMemoryUpdate {
+            extract_aircraft_name_from_memory(&memory).expect("aircraft name"),
+            Some("FA-18C_hornet".to_string())
+        );
+
+        let f16_updates = [
+            DcsBiosMemoryUpdate {
                 address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS,
-                data: b"NONE\0".to_vec(),
-            }),
-            Some(None)
-        );
+                data: b"F-16".to_vec(),
+            },
+            DcsBiosMemoryUpdate {
+                address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS + 4,
+                data: b"C_50\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec(),
+            },
+        ];
+        apply_dcsbios_memory_updates(memory.clone(), &f16_updates).expect("F-16 update");
         assert_eq!(
-            extract_aircraft_name_from_update(&DcsBiosMemoryUpdate {
-                address: 0x0010,
-                data: b"F-16C_50\0".to_vec(),
-            }),
-            None
+            extract_aircraft_name_from_memory(&memory).expect("aircraft name"),
+            Some("F-16C_50".to_string())
         );
+
+        assert!(!update_overlaps_aircraft_name(&DcsBiosMemoryUpdate {
+            address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS + DCS_BIOS_AIRCRAFT_NAME_LENGTH as u16,
+            data: vec![0],
+        }));
     }
 
     #[test]
@@ -3744,10 +3807,10 @@ mod tests {
 
         assert_eq!(
             decoder.feed(&packet),
-            vec![DcsBiosMemoryUpdate {
+            vec![DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                 address: 0x2000,
                 data: vec![0x7F],
-            }]
+            })]
         );
     }
 
@@ -3759,10 +3822,10 @@ mod tests {
         assert!(decoder.feed(&packet[..7]).is_empty());
         assert_eq!(
             decoder.feed(&packet[7..]),
-            vec![DcsBiosMemoryUpdate {
+            vec![DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                 address: 0x1000,
                 data: vec![0x34, 0x12],
-            }]
+            })]
         );
     }
 
@@ -3777,18 +3840,19 @@ mod tests {
         assert_eq!(
             decoder.feed(&bytes),
             vec![
-                DcsBiosMemoryUpdate {
+                DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                     address: 0x1000,
                     data: vec![0xAA],
-                },
-                DcsBiosMemoryUpdate {
+                }),
+                DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                     address: 0x1010,
                     data: vec![0xBB],
-                },
-                DcsBiosMemoryUpdate {
+                }),
+                DcsBiosStreamEvent::FrameBoundary,
+                DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                     address: 0x1020,
                     data: vec![0xCC],
-                },
+                }),
             ]
         );
     }
