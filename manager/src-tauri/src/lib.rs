@@ -1421,7 +1421,6 @@ async fn refresh_devices(
             "Refreshed devices from {count_endpoints} configured endpoint(s). {count_devices} device(s) available."
         ),
     );
-    runtime.restart_endpoint_listeners(&app)?;
     Ok(devices)
 }
 
@@ -3103,8 +3102,7 @@ pub fn run() {
                                 }
                             }
                         });
-                    }
-                    if let Err(error) = state.restart_endpoint_listeners(&app_handle) {
+                    } else if let Err(error) = state.restart_endpoint_listeners(&app_handle) {
                         state.push_log(&app_handle, "WARN", "devices", error);
                     }
                 }
