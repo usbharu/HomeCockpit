@@ -20,6 +20,7 @@ import {
   type LearnSessionStatus,
   type ManagerLogEntry,
   type ManagedDeviceSummary,
+  type RoleInputTriggerRequest,
 } from "@/lib/manager-types";
 
 export function useManagerState() {
@@ -328,6 +329,24 @@ export function useManagerState() {
     [runAction],
   );
 
+  const triggerRoleInput = useCallback(
+    async (request: RoleInputTriggerRequest) => {
+      if (!isTauri()) {
+        return 0;
+      }
+
+      try {
+        return await runAction("trigger-role-input", () =>
+          invoke<number>("trigger_role_input", { request }),
+        );
+      } catch (error) {
+        setRuntimeError(String(error));
+        throw error;
+      }
+    },
+    [runAction],
+  );
+
   useEffect(() => {
     if (!isTauri()) {
       setRuntimeError("Tauri runtime not detected. The web build only shows the shell UI.");
@@ -420,6 +439,7 @@ export function useManagerState() {
     cancelLearn,
     refreshSerialPorts,
     sendCommand,
+    triggerRoleInput,
     refreshSnapshot,
   };
 }

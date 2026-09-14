@@ -35,7 +35,7 @@ export default function ManagerTabs() {
         saveAdapterProfile,
         startLearn,
         cancelLearn,
-        sendCommand,
+        triggerRoleInput,
     } = useManagerState();
 
     const tabs = [
@@ -89,7 +89,7 @@ export default function ManagerTabs() {
                     adapterMappings={snapshot.adapterMappings}
                     onSaveDeviceRoleAssignments={saveDeviceRoleAssignments}
                     onSaveAdapterMappings={saveAdapterMappings}
-                    onSendCommand={sendCommand}
+                    onTriggerRoleInput={triggerRoleInput}
                     onStartLearn={startLearn}
                     onCancelLearn={cancelLearn}
                 />

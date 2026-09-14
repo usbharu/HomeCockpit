@@ -12,9 +12,9 @@ import type {
   AdapterMappingConfig,
   AdapterOutputDefinition,
   AdapterOutputMapping,
-  DcsBiosCommandRequest,
   EventKind,
   RoleControlDefinition,
+  RoleInputTriggerRequest,
 } from "@/lib/manager-types";
 
 type RoleIoMappingProps = {
@@ -25,7 +25,7 @@ type RoleIoMappingProps = {
   adapterMappings: AdapterMappingConfig[];
   busyAction: string | null;
   onSaveAdapterMappings: (mappings: AdapterMappingConfig[]) => Promise<void>;
-  onSendCommand: (request: DcsBiosCommandRequest) => Promise<void>;
+  onTriggerRoleInput: (request: RoleInputTriggerRequest) => Promise<number>;
 };
 
 type RoleIoRowProps = {
@@ -43,7 +43,7 @@ type RoleIoRowProps = {
   onRemoveInput: () => Promise<void>;
   onSaveOutput: (mapping: AdapterOutputMapping) => Promise<void>;
   onRemoveOutput: () => Promise<void>;
-  onSendCommand: (request: DcsBiosCommandRequest) => Promise<void>;
+  onTriggerRoleInput: (request: RoleInputTriggerRequest) => Promise<number>;
 };
 
 const eventLabels: Record<EventKind, string> = {
@@ -209,7 +209,7 @@ function RoleIoRow({
   onRemoveInput,
   onSaveOutput,
   onRemoveOutput,
-  onSendCommand,
+  onTriggerRoleInput,
 }: RoleIoRowProps) {
   const inputControls = useMemo(
     () => controls.filter((control) => control.inputs.length > 0),
@@ -231,7 +231,7 @@ function RoleIoRow({
   const [outputControlId, setOutputControlId] = useState(initialOutputControlId);
   const [outputId, setOutputId] = useState(outputMapping?.parameters.referenceOutput ?? "");
   const [notice, setNotice] = useState<string | null>(null);
-  const [sendingValue, setSendingValue] = useState<string | null>(null);
+  const [sendingEvent, setSendingEvent] = useState<EventKind | null>(null);
 
   const inputControl = inputControls.find((control) => control.controlId === inputControlId) ?? null;
   const selectedInput =
@@ -321,19 +321,20 @@ function RoleIoRow({
     setNotice("Output mappingを保存しました。");
   };
 
-  const sendInput = async (value: string) => {
-    if (!inputControl || value === "$event-value") {
-      return;
-    }
-    setSendingValue(value);
+  const triggerRoleAction = async (triggerEventKind: EventKind) => {
+    setSendingEvent(triggerEventKind);
     setNotice(null);
     try {
-      await onSendCommand({ controlId: inputControl.controlId, argument: value });
-      setNotice(`${inputControl.controlId} ${value} をUDP送信しました（DCS反映は未確認）。`);
+      const actionCount = await onTriggerRoleInput({
+        roleId,
+        logicalControlId: logicalControl.logicalControlId,
+        eventKind: triggerEventKind,
+      });
+      setNotice(`${eventLabels[triggerEventKind]} をRoleへ入力し、${actionCount}件のAdapter actionを実行しました。`);
     } catch (error) {
-      setNotice(`送信に失敗しました: ${String(error)}`);
+      setNotice(`Role操作に失敗しました: ${String(error)}`);
     } finally {
-      setSendingValue(null);
+      setSendingEvent(null);
     }
   };
 
@@ -450,23 +451,18 @@ function RoleIoRow({
             )}
           </div>
           <div className="mt-3 border-t border-blue-100 pt-3">
-            <p className="mb-2 text-xs font-medium text-blue-950">Input操作</p>
+            <p className="mb-1 text-xs font-medium text-blue-950">Role操作</p>
+            <p className="mb-2 text-xs text-blue-700">実機入力と同じRoleイベントをAdapterマッピングへ流します。</p>
             <div className="flex flex-wrap gap-2">
-              {(inputOptions.length > 0 ? inputOptions : [{ value: argument, label: argument }]).map((option) => (
+              {logicalControl.supportedEvents.map((supportedEvent) => (
                 <button
-                  key={`send:${selectedInput?.inputId}:${option.value}`}
+                  key={`trigger:${supportedEvent}`}
                   type="button"
-                  onClick={() => void sendInput(option.value)}
-                  disabled={busy || sendingValue !== null || !option.value || option.value === "$event-value"}
+                  onClick={() => void triggerRoleAction(supportedEvent)}
+                  disabled={busy || sendingEvent !== null}
                   className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs text-blue-700 transition active:scale-95 active:bg-blue-100 disabled:opacity-50"
                 >
-                  <Play size={12} /> {sendingValue === option.value
-                    ? "送信中…"
-                    : momentary && option.value === "1"
-                      ? "押す (1)"
-                      : momentary && option.value === "0"
-                        ? "離す (0)"
-                        : option.label || "送信"}
+                  <Play size={12} /> {sendingEvent === supportedEvent ? "実行中…" : eventLabels[supportedEvent]}
                 </button>
               ))}
             </div>
@@ -545,7 +541,7 @@ export function RoleIoMapping({
   adapterMappings,
   busyAction,
   onSaveAdapterMappings,
-  onSendCommand,
+  onTriggerRoleInput,
 }: RoleIoMappingProps) {
   const match = useMemo(
     () => findAdapterProfileForAircraft(adapterCatalog, aircraftName),
@@ -695,7 +691,7 @@ export function RoleIoMapping({
                   ),
                 });
               }}
-              onSendCommand={onSendCommand}
+              onTriggerRoleInput={onTriggerRoleInput}
             />
           );
         })}

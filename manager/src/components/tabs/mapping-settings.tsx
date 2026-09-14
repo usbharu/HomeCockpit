@@ -13,13 +13,13 @@ import { RoleIoMapping } from "@/components/role-io-mapping";
 import type {
   AdapterCatalog,
   AdapterMappingConfig,
-  DcsBiosCommandRequest,
   DeviceRoleAssignment,
   EventKind,
   LearnRequest,
   LearnSessionStatus,
   ManagedDeviceSummary,
   RoleDefinition,
+  RoleInputTriggerRequest,
 } from "@/lib/manager-types";
 
 type MappingSettingsProps = {
@@ -33,7 +33,7 @@ type MappingSettingsProps = {
   adapterMappings: AdapterMappingConfig[];
   onSaveDeviceRoleAssignments: (assignments: DeviceRoleAssignment[]) => Promise<void>;
   onSaveAdapterMappings: (mappings: AdapterMappingConfig[]) => Promise<void>;
-  onSendCommand: (request: DcsBiosCommandRequest) => Promise<void>;
+  onTriggerRoleInput: (request: RoleInputTriggerRequest) => Promise<number>;
   onStartLearn: (request: LearnRequest) => Promise<void>;
   onCancelLearn: () => Promise<void>;
 };
@@ -59,7 +59,7 @@ export function MappingSettings({
   adapterMappings,
   onSaveDeviceRoleAssignments,
   onSaveAdapterMappings,
-  onSendCommand,
+  onTriggerRoleInput,
   onStartLearn,
   onCancelLearn,
 }: MappingSettingsProps) {
@@ -312,7 +312,7 @@ export function MappingSettings({
                   adapterMappings={adapterMappings}
                   busyAction={busyAction}
                   onSaveAdapterMappings={onSaveAdapterMappings}
-                  onSendCommand={onSendCommand}
+                  onTriggerRoleInput={onTriggerRoleInput}
                 />
 
                 <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">

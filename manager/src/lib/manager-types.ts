@@ -229,6 +229,12 @@ export type DcsBiosCommandRequest = {
   argument?: string | null;
 };
 
+export type RoleInputTriggerRequest = {
+  roleId: string;
+  logicalControlId: string;
+  eventKind: EventKind;
+};
+
 export type LearnRequest = {
   roleId: string;
   logicalControlId: string;

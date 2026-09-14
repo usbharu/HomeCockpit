@@ -224,6 +224,14 @@ struct DcsBiosCommandRequest {
     argument: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoleInputTriggerRequest {
+    role_id: String,
+    logical_control_id: String,
+    event_kind: EventKind,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LearnSessionStatus {
@@ -1424,6 +1432,85 @@ fn send_dcsbios_command(
         ),
     );
     Ok(())
+}
+
+#[tauri::command]
+fn trigger_role_input(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: RoleInputTriggerRequest,
+) -> Result<usize, String> {
+    let event = build_role_input_event(request)?;
+    let mappings = state.inner.active_adapter_mappings();
+    let actions = resolve_adapter_actions(&mappings, &event);
+    if actions.is_empty() {
+        return Err(format!(
+            "No Adapter mapping for Role action '{}:{} {:?}'.",
+            event.role_id, event.logical_control_id, event.event_kind
+        ));
+    }
+
+    let config = state.inner.config.lock().unwrap().clone();
+    let registry = AdapterRegistry::new();
+    for resolved in &actions {
+        let adapter = registry
+            .get(&resolved.adapter_id)
+            .ok_or_else(|| format!("Adapter '{}' is not registered.", resolved.adapter_id))?;
+        adapter.dispatch_input(&config, &resolved.action, &resolved.event)?;
+    }
+    state.inner.push_log(
+        &app,
+        "SUCCESS",
+        "mapping",
+        format!(
+            "Triggered Role action {}:{} {:?} -> {} Adapter action(s).",
+            event.role_id,
+            event.logical_control_id,
+            event.event_kind,
+            actions.len()
+        ),
+    );
+    Ok(actions.len())
+}
+
+fn build_role_input_event(request: RoleInputTriggerRequest) -> Result<LogicalInputEvent, String> {
+    let role = default_role_definitions()
+        .into_iter()
+        .find(|role| role.role_id == request.role_id)
+        .ok_or_else(|| format!("Unknown Role '{}'.", request.role_id))?;
+    let control = role
+        .controls
+        .into_iter()
+        .find(|control| control.logical_control_id == request.logical_control_id)
+        .ok_or_else(|| {
+            format!(
+                "Unknown logical control '{}:{}'.",
+                request.role_id, request.logical_control_id
+            )
+        })?;
+    if !control.supported_events.contains(&request.event_kind) {
+        return Err(format!(
+            "Role action {:?} is not supported by '{}:{}'.",
+            request.event_kind, request.role_id, request.logical_control_id
+        ));
+    }
+
+    let value = match request.event_kind {
+        EventKind::ButtonDown => ControlValue::Button { pressed: true },
+        EventKind::ButtonUp | EventKind::ButtonPushed => ControlValue::Button { pressed: false },
+        EventKind::EncoderDelta => ControlValue::EncoderDelta { steps: 1 },
+        EventKind::AbsoluteChanged => ControlValue::Absolute { value: 0 },
+        EventKind::ToggleOn => ControlValue::Toggle { state: true },
+        EventKind::ToggleOff => ControlValue::Toggle { state: false },
+    };
+    Ok(LogicalInputEvent {
+        device_id: "manager-role-input".to_string(),
+        physical_control_id: u16::MAX,
+        role_id: request.role_id,
+        logical_control_id: request.logical_control_id,
+        event_kind: request.event_kind,
+        value,
+    })
 }
 
 #[tauri::command]
@@ -3234,6 +3321,7 @@ pub fn run() {
             start_dcsbios,
             stop_dcsbios,
             send_dcsbios_command,
+            trigger_role_input,
             save_device_endpoints,
             save_device_role_assignments,
             save_adapter_mappings,
@@ -3910,6 +3998,32 @@ mod tests {
             encode_dcsbios_action_payload(&action, &event).expect("pulse payload"),
             "LEFT_DDI_PB_01 1\nLEFT_DDI_PB_01 0\n"
         );
+    }
+
+    #[test]
+    fn manual_role_button_pushed_uses_the_role_event_path() {
+        let event = build_role_input_event(RoleInputTriggerRequest {
+            role_id: "left-ddi".to_string(),
+            logical_control_id: "button-0".to_string(),
+            event_kind: EventKind::ButtonPushed,
+        })
+        .expect("built-in Role action");
+
+        assert_eq!(event.device_id, "manager-role-input");
+        assert_eq!(event.event_kind, EventKind::ButtonPushed);
+        assert_eq!(event.value, ControlValue::Button { pressed: false });
+    }
+
+    #[test]
+    fn manual_role_input_rejects_an_unsupported_action() {
+        let error = build_role_input_event(RoleInputTriggerRequest {
+            role_id: "left-ddi".to_string(),
+            logical_control_id: "button-0".to_string(),
+            event_kind: EventKind::EncoderDelta,
+        })
+        .expect_err("DDI pushbutton does not support encoder actions");
+
+        assert!(error.contains("is not supported"));
     }
 
     #[test]
