@@ -40,7 +40,7 @@ export function useManagerState() {
   const mergeLog = useCallback((entry: ManagerLogEntry) => {
     setSnapshot((current) => ({
       ...current,
-      logs: [entry, ...current.logs].slice(0, 250),
+      logs: [entry, ...current.logs.filter((log) => log.id !== entry.id)].slice(0, 250),
     }));
   }, []);
 
