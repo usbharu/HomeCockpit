@@ -61,14 +61,14 @@ const IMCP_CHILD_ENUMERATION_TIMEOUT: Duration = Duration::from_millis(600);
 const IMCP_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SETTINGS_FILE_NAME: &str = "manager-state.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum CommandTransport {
     Udp,
     Tcp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct DcsBiosConnectionConfig {
     export_host: String,
@@ -270,6 +270,8 @@ struct PersistedManagerState {
     #[serde(default = "default_schema_version")]
     schema_version: u32,
     #[serde(default)]
+    dcsbios_config: DcsBiosConnectionConfig,
+    #[serde(default)]
     device_endpoints: Vec<DeviceEndpointConfig>,
     #[serde(default)]
     device_role_assignments: Vec<DeviceRoleAssignment>,
@@ -283,6 +285,7 @@ impl Default for PersistedManagerState {
     fn default() -> Self {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: DcsBiosConnectionConfig::default(),
             device_endpoints: Vec::new(),
             device_role_assignments: Vec::new(),
             adapter_mappings: Vec::new(),
@@ -983,6 +986,7 @@ impl RuntimeState {
         );
         let persisted = PersistedManagerState {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: self.config.lock().unwrap().clone(),
             device_endpoints: self.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: assignments.clone(),
             adapter_mappings: self.adapter_mappings.lock().unwrap().clone(),
@@ -1328,6 +1332,17 @@ fn update_dcsbios_config(
     state: State<'_, AppState>,
     config: DcsBiosConnectionConfig,
 ) -> Result<AppSnapshot, String> {
+    persist_manager_state(
+        &app,
+        &PersistedManagerState {
+            schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: config.clone(),
+            device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
+            device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
+            adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
+            adapter_profiles: state.inner.adapter_profiles.lock().unwrap().clone(),
+        },
+    )?;
     *state.inner.config.lock().unwrap() = config.clone();
     state.inner.restart_endpoint_listeners(&app)?;
     state.inner.update_status(&app, |_| {});
@@ -1394,6 +1409,7 @@ fn save_device_endpoints(
         &app,
         &PersistedManagerState {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: state.inner.config.lock().unwrap().clone(),
             device_endpoints: device_endpoints.clone(),
             device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
             adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
@@ -1462,6 +1478,7 @@ fn save_device_role_assignments(
         &app,
         &PersistedManagerState {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: state.inner.config.lock().unwrap().clone(),
             device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: device_role_assignments.clone(),
             adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
@@ -1489,6 +1506,7 @@ fn save_adapter_mappings(
         &app,
         &PersistedManagerState {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: state.inner.config.lock().unwrap().clone(),
             device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
             adapter_mappings: adapter_mappings.clone(),
@@ -1567,6 +1585,7 @@ fn save_adapter_profile(
         &app,
         &PersistedManagerState {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: state.inner.config.lock().unwrap().clone(),
             device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
             adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
@@ -2145,6 +2164,7 @@ fn migrate_legacy_state(legacy: LegacyPersistedManagerState) -> PersistedManager
 
     normalize_persisted_state(PersistedManagerState {
         schema_version: STATE_SCHEMA_VERSION,
+        dcsbios_config: DcsBiosConnectionConfig::default(),
         device_endpoints: legacy.device_endpoints,
         device_role_assignments: assignments,
         adapter_mappings: if dcsbios_mappings.is_empty() {
@@ -3122,6 +3142,7 @@ pub fn run() {
 
             match load_manager_state(&app_handle) {
                 Ok(manager_state) => {
+                    *state.config.lock().unwrap() = manager_state.dcsbios_config.clone();
                     state.set_device_endpoints(&app_handle, manager_state.device_endpoints.clone());
                     state.set_device_role_assignments(
                         &app_handle,
@@ -3518,6 +3539,35 @@ mod tests {
             state.adapter_mappings[0].mappings[0].action.parameters["identifier"],
             "MASTER_ARM_SW"
         );
+    }
+
+    #[test]
+    fn current_state_preserves_remote_dcsbios_command_destination() {
+        let (state, migrated) = normalize_manager_state_json(
+            r#"{
+                "schemaVersion": 2,
+                "dcsbiosConfig": {
+                    "exportHost": "239.255.50.10",
+                    "exportPort": 5010,
+                    "commandHost": "192.168.1.97",
+                    "commandPort": 7778,
+                    "commandTransport": "udp"
+                },
+                "deviceEndpoints": [],
+                "deviceRoleAssignments": [],
+                "adapterMappings": [],
+                "adapterProfiles": []
+            }"#,
+        )
+        .expect("current state");
+
+        assert!(!migrated);
+        assert_eq!(state.dcsbios_config.command_host, "192.168.1.97");
+        assert_eq!(state.dcsbios_config.command_port, 7778);
+        assert!(matches!(
+            state.dcsbios_config.command_transport,
+            CommandTransport::Udp
+        ));
     }
 
     struct FakeAdapter {

@@ -173,6 +173,7 @@ function RoleIoRow({
   const [outputControlId, setOutputControlId] = useState(initialOutputControlId);
   const [outputId, setOutputId] = useState(outputMapping?.parameters.referenceOutput ?? "");
   const [notice, setNotice] = useState<string | null>(null);
+  const [sendingValue, setSendingValue] = useState<string | null>(null);
 
   const inputControl = inputControls.find((control) => control.controlId === inputControlId) ?? null;
   const selectedInput =
@@ -255,8 +256,16 @@ function RoleIoRow({
     if (!inputControl || value === "$event-value") {
       return;
     }
-    await onSendCommand({ controlId: inputControl.controlId, argument: value });
-    setNotice(`${inputControl.controlId} ${value} を送信しました。`);
+    setSendingValue(value);
+    setNotice(null);
+    try {
+      await onSendCommand({ controlId: inputControl.controlId, argument: value });
+      setNotice(`${inputControl.controlId} ${value} をUDP送信しました（DCS反映は未確認）。`);
+    } catch (error) {
+      setNotice(`送信に失敗しました: ${String(error)}`);
+    } finally {
+      setSendingValue(null);
+    }
   };
 
   const inputOptions = selectedInput?.argumentOptions ?? [];
@@ -367,10 +376,10 @@ function RoleIoRow({
                   key={`send:${selectedInput?.inputId}:${option.value}`}
                   type="button"
                   onClick={() => void sendInput(option.value)}
-                  disabled={busy || !option.value || option.value === "$event-value"}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs text-blue-700 disabled:opacity-50"
+                  disabled={busy || sendingValue !== null || !option.value || option.value === "$event-value"}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs text-blue-700 transition active:scale-95 active:bg-blue-100 disabled:opacity-50"
                 >
-                  <Play size={12} /> {option.label || "送信"}
+                  <Play size={12} /> {sendingValue === option.value ? "送信中…" : option.label || "送信"}
                 </button>
               ))}
             </div>

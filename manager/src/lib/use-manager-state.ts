@@ -322,6 +322,7 @@ export function useManagerState() {
         );
       } catch (error) {
         setRuntimeError(String(error));
+        throw error;
       }
     },
     [runAction],
