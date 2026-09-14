@@ -71,6 +71,10 @@ pub struct AdapterControlMapping {
 pub struct AdapterMappingConfig {
     pub adapter_id: String,
     pub profile_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aircraft_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_label: Option<String>,
     #[serde(default)]
     pub mappings: Vec<AdapterControlMapping>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -269,6 +273,14 @@ pub fn sanitize_adapter_mappings(
         .filter_map(|mut config| {
             config.adapter_id = config.adapter_id.trim().to_string();
             config.profile_id = config.profile_id.trim().to_string();
+            config.aircraft_name = config
+                .aircraft_name
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            config.profile_label = config
+                .profile_label
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
             if config.adapter_id.is_empty() || config.profile_id.is_empty() {
                 return None;
             }
@@ -424,6 +436,8 @@ mod tests {
             AdapterMappingConfig {
                 adapter_id: "dcs-bios".to_string(),
                 profile_id: "default".to_string(),
+                aircraft_name: None,
+                profile_label: None,
                 output_mappings: Vec::new(),
                 mappings: vec![AdapterControlMapping {
                     role_id: "left-ddi".to_string(),
@@ -435,6 +449,8 @@ mod tests {
             AdapterMappingConfig {
                 adapter_id: "falcon-bms".to_string(),
                 profile_id: "default".to_string(),
+                aircraft_name: None,
+                profile_label: None,
                 output_mappings: Vec::new(),
                 mappings: vec![AdapterControlMapping {
                     role_id: "left-ddi".to_string(),

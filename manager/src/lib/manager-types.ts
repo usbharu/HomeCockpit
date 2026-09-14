@@ -58,10 +58,17 @@ export type AdapterControlDefinition = {
   outputs: AdapterOutputDefinition[];
 };
 
+export type AdapterRoleBinding = {
+  roleId: string;
+  category: string;
+};
+
 export type AdapterProfile = {
   profileId: string;
   label: string;
   controlCount: number;
+  aircraftNames: string[];
+  roleBindings: AdapterRoleBinding[];
   controls: AdapterControlDefinition[];
 };
 
@@ -176,8 +183,18 @@ export type AdapterOutputMapping = {
 export type AdapterMappingConfig = {
   adapterId: string;
   profileId: string;
+  aircraftName?: string | null;
+  profileLabel?: string | null;
   mappings: AdapterControlMapping[];
   outputMappings?: AdapterOutputMapping[];
+};
+
+export type AdapterProfileImportRequest = {
+  adapterId: string;
+  profileId: string;
+  label: string;
+  aircraftNames: string[];
+  source: string;
 };
 
 export type LearnSessionStatus = {

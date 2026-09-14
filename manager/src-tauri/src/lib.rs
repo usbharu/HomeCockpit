@@ -34,7 +34,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 mod adapter_catalog;
 mod mapping;
 
-use adapter_catalog::AdapterCatalog;
+use adapter_catalog::{
+    infer_role_bindings, normalize_aircraft_name, AdapterCatalog, AdapterProfile,
+    AdapterProfileConfig,
+};
 use mapping::{
     control_event_kinds, default_role_definitions, resolve_adapter_actions,
     resolve_logical_input_events, resolve_output_devices, sanitize_adapter_mappings,
@@ -50,6 +53,8 @@ const DEFAULT_COMMAND_HOST: &str = "127.0.0.1";
 const DEFAULT_COMMAND_PORT: u16 = 7778;
 const MAX_LOG_ENTRIES: usize = 250;
 const DEFAULT_DEVICE_ENDPOINT_BAUD_RATE: u32 = 115200;
+const DCS_BIOS_AIRCRAFT_NAME_ADDRESS: u16 = 0;
+const DCS_BIOS_AIRCRAFT_NAME_LENGTH: usize = 24;
 const IMCP_MASTER_ADDRESS: u8 = 0x01;
 const IMCP_ROOT_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 const IMCP_CHILD_ENUMERATION_TIMEOUT: Duration = Duration::from_millis(600);
@@ -270,6 +275,8 @@ struct PersistedManagerState {
     device_role_assignments: Vec<DeviceRoleAssignment>,
     #[serde(default)]
     adapter_mappings: Vec<AdapterMappingConfig>,
+    #[serde(default)]
+    adapter_profiles: Vec<AdapterProfileConfig>,
 }
 
 impl Default for PersistedManagerState {
@@ -279,8 +286,19 @@ impl Default for PersistedManagerState {
             device_endpoints: Vec::new(),
             device_role_assignments: Vec::new(),
             adapter_mappings: Vec::new(),
+            adapter_profiles: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AdapterProfileImportRequest {
+    adapter_id: String,
+    profile_id: String,
+    label: String,
+    aircraft_names: Vec<String>,
+    source: String,
 }
 
 fn default_schema_version() -> u32 {
@@ -490,6 +508,7 @@ struct RuntimeState {
     device_endpoints: Mutex<Vec<DeviceEndpointConfig>>,
     device_role_assignments: Mutex<Vec<DeviceRoleAssignment>>,
     adapter_mappings: Mutex<Vec<AdapterMappingConfig>>,
+    adapter_profiles: Mutex<Vec<AdapterProfileConfig>>,
     learn_session: Mutex<Option<ActiveLearnSession>>,
     log_counter: AtomicU64,
     dispatch_seq: AtomicU64,
@@ -512,6 +531,7 @@ impl RuntimeState {
             device_endpoints: Mutex::new(Vec::new()),
             device_role_assignments: Mutex::new(Vec::new()),
             adapter_mappings: Mutex::new(Vec::new()),
+            adapter_profiles: Mutex::new(Vec::new()),
             learn_session: Mutex::new(None),
             log_counter: AtomicU64::new(0),
             dispatch_seq: AtomicU64::new(0),
@@ -525,10 +545,11 @@ impl RuntimeState {
     }
 
     fn snapshot(&self) -> AppSnapshot {
+        let adapter_profiles = self.adapter_profiles.lock().unwrap().clone();
         AppSnapshot {
             dcsbios_config: self.config.lock().unwrap().clone(),
             dcsbios_status: self.status.lock().unwrap().clone(),
-            adapter_catalog: self.adapter_catalog.clone(),
+            adapter_catalog: self.adapter_catalog.with_custom_profiles(&adapter_profiles),
             logs: self.logs.lock().unwrap().iter().cloned().collect(),
             devices: self.devices.lock().unwrap().clone(),
             device_endpoints: self.device_endpoints.lock().unwrap().clone(),
@@ -634,6 +655,62 @@ impl RuntimeState {
         adapter_mappings
     }
 
+    fn set_adapter_profiles(
+        &self,
+        app: &AppHandle,
+        adapter_profiles: Vec<AdapterProfileConfig>,
+    ) -> Vec<AdapterProfileConfig> {
+        *self.adapter_profiles.lock().unwrap() = adapter_profiles.clone();
+        let _ = app.emit("adapter-profiles-changed", adapter_profiles.clone());
+        adapter_profiles
+    }
+
+    fn effective_adapter_catalog(&self) -> AdapterCatalog {
+        let adapter_profiles = self.adapter_profiles.lock().unwrap().clone();
+        self.adapter_catalog.with_custom_profiles(&adapter_profiles)
+    }
+
+    fn active_adapter_mappings(&self) -> Vec<AdapterMappingConfig> {
+        let aircraft_name = self.status.lock().unwrap().aircraft_name.clone();
+        let catalog = self.effective_adapter_catalog();
+        let persisted = self.adapter_mappings.lock().unwrap().clone();
+
+        if let Some(profile) =
+            catalog.find_profile_for_aircraft("dcs-bios", aircraft_name.as_deref())
+        {
+            let custom = persisted
+                .iter()
+                .filter(|config| {
+                    config.adapter_id == "dcs-bios"
+                        && config.profile_id == profile.profile_id
+                        && config.aircraft_name.as_deref().is_some_and(|name| {
+                            normalize_aircraft_name(name)
+                                == normalize_aircraft_name(
+                                    aircraft_name.as_deref().unwrap_or_default(),
+                                )
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !custom.is_empty() {
+                return custom;
+            }
+
+            return vec![build_profile_adapter_mapping("dcs-bios", profile)];
+        }
+
+        persisted
+            .into_iter()
+            .filter(|config| {
+                config.aircraft_name.as_deref().is_none_or(|name| {
+                    aircraft_name.as_deref().is_some_and(|current| {
+                        normalize_aircraft_name(name) == normalize_aircraft_name(current)
+                    })
+                })
+            })
+            .collect()
+    }
+
     fn register_display_sender(&self, device_id: String, sender: SyncSender<DisplayCommand>) {
         self.display_senders
             .lock()
@@ -715,7 +792,8 @@ impl RuntimeState {
     }
 
     fn dispatch_dcsbios_memory_update(&self, app: &AppHandle, update: &DcsBiosMemoryUpdate) {
-        let adapter_mappings = self.adapter_mappings.lock().unwrap().clone();
+        let adapter_mappings = self.active_adapter_mappings();
+        let catalog = self.effective_adapter_catalog();
         let assignments = self.device_role_assignments.lock().unwrap().clone();
         for config in adapter_mappings
             .iter()
@@ -726,7 +804,7 @@ impl RuntimeState {
                     continue;
                 }
                 let Some((address, length)) =
-                    resolve_dcsbios_output_range(&self.adapter_catalog, config, mapping)
+                    resolve_dcsbios_output_range(&catalog, config, mapping)
                 else {
                     self.push_log(
                         app,
@@ -901,6 +979,7 @@ impl RuntimeState {
             device_endpoints: self.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: assignments.clone(),
             adapter_mappings: self.adapter_mappings.lock().unwrap().clone(),
+            adapter_profiles: self.adapter_profiles.lock().unwrap().clone(),
         };
         if let Err(error) = persist_manager_state(app, &persisted) {
             *self.learn_session.lock().unwrap() = Some(session);
@@ -1117,20 +1196,21 @@ impl RuntimeState {
                         {
                             state.push_log(&app_for_thread, "WARN", "dcsbios", error);
                         }
+                        let aircraft_update =
+                            updates.iter().find_map(extract_aircraft_name_from_update);
                         for update in updates {
                             state.dispatch_dcsbios_memory_update(&app_for_thread, &update);
                         }
                         let now = now_iso8601();
                         let preview = extract_ascii_preview(&buf[..size]);
-                        let maybe_aircraft_name = preview.clone().and_then(extract_aircraft_name);
                         state.update_status(&app_for_thread, |status| {
                             status.connection_state = "receiving".to_string();
                             status.last_seen_at = Some(now.clone());
                             status.last_packet_at = Some(now.clone());
                             status.error = None;
                             status.total_packets = status.total_packets.saturating_add(1);
-                            if let Some(name) = &maybe_aircraft_name {
-                                status.aircraft_name = Some(name.clone());
+                            if let Some(name) = &aircraft_update {
+                                status.aircraft_name = name.clone();
                             }
                         });
                         let _ = app_for_thread.emit(
@@ -1290,6 +1370,7 @@ fn save_device_endpoints(
             device_endpoints: device_endpoints.clone(),
             device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
             adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
+            adapter_profiles: state.inner.adapter_profiles.lock().unwrap().clone(),
         },
     )?;
     state.inner.stop_endpoint_listeners(&app);
@@ -1358,6 +1439,7 @@ fn save_device_role_assignments(
             device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: device_role_assignments.clone(),
             adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
+            adapter_profiles: state.inner.adapter_profiles.lock().unwrap().clone(),
         },
     )?;
     state
@@ -1384,6 +1466,7 @@ fn save_adapter_mappings(
             device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
             adapter_mappings: adapter_mappings.clone(),
+            adapter_profiles: state.inner.adapter_profiles.lock().unwrap().clone(),
         },
     )?;
     state.inner.set_adapter_mappings(&app, adapter_mappings);
@@ -1391,6 +1474,83 @@ fn save_adapter_mappings(
     state
         .inner
         .push_log(&app, "INFO", "mapping", "Saved adapter control mappings.");
+    Ok(state.inner.snapshot())
+}
+
+fn parse_adapter_profile_request(
+    request: AdapterProfileImportRequest,
+) -> Result<AdapterProfileConfig, String> {
+    let adapter_id = request.adapter_id.trim().to_string();
+    let profile_id = request.profile_id.trim().to_string();
+    let label = request.label.trim().to_string();
+    if adapter_id.is_empty() || profile_id.is_empty() || label.is_empty() {
+        return Err("Adapter profile requires adapterId, profileId, and label.".to_string());
+    }
+    if request.source.trim().is_empty() {
+        return Err("Adapter profile source is empty.".to_string());
+    }
+
+    let mut profile =
+        adapter_catalog::parse_external_profile(&profile_id, &label, request.source.trim())?;
+    profile.aircraft_names = request
+        .aircraft_names
+        .into_iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    profile.role_bindings = infer_role_bindings(&adapter_id, &profile);
+    if profile.aircraft_names.is_empty() {
+        return Err("Adapter profile requires at least one aircraft name.".to_string());
+    }
+    if profile.role_bindings.is_empty() {
+        return Err(
+            "Adapter profile does not contain a category supported by the built-in Role bindings."
+                .to_string(),
+        );
+    }
+
+    Ok(AdapterProfileConfig {
+        adapter_id,
+        profile,
+    })
+}
+
+#[tauri::command]
+fn preview_adapter_profile(request: AdapterProfileImportRequest) -> Result<AdapterProfile, String> {
+    parse_adapter_profile_request(request).map(|config| config.profile)
+}
+
+#[tauri::command]
+fn save_adapter_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: AdapterProfileImportRequest,
+) -> Result<AppSnapshot, String> {
+    let profile = parse_adapter_profile_request(request)?;
+    let mut adapter_profiles = state.inner.adapter_profiles.lock().unwrap().clone();
+    if let Some(existing) = adapter_profiles.iter_mut().find(|existing| {
+        existing.adapter_id == profile.adapter_id
+            && existing.profile.profile_id == profile.profile.profile_id
+    }) {
+        *existing = profile;
+    } else {
+        adapter_profiles.push(profile);
+    }
+    let adapter_profiles = sanitize_adapter_profiles(adapter_profiles);
+    persist_manager_state(
+        &app,
+        &PersistedManagerState {
+            schema_version: STATE_SCHEMA_VERSION,
+            device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
+            device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
+            adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
+            adapter_profiles: adapter_profiles.clone(),
+        },
+    )?;
+    state.inner.set_adapter_profiles(&app, adapter_profiles);
+    state
+        .inner
+        .push_log(&app, "INFO", "adapter", "Saved adapter aircraft profile.");
     Ok(state.inner.snapshot())
 }
 
@@ -1818,7 +1978,56 @@ fn normalize_persisted_state(mut persisted: PersistedManagerState) -> PersistedM
     persisted.device_role_assignments =
         sanitize_device_role_assignments(persisted.device_role_assignments);
     persisted.adapter_mappings = sanitize_adapter_mappings(persisted.adapter_mappings);
+    persisted.adapter_profiles = sanitize_adapter_profiles(persisted.adapter_profiles);
     persisted
+}
+
+fn sanitize_adapter_profiles(
+    adapter_profiles: Vec<AdapterProfileConfig>,
+) -> Vec<AdapterProfileConfig> {
+    let mut sanitized = Vec::new();
+    for mut config in adapter_profiles {
+        config.adapter_id = config.adapter_id.trim().to_string();
+        config.profile.profile_id = config.profile.profile_id.trim().to_string();
+        config.profile.label = config.profile.label.trim().to_string();
+        config.profile.aircraft_names = config
+            .profile
+            .aircraft_names
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+        config.profile.role_bindings = config
+            .profile
+            .role_bindings
+            .into_iter()
+            .map(|mut binding| {
+                binding.role_id = binding.role_id.trim().to_string();
+                binding.category = binding.category.trim().to_string();
+                binding
+            })
+            .filter(|binding| !binding.role_id.is_empty() && !binding.category.is_empty())
+            .collect();
+        if config.adapter_id.is_empty()
+            || config.profile.profile_id.is_empty()
+            || config.profile.label.is_empty()
+            || config.profile.aircraft_names.is_empty()
+        {
+            continue;
+        }
+        if let Some(existing) = sanitized
+            .iter_mut()
+            .find(|existing: &&mut AdapterProfileConfig| {
+                existing.adapter_id == config.adapter_id
+                    && existing.profile.profile_id == config.profile.profile_id
+            })
+        {
+            *existing = config;
+        } else {
+            sanitized.push(config);
+        }
+    }
+    sanitized
 }
 
 fn migrate_legacy_state(legacy: LegacyPersistedManagerState) -> PersistedManagerState {
@@ -1893,10 +2102,13 @@ fn migrate_legacy_state(legacy: LegacyPersistedManagerState) -> PersistedManager
             vec![AdapterMappingConfig {
                 adapter_id: "dcs-bios".to_string(),
                 profile_id: "default".to_string(),
+                aircraft_name: None,
+                profile_label: None,
                 output_mappings: Vec::new(),
                 mappings: dcsbios_mappings,
             }]
         },
+        adapter_profiles: Vec::new(),
     })
 }
 
@@ -2123,6 +2335,77 @@ fn encode_import_command(identifier: &str, argument: &str) -> Result<String, Str
     ImportCommand::new(identifier.trim(), argument.trim())
         .map(|command| command.encode())
         .map_err(|error| format!("Invalid DCS-BIOS command: {error:?}"))
+}
+
+fn build_profile_adapter_mapping(
+    adapter_id: &str,
+    profile: &AdapterProfile,
+) -> AdapterMappingConfig {
+    let mappings = profile
+        .role_bindings
+        .iter()
+        .flat_map(|binding| {
+            profile
+                .controls
+                .iter()
+                .filter(move |control| control.category == binding.category)
+                .filter_map(|control| {
+                    let input = control
+                        .inputs
+                        .iter()
+                        .find(|input| {
+                            input.interface == "action" && !input.argument_options.is_empty()
+                        })
+                        .or_else(|| {
+                            control
+                                .inputs
+                                .iter()
+                                .find(|input| !input.argument_options.is_empty())
+                        })?;
+                    let argument = input.argument_options.first()?.value.clone();
+                    Some((control, input, argument))
+                })
+                .enumerate()
+                .map(move |(index, (control, input, argument))| {
+                    let logical_control_id = format!("button-{index}");
+                    let mut parameters = HashMap::new();
+                    parameters.insert("identifier".to_string(), control.control_id.clone());
+                    parameters.insert("argument".to_string(), argument);
+                    parameters.insert("argumentMode".to_string(), "fixed".to_string());
+                    parameters.insert("referenceAdapter".to_string(), adapter_id.to_string());
+                    parameters.insert("referenceProfile".to_string(), profile.profile_id.clone());
+                    parameters.insert("referenceCategory".to_string(), control.category.clone());
+                    parameters.insert("referenceControl".to_string(), control.control_id.clone());
+                    parameters.insert("referenceInput".to_string(), input.input_id.clone());
+                    parameters.insert("referenceInterface".to_string(), input.interface.clone());
+                    if let Some(max_value) = input.max_value {
+                        parameters.insert("maxValue".to_string(), max_value.to_string());
+                    }
+                    if let Some(suggested_step) = input.suggested_step {
+                        parameters.insert("suggestedStep".to_string(), suggested_step.to_string());
+                    }
+
+                    AdapterControlMapping {
+                        role_id: binding.role_id.clone(),
+                        logical_control_id,
+                        event_kind: EventKind::ButtonPushed,
+                        action: AdapterActionConfig {
+                            action_id: "control-command".to_string(),
+                            parameters,
+                        },
+                    }
+                })
+        })
+        .collect();
+
+    AdapterMappingConfig {
+        adapter_id: adapter_id.to_string(),
+        profile_id: profile.profile_id.clone(),
+        aircraft_name: profile.aircraft_names.first().cloned(),
+        profile_label: Some(profile.label.clone()),
+        mappings,
+        output_mappings: Vec::new(),
+    }
 }
 
 fn resolve_dcsbios_argument(
@@ -2422,7 +2705,7 @@ fn run_dispatch_worker(
             Ok(physical_event) => {
                 let config = state.config.lock().unwrap().clone();
                 let assignments = state.device_role_assignments.lock().unwrap().clone();
-                let adapter_mappings = state.adapter_mappings.lock().unwrap().clone();
+                let adapter_mappings = state.active_adapter_mappings();
                 let context = ControlEventContext {
                     state: state.as_ref(),
                     app: &app,
@@ -2744,20 +3027,23 @@ fn extract_ascii_preview(buf: &[u8]) -> Option<String> {
     segments.into_iter().max_by_key(|segment| segment.len())
 }
 
-fn extract_aircraft_name(preview: String) -> Option<String> {
-    let trimmed = preview.trim();
-    if trimmed.len() < 3 || trimmed.len() > 32 {
+fn extract_aircraft_name_from_update(update: &DcsBiosMemoryUpdate) -> Option<Option<String>> {
+    if update.address != DCS_BIOS_AIRCRAFT_NAME_ADDRESS {
         return None;
     }
 
-    let allowed = trimmed
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '/' | '.'));
-
-    if allowed && trimmed.chars().any(|ch| ch.is_ascii_alphabetic()) {
-        Some(trimmed.to_string())
+    let bytes = update
+        .data
+        .iter()
+        .take(DCS_BIOS_AIRCRAFT_NAME_LENGTH)
+        .copied()
+        .take_while(|byte| *byte != 0)
+        .collect::<Vec<_>>();
+    let name = String::from_utf8_lossy(&bytes).trim().to_string();
+    if name.is_empty() || name.eq_ignore_ascii_case("NONE") {
+        Some(None)
     } else {
-        None
+        Some(Some(name))
     }
 }
 
@@ -2782,6 +3068,7 @@ pub fn run() {
                         manager_state.device_role_assignments.clone(),
                     );
                     state.set_adapter_mappings(&app_handle, manager_state.adapter_mappings.clone());
+                    state.set_adapter_profiles(&app_handle, manager_state.adapter_profiles.clone());
                     if !manager_state.device_endpoints.is_empty() {
                         tauri::async_runtime::spawn({
                             let app_handle = app_handle.clone();
@@ -2817,6 +3104,8 @@ pub fn run() {
             save_device_endpoints,
             save_device_role_assignments,
             save_adapter_mappings,
+            preview_adapter_profile,
+            save_adapter_profile,
             start_learn,
             cancel_learn,
             list_serial_ports,
@@ -3064,6 +3353,8 @@ mod tests {
         let mappings = sanitize_adapter_mappings(vec![AdapterMappingConfig {
             adapter_id: "dcs-bios".to_string(),
             profile_id: "default".to_string(),
+            aircraft_name: None,
+            profile_label: None,
             output_mappings: Vec::new(),
             mappings: vec![
                 AdapterControlMapping {
@@ -3158,6 +3449,8 @@ mod tests {
             AdapterMappingConfig {
                 adapter_id: "fake-a".to_string(),
                 profile_id: "default".to_string(),
+                aircraft_name: None,
+                profile_label: None,
                 output_mappings: Vec::new(),
                 mappings: vec![AdapterControlMapping {
                     role_id: "left-ddi".to_string(),
@@ -3172,6 +3465,8 @@ mod tests {
             AdapterMappingConfig {
                 adapter_id: "fake-b".to_string(),
                 profile_id: "default".to_string(),
+                aircraft_name: None,
+                profile_label: None,
                 output_mappings: Vec::new(),
                 mappings: vec![AdapterControlMapping {
                     role_id: "left-ddi".to_string(),
@@ -3290,11 +3585,70 @@ mod tests {
     }
 
     #[test]
+    fn aircraft_name_is_read_only_from_the_dcsbios_aircraft_memory_update() {
+        assert_eq!(
+            extract_aircraft_name_from_update(&DcsBiosMemoryUpdate {
+                address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS,
+                data: b"F-16C_50\0padding".to_vec(),
+            }),
+            Some(Some("F-16C_50".to_string()))
+        );
+        assert_eq!(
+            extract_aircraft_name_from_update(&DcsBiosMemoryUpdate {
+                address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS,
+                data: b"NONE\0".to_vec(),
+            }),
+            Some(None)
+        );
+        assert_eq!(
+            extract_aircraft_name_from_update(&DcsBiosMemoryUpdate {
+                address: 0x0010,
+                data: b"F-16C_50\0".to_vec(),
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn built_in_profile_generates_logical_button_actions_in_catalog_order() {
+        let profile = AdapterCatalog::builtin().adapters[0].profiles[0].clone();
+        let mapping = build_profile_adapter_mapping("dcs-bios", &profile);
+
+        assert_eq!(mapping.mappings.len(), 40);
+        assert_eq!(
+            mapping.mappings[0]
+                .action
+                .parameters
+                .get("referenceControl")
+                .map(String::as_str),
+            Some("MFD_L_1")
+        );
+        assert_eq!(
+            mapping.mappings[1]
+                .action
+                .parameters
+                .get("referenceControl")
+                .map(String::as_str),
+            Some("MFD_L_2")
+        );
+        assert_eq!(
+            mapping.mappings[20]
+                .action
+                .parameters
+                .get("referenceControl")
+                .map(String::as_str),
+            Some("MFD_R_1")
+        );
+    }
+
+    #[test]
     fn dcsbios_output_mapping_resolves_address_from_adapter_identity() {
         let catalog = AdapterCatalog::builtin();
         let config = AdapterMappingConfig {
             adapter_id: "dcs-bios".to_string(),
             profile_id: "F-16C_50".to_string(),
+            aircraft_name: None,
+            profile_label: None,
             mappings: Vec::new(),
             output_mappings: Vec::new(),
         };

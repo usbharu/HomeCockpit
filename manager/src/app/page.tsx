@@ -3,16 +3,18 @@
 import React from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import {
-  Activity,
-  Cable,
-  ArrowRightLeft,
-  Radar,
+    Activity,
+    Cable,
+    ArrowRightLeft,
+    Radar,
+    Settings2,
 } from 'lucide-react';
 
 import { useManagerState } from "@/lib/use-manager-state";
 import { SoftwareSettings } from "@/components/tabs/software-settings";
 import DeviceSettings from "@/components/tabs/device-settings";
 import MappingSettings from "@/components/tabs/mapping-settings";
+import AdapterSettings from "@/components/tabs/adapter-settings";
 import StatusPage from "@/components/tabs/status-page";
 
 
@@ -28,7 +30,8 @@ export default function ManagerTabs() {
         refreshDevices,
         saveDeviceEndpoints,
         saveDeviceRoleAssignments,
-        saveAdapterMappings,
+        previewAdapterProfile,
+        saveAdapterProfile,
         startLearn,
         cancelLearn,
     } = useManagerState();
@@ -77,14 +80,25 @@ export default function ManagerTabs() {
                     devices={snapshot.devices}
                     roleDefinitions={snapshot.roleDefinitions}
                     deviceRoleAssignments={snapshot.deviceRoleAssignments}
-                    adapterMappings={snapshot.adapterMappings}
-                    adapterCatalog={snapshot.adapterCatalog}
                     learnSession={snapshot.learnSession}
                     busyAction={busyAction}
                     onSaveDeviceRoleAssignments={saveDeviceRoleAssignments}
-                    onSaveAdapterMappings={saveAdapterMappings}
                     onStartLearn={startLearn}
                     onCancelLearn={cancelLearn}
+                />
+            ),
+        },
+        {
+            id: 'adapter',
+            label: 'Adapter設定',
+            icon: Settings2,
+            content: (
+                <AdapterSettings
+                    status={snapshot.dcsbiosStatus}
+                    adapterCatalog={snapshot.adapterCatalog}
+                    busyAction={busyAction}
+                    onPreviewAdapterProfile={previewAdapterProfile}
+                    onSaveAdapterProfile={saveAdapterProfile}
                 />
             ),
         },

@@ -1,5 +1,6 @@
 import {
   defaultRoleDefinitions,
+  type AdapterCatalog,
   type EventKind,
   type RoleDefinition,
 } from "@/lib/manager-types";
@@ -95,4 +96,31 @@ export function getRoleDefinitions(
   roleDefinitions: RoleDefinition[] = defaultRoleDefinitions(),
 ): RoleDefinition[] {
   return roleDefinitions;
+}
+
+export function normalizeAircraftName(value: string): string {
+  return value.trim().toLowerCase().replace(/[_\-\s]/g, "");
+}
+
+export function findAdapterProfileForAircraft(
+  adapterCatalog: AdapterCatalog,
+  aircraftName: string | null,
+) {
+  if (!aircraftName) {
+    return null;
+  }
+
+  const normalizedAircraftName = normalizeAircraftName(aircraftName);
+  for (const adapter of adapterCatalog.adapters) {
+    const profile = adapter.profiles.find((candidate) =>
+      candidate.aircraftNames.some(
+        (name) => normalizeAircraftName(name) === normalizedAircraftName,
+      ),
+    );
+    if (profile) {
+      return { adapter, profile };
+    }
+  }
+
+  return null;
 }

@@ -14,6 +14,8 @@ import {
   type DeviceRoleAssignment,
   type DeviceEndpointConfig,
   type AdapterMappingConfig,
+  type AdapterProfile,
+  type AdapterProfileImportRequest,
   type LearnRequest,
   type LearnSessionStatus,
   type ManagerLogEntry,
@@ -221,6 +223,41 @@ export function useManagerState() {
     [replaceSnapshot, runAction],
   );
 
+  const previewAdapterProfile = useCallback(
+    async (request: AdapterProfileImportRequest) => {
+      if (!isTauri()) {
+        throw new Error("Adapter profile preview requires the Tauri Manager runtime.");
+      }
+
+      try {
+        return await invoke<AdapterProfile>("preview_adapter_profile", { request });
+      } catch (error) {
+        setRuntimeError(String(error));
+        throw error;
+      }
+    },
+    [],
+  );
+
+  const saveAdapterProfile = useCallback(
+    async (request: AdapterProfileImportRequest) => {
+      if (!isTauri()) {
+        return;
+      }
+
+      try {
+        const next = await runAction("save-adapter-profile", () =>
+          invoke<AppSnapshot>("save_adapter_profile", { request }),
+        );
+        replaceSnapshot(next);
+      } catch (error) {
+        setRuntimeError(String(error));
+        throw error;
+      }
+    },
+    [replaceSnapshot, runAction],
+  );
+
   const startLearn = useCallback(
     async (request: LearnRequest) => {
       if (!isTauri()) {
@@ -376,6 +413,8 @@ export function useManagerState() {
     saveDeviceEndpoints,
     saveDeviceRoleAssignments,
     saveAdapterMappings,
+    previewAdapterProfile,
+    saveAdapterProfile,
     startLearn,
     cancelLearn,
     refreshSerialPorts,
