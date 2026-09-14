@@ -470,20 +470,48 @@ impl InputAdapter for DcsBiosAdapter {
         action: &AdapterActionConfig,
         event: &LogicalInputEvent,
     ) -> Result<(), String> {
-        if action.action_id != "control-command" {
-            return Err(format!(
-                "Unsupported DCS-BIOS action '{}'.",
-                action.action_id
-            ));
-        }
-
-        let identifier = action
-            .parameters
-            .get("identifier")
-            .ok_or_else(|| "DCS-BIOS action is missing identifier parameter.".to_string())?;
-        let argument = resolve_dcsbios_argument(action, event)?;
-        let payload = encode_import_command(identifier, &argument)?;
+        let payload = encode_dcsbios_action_payload(action, event)?;
         send_command_to_dcsbios(config, &payload)
+    }
+}
+
+fn encode_dcsbios_action_payload(
+    action: &AdapterActionConfig,
+    event: &LogicalInputEvent,
+) -> Result<String, String> {
+    let identifier = action
+        .parameters
+        .get("identifier")
+        .ok_or_else(|| "DCS-BIOS action is missing identifier parameter.".to_string())?;
+    match action.action_id.as_str() {
+        "control-command" => {
+            let argument = resolve_dcsbios_argument(action, event)?;
+            encode_import_command(identifier, &argument)
+        }
+        "control-pulse" => {
+            if event.event_kind != EventKind::ButtonPushed {
+                return Err("DCS-BIOS control pulse requires a Button Pushed event.".to_string());
+            }
+            let press_argument = action
+                .parameters
+                .get("argument")
+                .map(String::as_str)
+                .unwrap_or("1");
+            let release_argument = action
+                .parameters
+                .get("releaseArgument")
+                .map(String::as_str)
+                .unwrap_or("0");
+            Ok(format!(
+                "{}{}",
+                encode_import_command(identifier, press_argument)?,
+                encode_import_command(identifier, release_argument)?
+            ))
+        }
+        _ => Err(format!(
+            "Unsupported DCS-BIOS action '{}'.",
+            action.action_id
+        )),
     }
 }
 
@@ -2448,18 +2476,19 @@ fn build_profile_adapter_mapping(
                 continue;
             };
             let logical_control_id = format!("button-{index}");
-            let event_arguments: Vec<(EventKind, String)> = if momentary_input.is_some() {
-                vec![
-                    (EventKind::ButtonDown, "1".to_string()),
-                    (EventKind::ButtonUp, "0".to_string()),
-                ]
+            let event_arguments: Vec<(EventKind, &str, String)> = if momentary_input.is_some() {
+                vec![(EventKind::ButtonPushed, "control-pulse", "1".to_string())]
             } else if let Some(argument) = input.argument_options.first() {
-                vec![(EventKind::ButtonPushed, argument.value.clone())]
+                vec![(
+                    EventKind::ButtonPushed,
+                    "control-command",
+                    argument.value.clone(),
+                )]
             } else {
                 continue;
             };
 
-            for (event_kind, argument) in event_arguments {
+            for (event_kind, action_id, argument) in event_arguments {
                 let mut parameters = HashMap::new();
                 parameters.insert("identifier".to_string(), control.control_id.clone());
                 parameters.insert("argument".to_string(), argument);
@@ -2476,13 +2505,16 @@ fn build_profile_adapter_mapping(
                 if let Some(suggested_step) = input.suggested_step {
                     parameters.insert("suggestedStep".to_string(), suggested_step.to_string());
                 }
+                if action_id == "control-pulse" {
+                    parameters.insert("releaseArgument".to_string(), "0".to_string());
+                }
 
                 mappings.push(AdapterControlMapping {
                     role_id: binding.role_id.clone(),
                     logical_control_id: logical_control_id.clone(),
                     event_kind,
                     action: AdapterActionConfig {
-                        action_id: "control-command".to_string(),
+                        action_id: action_id.to_string(),
                         parameters,
                     },
                 });
@@ -3810,7 +3842,7 @@ mod tests {
         let profile = AdapterCatalog::builtin().adapters[0].profiles[0].clone();
         let mapping = build_profile_adapter_mapping("dcs-bios", &profile);
 
-        assert_eq!(mapping.mappings.len(), 80);
+        assert_eq!(mapping.mappings.len(), 40);
         assert_eq!(
             mapping.mappings[0]
                 .action
@@ -3820,7 +3852,7 @@ mod tests {
             Some("MFD_L_1")
         );
         assert_eq!(
-            mapping.mappings[2]
+            mapping.mappings[1]
                 .action
                 .parameters
                 .get("referenceControl")
@@ -3828,14 +3860,15 @@ mod tests {
             Some("MFD_L_2")
         );
         assert_eq!(
-            mapping.mappings[40]
+            mapping.mappings[20]
                 .action
                 .parameters
                 .get("referenceControl")
                 .map(String::as_str),
             Some("MFD_R_1")
         );
-        assert_eq!(mapping.mappings[0].event_kind, EventKind::ButtonDown);
+        assert_eq!(mapping.mappings[0].event_kind, EventKind::ButtonPushed);
+        assert_eq!(mapping.mappings[0].action.action_id, "control-pulse");
         assert_eq!(
             mapping.mappings[0]
                 .action
@@ -3844,14 +3877,38 @@ mod tests {
                 .map(String::as_str),
             Some("1")
         );
-        assert_eq!(mapping.mappings[1].event_kind, EventKind::ButtonUp);
         assert_eq!(
-            mapping.mappings[1]
+            mapping.mappings[0]
                 .action
                 .parameters
-                .get("argument")
+                .get("releaseArgument")
                 .map(String::as_str),
             Some("0")
+        );
+    }
+
+    #[test]
+    fn button_pushed_pulse_encodes_press_and_release_commands() {
+        let action = AdapterActionConfig {
+            action_id: "control-pulse".to_string(),
+            parameters: HashMap::from([
+                ("identifier".to_string(), "LEFT_DDI_PB_01".to_string()),
+                ("argument".to_string(), "1".to_string()),
+                ("releaseArgument".to_string(), "0".to_string()),
+            ]),
+        };
+        let event = LogicalInputEvent {
+            device_id: "device-a".to_string(),
+            physical_control_id: 0,
+            role_id: "left-ddi".to_string(),
+            logical_control_id: "button-0".to_string(),
+            event_kind: EventKind::ButtonPushed,
+            value: ControlValue::Button { pressed: false },
+        };
+
+        assert_eq!(
+            encode_dcsbios_action_payload(&action, &event).expect("pulse payload"),
+            "LEFT_DDI_PB_01 1\nLEFT_DDI_PB_01 0\n"
         );
     }
 

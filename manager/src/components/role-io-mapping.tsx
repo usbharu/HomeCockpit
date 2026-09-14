@@ -84,8 +84,22 @@ function buildControlMappings(
   profileId: string,
   control: AdapterControlDefinition,
   input: AdapterInputDefinition,
+  momentaryMode: "pulse" | "hold" = "pulse",
 ): AdapterControlMapping[] {
   if (isMomentaryInput(input)) {
+    if (momentaryMode === "pulse") {
+      const parameters = buildInputParameters(adapterId, profileId, control, input, "1");
+      parameters.releaseArgument = "0";
+      return [{
+        roleId,
+        logicalControlId,
+        eventKind: "button-pushed",
+        action: {
+          actionId: "control-pulse",
+          parameters,
+        },
+      }];
+    }
     return [
       { eventKind: "button-down" as EventKind, argument: "1" },
       { eventKind: "button-up" as EventKind, argument: "0" },
@@ -267,6 +281,7 @@ function RoleIoRow({
           profileId,
           inputControl,
           selectedInput,
+          eventKind === "button-pushed" ? "pulse" : "hold",
         )
       : [{
           roleId,
@@ -374,9 +389,14 @@ function RoleIoRow({
               ))}
             </select>
             {momentary ? (
-              <div className="rounded-md border border-blue-200 bg-white px-2 py-2 text-xs text-blue-800 sm:col-span-2">
-                Button Down → 1（押下） / Button Up → 0（解放）
-              </div>
+              <select
+                value={eventKind === "button-pushed" ? "button-pushed" : "button-down"}
+                onChange={(event) => setEventKind(event.target.value as EventKind)}
+                className="rounded-md border border-gray-300 bg-white px-2 py-2 text-xs sm:col-span-2"
+              >
+                <option value="button-pushed">Button Pushed → 1（押す）→ 0（離す）</option>
+                <option value="button-down">Button Down / Up → 1 / 0（押下状態を追従）</option>
+              </select>
             ) : <>
               <select
                 value={eventKind}
