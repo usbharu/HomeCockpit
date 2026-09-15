@@ -3,3 +3,5 @@
 */fp-info-cache
 */fp-lib-table
 */**-backups/*.zip
+
+.pnpm-store
