@@ -31,7 +31,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channe
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcState};
 use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
-use hcp::{Capabilities, DeviceKind, Version};
+use hcp::{Capabilities, DeviceKind, Version, decode_data_packet};
 use homecockpit_firmware_base::{
     DeviceDescriptor, DeviceRuntimeState, FEATURE_CONTROL_EVENTS, build_button_control_event,
     build_device_hello_packet, control_id_from_matrix_position, encode_set_frame,
@@ -386,6 +386,21 @@ fn handle_incoming_frame(
                 }
             }
             Err(e) => warn!("failed encode device hello {:?}", e),
+        }
+    }
+
+    if let imcp::frame::FramePayload::Data(payload) = frame.payload()
+        && let Ok(display_data) = decode_data_packet(payload.as_slice())
+    {
+        let accepted = if let Ok(mut state) = DEVICE_STATE.try_lock() {
+            state.accept_display_data(&display_data)
+        } else {
+            false
+        };
+        if accepted {
+            debug!("accepted display update seq={}", display_data.seq);
+        } else {
+            debug!("ignored stale display update seq={}", display_data.seq);
         }
     }
 }

@@ -5,17 +5,18 @@ import { Cable, Cpu, Plus, RefreshCw, Trash2, Waypoints } from "lucide-react";
 
 import { deviceRoleLabels } from "@/lib/control-catalog";
 import type {
-  DeviceRole,
   DeviceRoleAssignment,
   DeviceEndpointConfig,
   EndpointRoleHint,
   ManagedDeviceSummary,
+  RoleDefinition,
 } from "@/lib/manager-types";
 
 type DeviceSettingsProps = {
   devices: ManagedDeviceSummary[];
   deviceEndpoints: DeviceEndpointConfig[];
   deviceRoleAssignments: DeviceRoleAssignment[];
+  roleDefinitions: RoleDefinition[];
   serialPorts: string[];
   busyAction: string | null;
   onRefresh: () => Promise<void>;
@@ -52,6 +53,7 @@ const DeviceSettings = ({
   onRefresh,
   onSaveEndpoints,
   onSaveDeviceRoleAssignments,
+  roleDefinitions,
 }: DeviceSettingsProps) => {
   const [draftEndpoints, setDraftEndpoints] = useState<DeviceEndpointConfig[]>(deviceEndpoints);
   const [newEndpoint, setNewEndpoint] = useState<EndpointDraft>(defaultDraft);
@@ -92,20 +94,27 @@ const DeviceSettings = ({
     setDraftEndpoints((current) => current.filter((endpoint) => endpoint.id !== endpointId));
   };
 
-  const assignRole = async (deviceId: string | null, role: DeviceRole | "") => {
-    if (!deviceId) {
+  const addRole = async (deviceId: string | null, roleId: string) => {
+    if (!deviceId || !roleId) {
       return;
     }
 
-    const nextAssignments = deviceRoleAssignments.filter(
-      (entry) => entry.deviceId !== deviceId && entry.role !== role,
-    );
-
-    if (role) {
-      nextAssignments.push({ deviceId, role });
+    if (deviceRoleAssignments.some((entry) => entry.deviceId === deviceId && entry.roleId === roleId)) {
+      return;
     }
 
-    await onSaveDeviceRoleAssignments(nextAssignments);
+    await onSaveDeviceRoleAssignments([
+      ...deviceRoleAssignments,
+      { deviceId, roleId, bindings: [] },
+    ]);
+  };
+
+  const removeRole = async (deviceId: string, roleId: string) => {
+    await onSaveDeviceRoleAssignments(
+      deviceRoleAssignments.filter(
+        (entry) => !(entry.deviceId === deviceId && entry.roleId === roleId),
+      ),
+    );
   };
 
   const addEndpoint = () => {
@@ -413,28 +422,56 @@ const DeviceSettings = ({
                       <span>Device ID</span>
                       <span className="truncate pl-4 text-right">{device.deviceId ?? "Unknown"}</span>
                     </div>
-                    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Device Role</span>
-                      <select
-                        value={
-                          deviceRoleAssignments.find((entry) => entry.deviceId === device.deviceId)
-                            ?.role ?? ""
-                        }
-                        onChange={(event) =>
-                          void assignRole(
-                            device.deviceId,
-                            (event.target.value || "") as DeviceRole | "",
-                          )
-                        }
-                        className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500"
-                      >
-                        <option value="">未割当</option>
-                        {Object.entries(deviceRoleLabels).map(([role, label]) => (
-                          <option key={role} value={role}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Device Roles</span>
+                        <select
+                          value=""
+                          disabled={!device.deviceId || busyAction !== null}
+                          onChange={(event) => void addRole(device.deviceId, event.target.value)}
+                          className="max-w-[190px] rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 disabled:bg-gray-100"
+                        >
+                          <option value="">Role を追加</option>
+                          {roleDefinitions
+                            .filter(
+                              (definition) =>
+                                !deviceRoleAssignments.some(
+                                  (entry) =>
+                                    entry.deviceId === device.deviceId &&
+                                    entry.roleId === definition.roleId,
+                                ),
+                            )
+                            .map((definition) => (
+                              <option key={definition.roleId} value={definition.roleId}>
+                                {deviceRoleLabels[definition.roleId] ?? definition.roleId}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {deviceRoleAssignments
+                          .filter((entry) => entry.deviceId === device.deviceId)
+                          .map((entry) => (
+                            <span
+                              key={`${entry.deviceId}:${entry.roleId}`}
+                              className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-800"
+                            >
+                              {deviceRoleLabels[entry.roleId] ?? entry.roleId}
+                              <button
+                                type="button"
+                                onClick={() => void removeRole(entry.deviceId, entry.roleId)}
+                                disabled={busyAction !== null}
+                                className="text-blue-500 hover:text-red-600 disabled:opacity-50"
+                                aria-label={`${entry.roleId} の割当を削除`}
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        {deviceRoleAssignments.every((entry) => entry.deviceId !== device.deviceId) && (
+                          <span className="text-xs text-gray-500">未割当</span>
+                        )}
+                      </div>
                     </div>
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
                       <span>Firmware</span>

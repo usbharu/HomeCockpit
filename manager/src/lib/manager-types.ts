@@ -19,6 +19,71 @@ export type DcsBiosStatus = {
   diagnostics: string[];
 };
 
+export type AdapterCatalogState = "loaded" | "error";
+
+export type AdapterArgumentOption = {
+  value: string;
+  label: string;
+};
+
+export type AdapterInputDefinition = {
+  inputId: string;
+  interface: string;
+  description: string;
+  maxValue: number | null;
+  suggestedStep: number | null;
+  argumentOptions: AdapterArgumentOption[];
+  supportsEventValue: boolean;
+};
+
+export type AdapterOutputDefinition = {
+  outputId: string;
+  outputType: string;
+  description: string;
+  address: number;
+  length: number | null;
+  mask: number | null;
+  shiftBy: number | null;
+  maxValue: number | null;
+  suffix: string;
+};
+
+export type AdapterControlDefinition = {
+  category: string;
+  controlId: string;
+  controlType: string;
+  description: string;
+  positions: string[];
+  inputs: AdapterInputDefinition[];
+  outputs: AdapterOutputDefinition[];
+};
+
+export type AdapterRoleBinding = {
+  roleId: string;
+  category: string;
+};
+
+export type AdapterProfile = {
+  profileId: string;
+  label: string;
+  controlCount: number;
+  aircraftNames: string[];
+  roleBindings: AdapterRoleBinding[];
+  controls: AdapterControlDefinition[];
+};
+
+export type AdapterDefinition = {
+  adapterId: string;
+  label: string;
+  profiles: AdapterProfile[];
+};
+
+export type AdapterCatalog = {
+  state: AdapterCatalogState;
+  adapters: AdapterDefinition[];
+  error: string | null;
+};
+
 export type ManagerLogEntry = {
   id: number;
   at: string;
@@ -64,47 +129,98 @@ export type ManagedDeviceSummary = {
   deviceKindId: string | null;
 };
 
-export type DeviceRole = "left-ddi" | "right-ddi";
+export type EventKind =
+  | "button-down"
+  | "button-up"
+  | "button-pushed"
+  | "encoder-delta"
+  | "absolute-changed"
+  | "toggle-on"
+  | "toggle-off";
 
-export type NormalizedControlEvent =
-  | "BUTTON_DOWN"
-  | "BUTTON_UP"
-  | "BUTTON_PUSHED"
-  | "ENCODER_DELTA"
-  | "ABSOLUTE_CHANGED"
-  | "TOGGLE_ON"
-  | "TOGGLE_OFF";
+export type RoleControlDefinition = {
+  logicalControlId: string;
+  label: string;
+  supportedEvents: EventKind[];
+};
+
+export type RoleDefinition = {
+  roleId: string;
+  version: number;
+  controls: RoleControlDefinition[];
+};
+
+export type PhysicalToLogicalBinding = {
+  physicalControlId: number;
+  logicalControlId: string;
+};
 
 export type DeviceRoleAssignment = {
   deviceId: string;
-  role: DeviceRole;
+  roleId: string;
+  bindings: PhysicalToLogicalBinding[];
 };
 
-export type DcsBiosMappedAction = {
-  identifier: string;
-  argument: string;
+export type AdapterActionConfig = {
+  actionId: string;
+  parameters: Record<string, string>;
 };
 
-export type RoleControlMapping = {
-  id: string;
-  controlId: number;
-  inputEvent: NormalizedControlEvent;
-  action: DcsBiosMappedAction;
+export type AdapterControlMapping = {
+  roleId: string;
+  logicalControlId: string;
+  eventKind: EventKind;
+  action: AdapterActionConfig;
 };
 
-export type RoleMappingConfig = {
-  role: DeviceRole;
-  mappings: RoleControlMapping[];
+export type AdapterOutputMapping = {
+  roleId: string;
+  logicalControlId: string;
+  sourceId: string;
+  parameters: Record<string, string>;
+};
+
+export type AdapterMappingConfig = {
+  adapterId: string;
+  profileId: string;
+  aircraftName?: string | null;
+  profileLabel?: string | null;
+  mappings: AdapterControlMapping[];
+  outputMappings?: AdapterOutputMapping[];
+};
+
+export type AdapterProfileImportRequest = {
+  adapterId: string;
+  profileId: string;
+  label: string;
+  aircraftNames: string[];
+  source: string;
+};
+
+export type LearnSessionStatus = {
+  active: boolean;
+  roleId: string | null;
+  logicalControlId: string | null;
+  targetDeviceId: string | null;
+  expectedEventKind: EventKind | null;
+  mode: "append" | "replace" | null;
+  armedAt: string | null;
+  timeoutMs: number;
+  capturedDeviceId: string | null;
+  capturedPhysicalControlId: number | null;
 };
 
 export type AppSnapshot = {
   dcsbiosConfig: DcsBiosConnectionConfig;
   dcsbiosStatus: DcsBiosStatus;
+  adapterCatalog: AdapterCatalog;
   logs: ManagerLogEntry[];
   devices: ManagedDeviceSummary[];
   deviceEndpoints: DeviceEndpointConfig[];
   deviceRoleAssignments: DeviceRoleAssignment[];
-  roleMappings: RoleMappingConfig[];
+  adapterMappings: AdapterMappingConfig[];
+  roleDefinitions: RoleDefinition[];
+  learnSession: LearnSessionStatus;
 };
 
 export type DcsBiosCommandRequest = {
@@ -112,6 +228,23 @@ export type DcsBiosCommandRequest = {
   controlId?: string | null;
   argument?: string | null;
 };
+
+export type LearnRequest = {
+  roleId: string;
+  logicalControlId: string;
+  targetDeviceId?: string | null;
+  expectedEventKind?: EventKind | null;
+  mode: "append" | "replace";
+  timeoutMs?: number;
+};
+
+export function defaultRoleDefinitions(): RoleDefinition[] {
+  return ["left-ddi", "right-ddi"].map((roleId) => ({
+    roleId,
+    version: 1,
+    controls: [],
+  }));
+}
 
 export const defaultSnapshot: AppSnapshot = {
   dcsbiosConfig: {
@@ -131,9 +264,27 @@ export const defaultSnapshot: AppSnapshot = {
     error: null,
     diagnostics: ["DCS-BIOS listener is stopped."],
   },
+  adapterCatalog: {
+    state: "error",
+    adapters: [],
+    error: "Adapter catalog is not available.",
+  },
   logs: [],
   devices: [],
   deviceEndpoints: [],
   deviceRoleAssignments: [],
-  roleMappings: [],
+  adapterMappings: [],
+  roleDefinitions: defaultRoleDefinitions(),
+  learnSession: {
+    active: false,
+    roleId: null,
+    logicalControlId: null,
+    targetDeviceId: null,
+    expectedEventKind: null,
+    mode: null,
+    armedAt: null,
+    timeoutMs: 0,
+    capturedDeviceId: null,
+    capturedPhysicalControlId: null,
+  },
 };
