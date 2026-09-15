@@ -12,17 +12,23 @@ import {
 } from "lucide-react";
 
 import { findAdapterProfileForAircraft } from "@/lib/control-catalog";
+import { RoleIoMapping } from "@/components/role-io-mapping";
 import type {
   AdapterCatalog,
+  AdapterMappingConfig,
   AdapterProfile,
   AdapterProfileImportRequest,
   DcsBiosStatus,
+  RoleDefinition,
 } from "@/lib/manager-types";
 
 type AdapterSettingsProps = {
   status: DcsBiosStatus;
   adapterCatalog: AdapterCatalog;
+  adapterMappings: AdapterMappingConfig[];
+  roleDefinitions: RoleDefinition[];
   busyAction: string | null;
+  onSaveAdapterMappings: (mappings: AdapterMappingConfig[]) => Promise<void>;
   onPreviewAdapterProfile: (request: AdapterProfileImportRequest) => Promise<AdapterProfile>;
   onSaveAdapterProfile: (request: AdapterProfileImportRequest) => Promise<void>;
 };
@@ -119,7 +125,10 @@ function ProfileSummary({
 export function AdapterSettings({
   status,
   adapterCatalog,
+  adapterMappings,
+  roleDefinitions,
   busyAction,
+  onSaveAdapterMappings,
   onPreviewAdapterProfile,
   onSaveAdapterProfile,
 }: AdapterSettingsProps) {
@@ -131,6 +140,7 @@ export function AdapterSettings({
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [selectedRoleId, setSelectedRoleId] = useState(roleDefinitions[0]?.roleId ?? "");
 
   const currentProfileMatch = useMemo(
     () => findAdapterProfileForAircraft(adapterCatalog, status.aircraftName),
@@ -143,6 +153,15 @@ export function AdapterSettings({
     }
     setSelectedAdapterId(adapterCatalog.adapters[0]?.adapterId ?? "");
   }, [adapterCatalog.adapters, selectedAdapterId]);
+
+  useEffect(() => {
+    if (roleDefinitions.some((role) => role.roleId === selectedRoleId)) {
+      return;
+    }
+    setSelectedRoleId(roleDefinitions[0]?.roleId ?? "");
+  }, [roleDefinitions, selectedRoleId]);
+
+  const selectedRole = roleDefinitions.find((role) => role.roleId === selectedRoleId) ?? null;
 
   const beginProfileEditor = () => {
     setEditing(true);
@@ -301,6 +320,38 @@ export function AdapterSettings({
               </div>
             </div>
           </section>
+        )}
+
+        {currentProfileMatch && selectedRole && (
+          <>
+            <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+              <h2 className="text-xl font-semibold text-gray-900">Role → Adapterマッピング</h2>
+              <p className="mt-1 text-sm text-gray-500">
+                Roleの論理アクションを、現在の航空機Adapterが提供するInput/Outputへ割り当てます。
+              </p>
+              <label className="mt-4 block max-w-sm space-y-2 text-sm text-gray-700">
+                <span>Role</span>
+                <select
+                  value={selectedRoleId}
+                  onChange={(event) => setSelectedRoleId(event.target.value)}
+                  className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
+                >
+                  {roleDefinitions.map((role) => (
+                    <option key={role.roleId} value={role.roleId}>{role.roleId}</option>
+                  ))}
+                </select>
+              </label>
+            </section>
+            <RoleIoMapping
+              roleId={selectedRole.roleId}
+              roleControls={selectedRole.controls}
+              aircraftName={status.aircraftName}
+              adapterCatalog={adapterCatalog}
+              adapterMappings={adapterMappings}
+              busyAction={busyAction}
+              onSaveAdapterMappings={onSaveAdapterMappings}
+            />
+          </>
         )}
 
         {editing && (

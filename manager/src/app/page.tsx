@@ -84,11 +84,7 @@ export default function ManagerTabs() {
                     deviceRoleAssignments={snapshot.deviceRoleAssignments}
                     learnSession={snapshot.learnSession}
                     busyAction={busyAction}
-                    aircraftName={snapshot.dcsbiosStatus.aircraftName}
-                    adapterCatalog={snapshot.adapterCatalog}
-                    adapterMappings={snapshot.adapterMappings}
                     onSaveDeviceRoleAssignments={saveDeviceRoleAssignments}
-                    onSaveAdapterMappings={saveAdapterMappings}
                     onTriggerRoleInput={triggerRoleInput}
                     onStartLearn={startLearn}
                     onCancelLearn={cancelLearn}
@@ -103,7 +99,10 @@ export default function ManagerTabs() {
                 <AdapterSettings
                     status={snapshot.dcsbiosStatus}
                     adapterCatalog={snapshot.adapterCatalog}
+                    adapterMappings={snapshot.adapterMappings}
+                    roleDefinitions={snapshot.roleDefinitions}
                     busyAction={busyAction}
+                    onSaveAdapterMappings={saveAdapterMappings}
                     onPreviewAdapterProfile={previewAdapterProfile}
                     onSaveAdapterProfile={saveAdapterProfile}
                 />

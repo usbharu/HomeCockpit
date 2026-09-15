@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRightLeft, ChevronRight, Plus, Radio, Trash2 } from "lucide-react";
+import { ArrowRightLeft, ChevronRight, Play, Plus, Radio, Trash2 } from "lucide-react";
 
 import {
   deviceRoleLabels,
@@ -9,10 +9,7 @@ import {
   getPhysicalControlCatalog,
   getRoleDefinition,
 } from "@/lib/control-catalog";
-import { RoleIoMapping } from "@/components/role-io-mapping";
 import type {
-  AdapterCatalog,
-  AdapterMappingConfig,
   DeviceRoleAssignment,
   EventKind,
   LearnRequest,
@@ -28,11 +25,7 @@ type MappingSettingsProps = {
   deviceRoleAssignments: DeviceRoleAssignment[];
   learnSession: LearnSessionStatus;
   busyAction: string | null;
-  aircraftName: string | null;
-  adapterCatalog: AdapterCatalog;
-  adapterMappings: AdapterMappingConfig[];
   onSaveDeviceRoleAssignments: (assignments: DeviceRoleAssignment[]) => Promise<void>;
-  onSaveAdapterMappings: (mappings: AdapterMappingConfig[]) => Promise<void>;
   onTriggerRoleInput: (request: RoleInputTriggerRequest) => Promise<number>;
   onStartLearn: (request: LearnRequest) => Promise<void>;
   onCancelLearn: () => Promise<void>;
@@ -54,22 +47,15 @@ export function MappingSettings({
   deviceRoleAssignments,
   learnSession,
   busyAction,
-  aircraftName,
-  adapterCatalog,
-  adapterMappings,
   onSaveDeviceRoleAssignments,
-  onSaveAdapterMappings,
   onTriggerRoleInput,
   onStartLearn,
   onCancelLearn,
 }: MappingSettingsProps) {
   const [selectedRoleId, setSelectedRoleId] = useState(roleDefinitions[0]?.roleId ?? "");
-  const [selectedDeviceId, setSelectedDeviceId] = useState("");
-  const [selectedLogicalControlId, setSelectedLogicalControlId] = useState("");
-  const [selectedPhysicalControlId, setSelectedPhysicalControlId] = useState("");
-  const [learnMode, setLearnMode] = useState<"append" | "replace">("append");
-  const [learnDeviceId, setLearnDeviceId] = useState("");
-  const [learnExpectedEventKind, setLearnExpectedEventKind] = useState<EventKind | "">("");
+  const [bindingDrafts, setBindingDrafts] = useState<Record<string, { deviceId: string; physicalControlId: string }>>({});
+  const [triggeringRoleAction, setTriggeringRoleAction] = useState<string | null>(null);
+  const [roleActionNotice, setRoleActionNotice] = useState<{ controlId: string; message: string } | null>(null);
 
   const roleDefinition = useMemo(
     () => getRoleDefinition(selectedRoleId, roleDefinitions),
@@ -87,26 +73,6 @@ export function MappingSettings({
     () => getImplementedRoleControls(roleDefinition, roleControlCapacity),
     [roleControlCapacity, roleDefinition],
   );
-  const learnDevices = useMemo(
-    () =>
-      devices.filter(
-        (device): device is ManagedDeviceSummary & { deviceId: string } =>
-          device.deviceId !== null,
-      ),
-    [devices],
-  );
-  const selectedControl = roleControls.find(
-    (control) => control.logicalControlId === selectedLogicalControlId,
-  );
-  const selectedDevice = devices.find((device) => device.deviceId === selectedDeviceId) ?? null;
-  const selectedPhysicalControls = useMemo(
-    () =>
-      getPhysicalControlCatalog(
-        selectedDevice?.deviceKindId ?? null,
-        selectedDevice?.controls ?? null,
-      ),
-    [selectedDevice?.controls, selectedDevice?.deviceKindId],
-  );
 
   useEffect(() => {
     if (roleDefinitions.some((definition) => definition.roleId === selectedRoleId)) {
@@ -115,49 +81,32 @@ export function MappingSettings({
     setSelectedRoleId(roleDefinitions[0]?.roleId ?? "");
   }, [roleDefinitions, selectedRoleId]);
 
-  useEffect(() => {
-    const firstControl = roleControls[0]?.logicalControlId ?? "";
-    setSelectedLogicalControlId((current) =>
-      roleControls.some((control) => control.logicalControlId === current) ? current : firstControl,
-    );
-    setSelectedDeviceId((current) =>
-      roleAssignments.some((assignment) => assignment.deviceId === current)
-        ? current
-        : roleAssignments[0]?.deviceId ?? "",
-    );
-  }, [roleAssignments, roleControls]);
-
-  useEffect(() => {
-    setSelectedPhysicalControlId((current) => {
-      if (selectedPhysicalControls.some((control) => String(control.physicalControlId) === current)) {
-        return current;
-      }
-      return selectedPhysicalControls[0] ? String(selectedPhysicalControls[0].physicalControlId) : "";
-    });
-  }, [selectedPhysicalControls]);
-
   const updateAssignments = async (
     updater: (assignments: DeviceRoleAssignment[]) => DeviceRoleAssignment[],
   ) => {
     await onSaveDeviceRoleAssignments(updater(deviceRoleAssignments));
   };
 
-  const addManualBinding = async () => {
-    const physicalControlId = Number(selectedPhysicalControlId);
-    if (!selectedDeviceId || !selectedLogicalControlId || !Number.isInteger(physicalControlId)) {
+  const addManualBinding = async (
+    logicalControlId: string,
+    deviceId: string,
+    physicalControlIdValue: string,
+  ) => {
+    const physicalControlId = Number(physicalControlIdValue);
+    if (!deviceId || !Number.isInteger(physicalControlId)) {
       return;
     }
 
     await updateAssignments((assignments) =>
       assignments.map((assignment) => {
-        if (assignment.deviceId !== selectedDeviceId || assignment.roleId !== selectedRoleId) {
+        if (assignment.deviceId !== deviceId || assignment.roleId !== selectedRoleId) {
           return assignment;
         }
         if (
           assignment.bindings.some(
             (binding) =>
               binding.physicalControlId === physicalControlId &&
-              binding.logicalControlId === selectedLogicalControlId,
+              binding.logicalControlId === logicalControlId,
           )
         ) {
           return assignment;
@@ -166,7 +115,7 @@ export function MappingSettings({
           ...assignment,
           bindings: [
             ...assignment.bindings,
-            { physicalControlId, logicalControlId: selectedLogicalControlId },
+            { physicalControlId, logicalControlId },
           ],
         };
       }),
@@ -196,16 +145,40 @@ export function MappingSettings({
     );
   };
 
-  const startLearn = async () => {
-    if (!selectedLogicalControlId || learnSession.active) {
+  const triggerRoleAction = async (logicalControlId: string, eventKind: EventKind) => {
+    const actionKey = `${logicalControlId}:${eventKind}`;
+    setTriggeringRoleAction(actionKey);
+    setRoleActionNotice(null);
+    try {
+      const actionCount = await onTriggerRoleInput({
+        roleId: selectedRoleId,
+        logicalControlId,
+        eventKind,
+      });
+      setRoleActionNotice({
+        controlId: logicalControlId,
+        message: `${eventLabels[eventKind]}を実行しました（${actionCount} action）。`,
+      });
+    } catch (error) {
+      setRoleActionNotice({
+        controlId: logicalControlId,
+        message: `Role操作に失敗しました: ${String(error)}`,
+      });
+    } finally {
+      setTriggeringRoleAction(null);
+    }
+  };
+
+  const startLearn = async (logicalControlId: string, targetDeviceId: string) => {
+    if (learnSession.active) {
       return;
     }
     await onStartLearn({
       roleId: selectedRoleId,
-      logicalControlId: selectedLogicalControlId,
-      targetDeviceId: learnDeviceId || null,
-      expectedEventKind: learnExpectedEventKind || null,
-      mode: learnMode,
+      logicalControlId,
+      targetDeviceId: targetDeviceId || null,
+      expectedEventKind: null,
+      mode: "append",
       timeoutMs: 10_000,
     });
   };
@@ -300,20 +273,9 @@ export function MappingSettings({
                     </div>
                   </div>
                   <p className="mt-4 rounded-md border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-                    Adapterは現在の航空機を自動判定します。未知の航空機の定義は「Adapter設定」タブで作成してください。
+                    この画面は物理Control IDとRoleのLogical Controlだけを結線します。ゲームやAdapterの設定は「Adapter設定」タブで管理します。
                   </p>
                 </section>
-
-                <RoleIoMapping
-                  roleId={selectedRoleId}
-                  roleControls={roleControls}
-                  aircraftName={aircraftName}
-                  adapterCatalog={adapterCatalog}
-                  adapterMappings={adapterMappings}
-                  busyAction={busyAction}
-                  onSaveAdapterMappings={onSaveAdapterMappings}
-                  onTriggerRoleInput={onTriggerRoleInput}
-                />
 
                 <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
                   <div className="flex items-center justify-between gap-4">
@@ -326,64 +288,6 @@ export function MappingSettings({
                     <div className="rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
                       {roleAssignments.reduce((count, assignment) => count + assignment.bindings.length, 0)} binding(s)
                     </div>
-                  </div>
-
-                  <div className="mt-5 grid gap-4 rounded-lg border border-blue-100 bg-blue-50/50 p-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_120px]">
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Device</span>
-                      <select
-                        value={selectedDeviceId}
-                        onChange={(event) => setSelectedDeviceId(event.target.value)}
-                        disabled={roleAssignments.length === 0}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
-                      >
-                        <option value="">デバイスを選択</option>
-                        {roleAssignments.map((assignment) => (
-                          <option key={assignment.deviceId} value={assignment.deviceId}>
-                            {devices.find((device) => device.deviceId === assignment.deviceId)?.displayName ?? assignment.deviceId}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Logical Control</span>
-                      <select
-                        value={selectedLogicalControlId}
-                        onChange={(event) => setSelectedLogicalControlId(event.target.value)}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
-                      >
-                        {roleControls.map((control) => (
-                          <option key={control.logicalControlId} value={control.logicalControlId}>
-                            {control.label} ({control.logicalControlId})
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Physical Control</span>
-                      <select
-                        value={selectedPhysicalControlId}
-                        onChange={(event) => setSelectedPhysicalControlId(event.target.value)}
-                        disabled={selectedPhysicalControls.length === 0}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
-                      >
-                        <option value="">物理コントロールを選択</option>
-                        {selectedPhysicalControls.map((control) => (
-                          <option key={control.physicalControlId} value={control.physicalControlId}>
-                            {control.label} ({control.description})
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => void addManualBinding()}
-                      disabled={busyAction !== null || !selectedDeviceId || selectedPhysicalControls.length === 0}
-                      className="inline-flex h-10 items-center justify-center gap-2 self-end rounded-md bg-blue-600 px-4 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <Plus size={16} />
-                      追加
-                    </button>
                   </div>
 
                   {roleAssignments.length === 0 ? (
@@ -399,6 +303,28 @@ export function MappingSettings({
                             .filter((binding) => binding.logicalControlId === control.logicalControlId)
                             .map((binding) => ({ assignment, device, binding }));
                         });
+                        const draft = bindingDrafts[control.logicalControlId];
+                        const draftDeviceId = roleAssignments.some(
+                          (assignment) => assignment.deviceId === draft?.deviceId,
+                        )
+                          ? draft.deviceId
+                          : roleAssignments[0]?.deviceId ?? "";
+                        const draftDevice = devices.find((device) => device.deviceId === draftDeviceId) ?? null;
+                        const draftPhysicalControls = getPhysicalControlCatalog(
+                          draftDevice?.deviceKindId ?? null,
+                          draftDevice?.controls ?? null,
+                        );
+                        const draftPhysicalControlId = draftPhysicalControls.some(
+                          (physical) => String(physical.physicalControlId) === draft?.physicalControlId,
+                        )
+                          ? draft.physicalControlId
+                          : draftPhysicalControls[0]
+                            ? String(draftPhysicalControls[0].physicalControlId)
+                            : "";
+                        const learningThisControl =
+                          learnSession.active &&
+                          learnSession.roleId === selectedRoleId &&
+                          learnSession.logicalControlId === control.logicalControlId;
                         return (
                           <div key={control.logicalControlId} className="rounded-lg border border-gray-200 bg-gray-50 p-4">
                             <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
@@ -414,6 +340,88 @@ export function MappingSettings({
                                 </span>
                               )}
                             </div>
+                            <div className="mt-3 grid gap-2 rounded-md border border-gray-200 bg-white p-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
+                              <label className="space-y-1 text-xs text-gray-600">
+                                <span>Device</span>
+                                <select
+                                  value={draftDeviceId}
+                                  onChange={(event) => {
+                                    const nextDeviceId = event.target.value;
+                                    const nextDevice = devices.find((device) => device.deviceId === nextDeviceId);
+                                    const firstPhysical = getPhysicalControlCatalog(
+                                      nextDevice?.deviceKindId ?? null,
+                                      nextDevice?.controls ?? null,
+                                    )[0];
+                                    setBindingDrafts((current) => ({
+                                      ...current,
+                                      [control.logicalControlId]: {
+                                        deviceId: nextDeviceId,
+                                        physicalControlId: firstPhysical ? String(firstPhysical.physicalControlId) : "",
+                                      },
+                                    }));
+                                  }}
+                                  className="w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-xs"
+                                >
+                                  {roleAssignments.map((assignment) => (
+                                    <option key={assignment.deviceId} value={assignment.deviceId}>
+                                      {devices.find((device) => device.deviceId === assignment.deviceId)?.displayName ?? assignment.deviceId}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label className="space-y-1 text-xs text-gray-600">
+                                <span>Physical Control ID</span>
+                                <select
+                                  value={draftPhysicalControlId}
+                                  onChange={(event) => setBindingDrafts((current) => ({
+                                    ...current,
+                                    [control.logicalControlId]: {
+                                      deviceId: draftDeviceId,
+                                      physicalControlId: event.target.value,
+                                    },
+                                  }))}
+                                  disabled={draftPhysicalControls.length === 0}
+                                  className="w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-xs disabled:bg-gray-100"
+                                >
+                                  {draftPhysicalControls.map((physical) => (
+                                    <option key={physical.physicalControlId} value={physical.physicalControlId}>
+                                      {physical.label} · ID {physical.physicalControlId}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => void addManualBinding(
+                                  control.logicalControlId,
+                                  draftDeviceId,
+                                  draftPhysicalControlId,
+                                )}
+                                disabled={busyAction !== null || !draftDeviceId || !draftPhysicalControlId}
+                                className="inline-flex h-9 items-center justify-center gap-1.5 self-end rounded-md bg-blue-600 px-3 text-xs font-medium text-white disabled:opacity-50"
+                              >
+                                <Plus size={14} /> 追加
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => learningThisControl
+                                  ? void onCancelLearn()
+                                  : void startLearn(control.logicalControlId, draftDeviceId)}
+                                disabled={busyAction !== null || (learnSession.active && !learningThisControl)}
+                                className={`inline-flex h-9 items-center justify-center gap-1.5 self-end rounded-md px-3 text-xs font-medium disabled:opacity-50 ${
+                                  learningThisControl
+                                    ? "border border-red-200 bg-red-50 text-red-700"
+                                    : "bg-indigo-600 text-white"
+                                }`}
+                              >
+                                <Radio size={14} /> {learningThisControl ? "学習取消" : "学習"}
+                              </button>
+                            </div>
+                            {learningThisControl && (
+                              <p className="mt-2 text-xs text-indigo-700">
+                                {draftDeviceId ? `${draftDevice?.displayName ?? draftDeviceId} の` : "次の"}物理入力を待っています。
+                              </p>
+                            )}
                             <div className="mt-3 flex flex-wrap gap-2">
                               {bindings.length === 0 ? (
                                 <span className="text-xs text-gray-400">未結線</span>
@@ -437,6 +445,27 @@ export function MappingSettings({
                                 ))
                               )}
                             </div>
+                            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-gray-200 pt-3">
+                              <span className="mr-1 text-xs font-medium text-gray-500">Role操作</span>
+                              {control.supportedEvents.map((supportedEvent) => {
+                                const actionKey = `${control.logicalControlId}:${supportedEvent}`;
+                                return (
+                                  <button
+                                    key={actionKey}
+                                    type="button"
+                                    onClick={() => void triggerRoleAction(control.logicalControlId, supportedEvent)}
+                                    disabled={busyAction !== null || triggeringRoleAction !== null}
+                                    className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-white px-2.5 py-1.5 text-xs text-blue-700 transition hover:bg-blue-50 active:scale-95 disabled:opacity-50"
+                                  >
+                                    <Play size={12} />
+                                    {triggeringRoleAction === actionKey ? "実行中…" : eventLabels[supportedEvent]}
+                                  </button>
+                                );
+                              })}
+                              {roleActionNotice?.controlId === control.logicalControlId && (
+                                <span className="text-xs text-gray-600">{roleActionNotice.message}</span>
+                              )}
+                            </div>
                           </div>
                         );
                       })}
@@ -444,99 +473,6 @@ export function MappingSettings({
                   )}
                 </section>
 
-                <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div>
-                      <h3 className="text-xl font-semibold text-gray-900">コントロールを学習</h3>
-                      <p className="mt-1 text-sm text-gray-500">
-                        指定した論理コントロールに対して、次に受信したHCP ControlEventを登録します。学習中のイベントはAdapterへ送信しません。
-                      </p>
-                    </div>
-                    {learnSession.active && (
-                      <button
-                        type="button"
-                        onClick={() => void onCancelLearn()}
-                        disabled={busyAction !== null}
-                        className="rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
-                      >
-                        学習をキャンセル
-                      </button>
-                    )}
-                  </div>
-                  <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_180px_180px_140px]">
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>Logical Control</span>
-                      <select
-                        value={selectedLogicalControlId}
-                        onChange={(event) => setSelectedLogicalControlId(event.target.value)}
-                        disabled={learnSession.active}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
-                      >
-                        {roleControls.map((control) => (
-                          <option key={control.logicalControlId} value={control.logicalControlId}>
-                            {control.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>対象Device（任意）</span>
-                      <select
-                        value={learnDeviceId}
-                        onChange={(event) => setLearnDeviceId(event.target.value)}
-                        disabled={learnSession.active}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
-                      >
-                        <option value="">最初に受信したDevice</option>
-                        {learnDevices.map((device) => (
-                          <option key={device.deviceId} value={device.deviceId}>
-                            {device.displayName} · {device.deviceId}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>イベント種別（任意）</span>
-                      <select
-                        value={learnExpectedEventKind}
-                        onChange={(event) => setLearnExpectedEventKind(event.target.value as EventKind | "")}
-                        disabled={learnSession.active}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
-                      >
-                        <option value="">任意</option>
-                        {(selectedControl?.supportedEvents ?? []).map((event) => (
-                          <option key={event} value={event}>{eventLabels[event]}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="space-y-2 text-sm text-gray-700">
-                      <span>既存結線</span>
-                      <select
-                        value={learnMode}
-                        onChange={(event) => setLearnMode(event.target.value as "append" | "replace")}
-                        disabled={learnSession.active}
-                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500 disabled:bg-gray-100"
-                      >
-                        <option value="append">追加</option>
-                        <option value="replace">上書き</option>
-                      </select>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => void startLearn()}
-                      disabled={busyAction !== null || learnSession.active || !selectedLogicalControlId}
-                      className="inline-flex h-10 items-center justify-center gap-2 self-end rounded-md bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      <Radio size={16} />
-                      {learnSession.active ? "入力待ち…" : "学習開始"}
-                    </button>
-                  </div>
-                  {learnSession.active && (
-                    <p className="mt-4 rounded-md border border-indigo-100 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">
-                      {learnSession.targetDeviceId ? `Device ${learnSession.targetDeviceId}` : "最初に受信したDevice"}の入力を待っています。{learnSession.timeoutMs / 1000}秒でタイムアウトします。
-                    </p>
-                  )}
-                </section>
               </>
             )}
           </section>

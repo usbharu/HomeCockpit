@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Play, Save, Trash2 } from "lucide-react";
+import { Save, Trash2 } from "lucide-react";
 
 import { findAdapterProfileForAircraft, normalizeAircraftName } from "@/lib/control-catalog";
 import type {
@@ -14,7 +14,6 @@ import type {
   AdapterOutputMapping,
   EventKind,
   RoleControlDefinition,
-  RoleInputTriggerRequest,
 } from "@/lib/manager-types";
 
 type RoleIoMappingProps = {
@@ -25,7 +24,6 @@ type RoleIoMappingProps = {
   adapterMappings: AdapterMappingConfig[];
   busyAction: string | null;
   onSaveAdapterMappings: (mappings: AdapterMappingConfig[]) => Promise<void>;
-  onTriggerRoleInput: (request: RoleInputTriggerRequest) => Promise<number>;
 };
 
 type RoleIoRowProps = {
@@ -43,7 +41,6 @@ type RoleIoRowProps = {
   onRemoveInput: () => Promise<void>;
   onSaveOutput: (mapping: AdapterOutputMapping) => Promise<void>;
   onRemoveOutput: () => Promise<void>;
-  onTriggerRoleInput: (request: RoleInputTriggerRequest) => Promise<number>;
 };
 
 const eventLabels: Record<EventKind, string> = {
@@ -209,7 +206,6 @@ function RoleIoRow({
   onRemoveInput,
   onSaveOutput,
   onRemoveOutput,
-  onTriggerRoleInput,
 }: RoleIoRowProps) {
   const inputControls = useMemo(
     () => controls.filter((control) => control.inputs.length > 0),
@@ -231,7 +227,6 @@ function RoleIoRow({
   const [outputControlId, setOutputControlId] = useState(initialOutputControlId);
   const [outputId, setOutputId] = useState(outputMapping?.parameters.referenceOutput ?? "");
   const [notice, setNotice] = useState<string | null>(null);
-  const [sendingEvent, setSendingEvent] = useState<EventKind | null>(null);
 
   const inputControl = inputControls.find((control) => control.controlId === inputControlId) ?? null;
   const selectedInput =
@@ -319,23 +314,6 @@ function RoleIoRow({
       },
     });
     setNotice("Output mappingを保存しました。");
-  };
-
-  const triggerRoleAction = async (triggerEventKind: EventKind) => {
-    setSendingEvent(triggerEventKind);
-    setNotice(null);
-    try {
-      const actionCount = await onTriggerRoleInput({
-        roleId,
-        logicalControlId: logicalControl.logicalControlId,
-        eventKind: triggerEventKind,
-      });
-      setNotice(`${eventLabels[triggerEventKind]} をRoleへ入力し、${actionCount}件のAdapter actionを実行しました。`);
-    } catch (error) {
-      setNotice(`Role操作に失敗しました: ${String(error)}`);
-    } finally {
-      setSendingEvent(null);
-    }
   };
 
   const inputOptions = selectedInput?.argumentOptions ?? [];
@@ -450,23 +428,6 @@ function RoleIoRow({
               </button>
             )}
           </div>
-          <div className="mt-3 border-t border-blue-100 pt-3">
-            <p className="mb-1 text-xs font-medium text-blue-950">Role操作</p>
-            <p className="mb-2 text-xs text-blue-700">実機入力と同じRoleイベントをAdapterマッピングへ流します。</p>
-            <div className="flex flex-wrap gap-2">
-              {logicalControl.supportedEvents.map((supportedEvent) => (
-                <button
-                  key={`trigger:${supportedEvent}`}
-                  type="button"
-                  onClick={() => void triggerRoleAction(supportedEvent)}
-                  disabled={busy || sendingEvent !== null}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs text-blue-700 transition active:scale-95 active:bg-blue-100 disabled:opacity-50"
-                >
-                  <Play size={12} /> {sendingEvent === supportedEvent ? "実行中…" : eventLabels[supportedEvent]}
-                </button>
-              ))}
-            </div>
-          </div>
         </section>
 
         <section className="rounded-md border border-emerald-100 bg-emerald-50/40 p-3">
@@ -541,7 +502,6 @@ export function RoleIoMapping({
   adapterMappings,
   busyAction,
   onSaveAdapterMappings,
-  onTriggerRoleInput,
 }: RoleIoMappingProps) {
   const match = useMemo(
     () => findAdapterProfileForAircraft(adapterCatalog, aircraftName),
@@ -691,7 +651,6 @@ export function RoleIoMapping({
                   ),
                 });
               }}
-              onTriggerRoleInput={onTriggerRoleInput}
             />
           );
         })}
