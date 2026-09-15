@@ -3,7 +3,10 @@ use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const DCS_BIOS_DDI_CATALOG: &str = include_str!("../resources/adapters/dcs-bios/f-16c-50-ddi.json");
+const DCS_BIOS_F16_DDI_CATALOG: &str =
+    include_str!("../resources/adapters/dcs-bios/f-16c-50-ddi.json");
+const DCS_BIOS_FA18_DDI_CATALOG: &str =
+    include_str!("../resources/adapters/dcs-bios/fa-18c-hornet-ddi.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -103,29 +106,40 @@ pub struct AdapterOutputDefinition {
 
 impl AdapterCatalog {
     pub fn builtin() -> Self {
-        match parse_external_profile("F-16C_50", "F-16C 50 DDI", DCS_BIOS_DDI_CATALOG) {
-            Ok(mut profile) => {
-                profile.aircraft_names = vec![
-                    "F-16C_50".to_string(),
-                    "F-16C".to_string(),
-                    "F-16C bl.50".to_string(),
-                ];
-                profile.role_bindings = infer_role_bindings("dcs-bios", &profile);
-                Self {
-                    state: AdapterCatalogState::Loaded,
-                    adapters: vec![AdapterDefinition {
-                        adapter_id: "dcs-bios".to_string(),
-                        label: "DCS-BIOS".to_string(),
-                        profiles: vec![profile],
-                    }],
-                    error: None,
+        let builtin_profiles = [
+            ("F-16C_50", "F-16C 50 DDI", DCS_BIOS_F16_DDI_CATALOG),
+            (
+                "FA-18C_hornet",
+                "F/A-18C Hornet DDI",
+                DCS_BIOS_FA18_DDI_CATALOG,
+            ),
+        ];
+        let mut profiles = Vec::with_capacity(builtin_profiles.len());
+
+        for (profile_id, label, contents) in builtin_profiles {
+            let mut profile = match parse_external_profile(profile_id, label, contents) {
+                Ok(profile) => profile,
+                Err(error) => {
+                    return Self {
+                        state: AdapterCatalogState::Error,
+                        adapters: Vec::new(),
+                        error: Some(format!("Failed to load built-in adapter catalog: {error}")),
+                    };
                 }
-            }
-            Err(error) => Self {
-                state: AdapterCatalogState::Error,
-                adapters: Vec::new(),
-                error: Some(format!("Failed to load built-in adapter catalog: {error}")),
-            },
+            };
+            profile.aircraft_names = builtin_aircraft_names(profile_id);
+            profile.role_bindings = infer_role_bindings("dcs-bios", &profile);
+            profiles.push(profile);
+        }
+
+        Self {
+            state: AdapterCatalogState::Loaded,
+            adapters: vec![AdapterDefinition {
+                adapter_id: "dcs-bios".to_string(),
+                label: "DCS-BIOS".to_string(),
+                profiles,
+            }],
+            error: None,
         }
     }
 
@@ -233,7 +247,16 @@ pub fn normalize_aircraft_name(value: &str) -> String {
     value
         .trim()
         .to_ascii_lowercase()
-        .replace(['_', '-', ' '], "")
+        .replace(['_', '-', ' ', '/'], "")
+}
+
+fn builtin_aircraft_names(profile_id: &str) -> Vec<String> {
+    let names = match profile_id {
+        "F-16C_50" => vec!["F-16C_50", "F-16C", "F-16C bl.50"],
+        "FA-18C_hornet" => vec!["FA-18C_hornet", "FA-18C", "F/A-18C"],
+        _ => Vec::new(),
+    };
+    names.into_iter().map(str::to_string).collect()
 }
 
 pub fn infer_role_bindings(adapter_id: &str, profile: &AdapterProfile) -> Vec<AdapterRoleBinding> {
@@ -241,20 +264,28 @@ pub fn infer_role_bindings(adapter_id: &str, profile: &AdapterProfile) -> Vec<Ad
         return Vec::new();
     }
 
-    [("left-ddi", "mfdleft"), ("right-ddi", "mfdright")]
-        .into_iter()
-        .filter_map(|(role_id, normalized_category)| {
-            profile
-                .controls
-                .iter()
-                .map(|control| control.category.as_str())
-                .find(|category| normalize_aircraft_name(category) == normalized_category)
-                .map(|category| AdapterRoleBinding {
-                    role_id: role_id.to_string(),
-                    category: category.to_string(),
-                })
-        })
-        .collect()
+    [
+        ("left-ddi", ["mfdleft", "leftddi"]),
+        ("right-ddi", ["mfdright", "rightddi"]),
+    ]
+    .into_iter()
+    .filter_map(|(role_id, normalized_categories)| {
+        profile
+            .controls
+            .iter()
+            .map(|control| control.category.as_str())
+            .find(|category| {
+                let normalized_category = normalize_aircraft_name(category);
+                normalized_categories
+                    .iter()
+                    .any(|expected| normalized_category == *expected)
+            })
+            .map(|category| AdapterRoleBinding {
+                role_id: role_id.to_string(),
+                category: category.to_string(),
+            })
+    })
+    .collect()
 }
 
 fn parse_profile_controls(
@@ -563,14 +594,16 @@ mod tests {
         assert_eq!(catalog.state, AdapterCatalogState::Loaded);
         assert_eq!(catalog.adapters.len(), 1);
         assert_eq!(catalog.adapters[0].adapter_id, "dcs-bios");
-        assert_eq!(catalog.adapters[0].profiles[0].profile_id, "F-16C_50");
-        assert_eq!(catalog.adapters[0].profiles[0].control_count, 40);
+        assert_eq!(catalog.adapters[0].profiles.len(), 2);
+        let f16_profile = &catalog.adapters[0].profiles[0];
+        assert_eq!(f16_profile.profile_id, "F-16C_50");
+        assert_eq!(f16_profile.control_count, 40);
         assert_eq!(
-            catalog.adapters[0].profiles[0].aircraft_names,
+            f16_profile.aircraft_names,
             ["F-16C_50", "F-16C", "F-16C bl.50"]
         );
         assert_eq!(
-            catalog.adapters[0].profiles[0].role_bindings,
+            f16_profile.role_bindings,
             [
                 AdapterRoleBinding {
                     role_id: "left-ddi".to_string(),
@@ -582,19 +615,16 @@ mod tests {
                 },
             ]
         );
-        assert!(catalog.adapters[0].profiles[0]
+        assert!(f16_profile
             .controls
             .iter()
             .all(|control| matches!(control.category.as_str(), "MFD Left" | "MFD Right")));
-        assert!(catalog.adapters[0].profiles[0]
-            .controls
-            .iter()
-            .all(|control| control
-                .control_id
-                .chars()
-                .last()
-                .is_some_and(|last| last.is_ascii_digit())));
-        let left_controls = catalog.adapters[0].profiles[0]
+        assert!(f16_profile.controls.iter().all(|control| control
+            .control_id
+            .chars()
+            .last()
+            .is_some_and(|last| last.is_ascii_digit())));
+        let left_controls = f16_profile
             .controls
             .iter()
             .filter(|control| control.category == "MFD Left")
@@ -603,6 +633,43 @@ mod tests {
         assert_eq!(left_controls[1].control_id, "MFD_L_2");
         assert_eq!(left_controls[9].control_id, "MFD_L_10");
         assert!(left_controls.iter().all(|control| control
+            .inputs
+            .iter()
+            .any(|input| !input.argument_options.is_empty())));
+
+        let fa18_profile = &catalog.adapters[0].profiles[1];
+        assert_eq!(fa18_profile.profile_id, "FA-18C_hornet");
+        assert_eq!(fa18_profile.control_count, 40);
+        assert_eq!(
+            fa18_profile.aircraft_names,
+            ["FA-18C_hornet", "FA-18C", "F/A-18C"]
+        );
+        assert_eq!(
+            fa18_profile.role_bindings,
+            [
+                AdapterRoleBinding {
+                    role_id: "left-ddi".to_string(),
+                    category: "Left DDI".to_string(),
+                },
+                AdapterRoleBinding {
+                    role_id: "right-ddi".to_string(),
+                    category: "Right DDI".to_string(),
+                },
+            ]
+        );
+        assert!(fa18_profile
+            .controls
+            .iter()
+            .all(|control| matches!(control.category.as_str(), "Left DDI" | "Right DDI")));
+        let fa18_left_controls = fa18_profile
+            .controls
+            .iter()
+            .filter(|control| control.category == "Left DDI")
+            .collect::<Vec<_>>();
+        assert_eq!(fa18_left_controls.len(), 20);
+        assert_eq!(fa18_left_controls[0].control_id, "LEFT_DDI_PB_01");
+        assert_eq!(fa18_left_controls[9].control_id, "LEFT_DDI_PB_10");
+        assert!(fa18_left_controls.iter().all(|control| control
             .inputs
             .iter()
             .any(|input| !input.argument_options.is_empty())));
@@ -618,9 +685,15 @@ mod tests {
                 .map(|profile| profile.profile_id.as_str()),
             Some("F-16C_50")
         );
+        assert_eq!(
+            catalog
+                .find_profile_for_aircraft("dcs-bios", Some(" F/A-18C "))
+                .map(|profile| profile.profile_id.as_str()),
+            Some("FA-18C_hornet")
+        );
         assert!(catalog
             .find_profile_for_aircraft("dcs-bios", Some("F/A-18C"))
-            .is_none());
+            .is_some());
     }
 
     #[test]
@@ -631,5 +704,15 @@ mod tests {
             .expect("MFD output");
 
         assert_eq!(output.address, 17_502);
+
+        let output = catalog
+            .find_output(
+                "dcs-bios",
+                "FA-18C_hornet",
+                "LEFT_DDI_PB_01",
+                "FA_18C_hornet_LEFT_DDI_PB_01",
+            )
+            .expect("FA-18C left DDI output");
+        assert_eq!(output.address, 29_710);
     }
 }
