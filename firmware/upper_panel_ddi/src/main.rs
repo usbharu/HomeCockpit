@@ -31,7 +31,10 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channe
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcState};
 use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
-use hcp::{Capabilities, DeviceKind, Version, decode_data_packet};
+use hcp::{
+    AppPacketKind, CONTROL_ID_REQUEST_DEVICE_HELLO, Capabilities, ControlEvent, ControlValue,
+    DeviceKind, Version, decode_data_packet, decode_set_packet,
+};
 use homecockpit_firmware_base::{
     DeviceDescriptor, DeviceRuntimeState, FEATURE_CONTROL_EVENTS, build_button_control_event,
     build_device_hello_packet, control_id_from_matrix_position, encode_set_frame,
@@ -375,17 +378,28 @@ fn handle_incoming_frame(
     };
 
     if let Some(address) = address {
-        let hello = build_device_hello_packet(DeviceDescriptor {
-            device_id,
-            ..device_descriptor()
-        });
-        match encode_set_frame(address, &hello) {
-            Ok(frame) => {
-                if let Err(e) = sender.try_send(frame) {
-                    warn!("failed queue device hello {:?}", e);
-                }
-            }
-            Err(e) => warn!("failed encode device hello {:?}", e),
+        enqueue_device_hello(sender, address, device_id);
+    }
+
+    let hello_requested = matches!(
+        frame.payload(),
+        imcp::frame::FramePayload::Set(payload)
+            if matches!(
+                decode_set_packet(payload.as_slice()),
+                Ok(AppPacketKind::ControlEvent(ControlEvent {
+                    control_id: CONTROL_ID_REQUEST_DEVICE_HELLO,
+                    event: ControlValue::RequestDeviceHello,
+                    ..
+                }))
+            )
+    );
+    if hello_requested {
+        let address = DEVICE_STATE
+            .try_lock()
+            .ok()
+            .and_then(|state| state.address());
+        if let Some(address) = address {
+            enqueue_device_hello(sender, address, device_id);
         }
     }
 
@@ -402,6 +416,25 @@ fn handle_incoming_frame(
         } else {
             debug!("ignored stale display update seq={}", display_data.seq);
         }
+    }
+}
+
+fn enqueue_device_hello(
+    sender: &embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, Frame, 5>,
+    address: u8,
+    device_id: u64,
+) {
+    let hello = build_device_hello_packet(DeviceDescriptor {
+        device_id,
+        ..device_descriptor()
+    });
+    match encode_set_frame(address, &hello) {
+        Ok(frame) => {
+            if let Err(e) = sender.try_send(frame) {
+                warn!("failed queue device hello {:?}", e);
+            }
+        }
+        Err(e) => warn!("failed encode device hello {:?}", e),
     }
 }
 

@@ -63,14 +63,20 @@ probe-rs run --chip RP2040 --always-print-stacktrace `
 
 ## IMCP 通信の確認
 
-この crate の現在の通信経路は UART です。ファームウェア実行後、既存の IMCP ホストを
-接続して、次の動作を確認します。
+この crate は USB CDC 接続中は USB CDC（Windows では COM ポート）を、USB CDC が
+接続されていない場合は UART を IMCP transport として使用します。どちらも
+115200 baud の IMCP 通信です。ファームウェア実行後、既存の IMCP ホストを接続して、
+次の動作を確認します。
 
 1. デバイスから JOIN が送信される。
 2. アドレス割り当てを受信する。
 3. ACK が返る。
 4. ボタン操作で制御イベントが送信される。
-5. UART 経由の通信が継続する。
+5. USB CDC または UART 経由の通信が継続する。
+
+Manager などのホストから HCP の `RequestDeviceHello` を受信した場合、デバイスは
+現在の IMCP address から `DeviceHello` を再送します。これにより、デバイスが既に
+`Ready` 状態で起動した Manager に接続された場合も再発見できます。
 
 USB CDC 実装の追加や、全 RAM を対象とした stack watermark の導入は、この runner 移行の
 範囲には含めません。
