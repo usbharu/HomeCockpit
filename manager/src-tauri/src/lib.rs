@@ -60,6 +60,8 @@ const IMCP_ROOT_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 const IMCP_CHILD_ENUMERATION_TIMEOUT: Duration = Duration::from_millis(600);
 const IMCP_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const IMCP_ENDPOINT_RECONNECT_DELAY: Duration = Duration::from_millis(500);
+const IMCP_FIRST_DEVICE_ADDRESS: u8 = 0x02;
+const IMCP_LAST_DEVICE_ADDRESS: u8 = 0xFE;
 const SETTINGS_FILE_NAME: &str = "manager-state.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -571,6 +573,78 @@ fn known_runtime_devices_for_endpoint(
             ))
         })
         .collect()
+}
+
+#[derive(Debug)]
+struct RuntimeAddressAllocator {
+    used_addresses: HashSet<u8>,
+    join_addresses: HashMap<u32, u8>,
+}
+
+impl RuntimeAddressAllocator {
+    fn from_known_devices(known_devices: &HashMap<u8, KnownRuntimeDevice>) -> Self {
+        Self {
+            used_addresses: known_devices.keys().copied().collect(),
+            join_addresses: HashMap::new(),
+        }
+    }
+
+    fn allocate_for_join(&mut self, join_id: u32) -> Result<u8, String> {
+        if let Some(&address) = self.join_addresses.get(&join_id) {
+            return Ok(address);
+        }
+
+        let address = (IMCP_FIRST_DEVICE_ADDRESS..=IMCP_LAST_DEVICE_ADDRESS)
+            .find(|address| !self.used_addresses.contains(address))
+            .ok_or_else(|| "IMCP device address pool exhausted.".to_string())?;
+        self.used_addresses.insert(address);
+        self.join_addresses.insert(join_id, address);
+        Ok(address)
+    }
+
+    fn observe_device_hello(&mut self, address: u8) {
+        self.used_addresses.insert(address);
+        self.join_addresses
+            .retain(|_, assigned_address| *assigned_address != address);
+    }
+
+    fn release_address(&mut self, address: u8) {
+        if !self
+            .join_addresses
+            .values()
+            .any(|assigned_address| *assigned_address == address)
+        {
+            self.used_addresses.remove(&address);
+        }
+    }
+}
+
+fn reconcile_known_runtime_device(
+    known_devices: &mut HashMap<u8, KnownRuntimeDevice>,
+    allocator: &mut RuntimeAddressAllocator,
+    source_address: u8,
+    probed: &ProbedImcpDevice,
+) {
+    let stale_addresses = known_devices
+        .iter()
+        .filter_map(|(&address, device)| {
+            (address != source_address && device.device_id == probed.device_id).then_some(address)
+        })
+        .collect::<Vec<_>>();
+
+    for address in stale_addresses {
+        known_devices.remove(&address);
+        allocator.release_address(address);
+    }
+
+    allocator.observe_device_hello(source_address);
+    known_devices.insert(
+        source_address,
+        KnownRuntimeDevice {
+            device_id: probed.device_id.clone(),
+            control_count: probed.controls,
+        },
+    );
 }
 
 struct RuntimeState {
@@ -3159,11 +3233,7 @@ fn run_endpoint_listener_session(
     let mut rx_buffer = [0u8; 256];
     let mut frame_buffer = [0u8; 256];
     let mut parser = FrameParser::new(&mut rx_buffer, &mut frame_buffer);
-    let mut join_addresses: HashMap<u32, u8> = HashMap::new();
-    let mut next_address: u8 = 0x02;
-    while known_devices.contains_key(&next_address) && next_address < 0xFE {
-        next_address += 1;
-    }
+    let mut address_allocator = RuntimeAddressAllocator::from_known_devices(known_devices);
     let mut requested_children = HashSet::new();
 
     state.push_log(
@@ -3201,11 +3271,7 @@ fn run_endpoint_listener_session(
 
                     match frame.payload() {
                         FramePayload::Join(join_id) => {
-                            let address = *join_addresses.entry(*join_id).or_insert_with(|| {
-                                let current = next_address;
-                                next_address = next_address.saturating_add(1);
-                                current
-                            });
+                            let address = address_allocator.allocate_for_join(*join_id)?;
                             write_frame(
                                 &mut *port,
                                 &Frame::new(
@@ -3248,12 +3314,11 @@ fn run_endpoint_listener_session(
                                         None,
                                     ),
                                 );
-                                known_devices.insert(
+                                reconcile_known_runtime_device(
+                                    known_devices,
+                                    &mut address_allocator,
                                     source_address,
-                                    KnownRuntimeDevice {
-                                        device_id: probed.device_id.clone(),
-                                        control_count: probed.controls,
-                                    },
+                                    &probed,
                                 );
                                 state.register_display_sender(
                                     probed.device_id.clone(),
@@ -3615,6 +3680,148 @@ mod tests {
         assert_eq!(known.len(), 1);
         assert_eq!(known[&2].device_id, "0123456789ABCDEF");
         assert_eq!(known[&2].control_count, 40);
+    }
+
+    #[test]
+    fn runtime_address_allocator_reuses_pending_join_address() {
+        let known_devices = HashMap::from([
+            (
+                IMCP_FIRST_DEVICE_ADDRESS,
+                KnownRuntimeDevice {
+                    device_id: "device-a".to_string(),
+                    control_count: 20,
+                },
+            ),
+            (
+                IMCP_FIRST_DEVICE_ADDRESS + 2,
+                KnownRuntimeDevice {
+                    device_id: "device-b".to_string(),
+                    control_count: 10,
+                },
+            ),
+        ]);
+        let mut allocator = RuntimeAddressAllocator::from_known_devices(&known_devices);
+
+        assert_eq!(allocator.allocate_for_join(0xCAFE_BABE), Ok(3));
+        assert_eq!(allocator.allocate_for_join(0xCAFE_BABE), Ok(3));
+        assert_eq!(allocator.allocate_for_join(0x1234_ABCD), Ok(5));
+    }
+
+    #[test]
+    fn reconcile_runtime_device_replaces_stale_addresses_and_releases_them() {
+        let mut known_devices = HashMap::from([
+            (
+                2,
+                KnownRuntimeDevice {
+                    device_id: "device-a".to_string(),
+                    control_count: 20,
+                },
+            ),
+            (
+                4,
+                KnownRuntimeDevice {
+                    device_id: "device-b".to_string(),
+                    control_count: 10,
+                },
+            ),
+            (
+                6,
+                KnownRuntimeDevice {
+                    device_id: "device-a".to_string(),
+                    control_count: 20,
+                },
+            ),
+        ]);
+        let mut allocator = RuntimeAddressAllocator::from_known_devices(&known_devices);
+        let probed = ProbedImcpDevice {
+            display_name: "Upper Panel DDI".to_string(),
+            firmware_version: "0.1.0".to_string(),
+            assigned_address: Some(3),
+            device_kind: DeviceKind::UpperPanelDdi,
+            protocol_version: 1,
+            device_id: "device-a".to_string(),
+            displays: 0,
+            controls: 40,
+            features: "control-events".to_string(),
+        };
+
+        assert_eq!(allocator.allocate_for_join(0xCAFE_BABE), Ok(3));
+        reconcile_known_runtime_device(&mut known_devices, &mut allocator, 3, &probed);
+
+        assert_eq!(known_devices.len(), 2);
+        assert!(!known_devices.contains_key(&2));
+        assert!(!known_devices.contains_key(&6));
+        assert_eq!(known_devices[&3].device_id, "device-a");
+        assert_eq!(known_devices[&4].device_id, "device-b");
+        assert!(allocator.join_addresses.is_empty());
+        assert_eq!(allocator.allocate_for_join(0x1234), Ok(2));
+    }
+
+    #[test]
+    fn repeated_runtime_reconnects_do_not_accumulate_addresses() {
+        let mut known_devices = HashMap::from([(
+            2,
+            KnownRuntimeDevice {
+                device_id: "device-a".to_string(),
+                control_count: 20,
+            },
+        )]);
+        let mut allocator = RuntimeAddressAllocator::from_known_devices(&known_devices);
+
+        for join_id in 0..16 {
+            let source_address = allocator
+                .allocate_for_join(join_id)
+                .expect("a free address should be available");
+            let probed = ProbedImcpDevice {
+                display_name: "Upper Panel DDI".to_string(),
+                firmware_version: "0.1.0".to_string(),
+                assigned_address: Some(source_address),
+                device_kind: DeviceKind::UpperPanelDdi,
+                protocol_version: 1,
+                device_id: "device-a".to_string(),
+                displays: 0,
+                controls: 20,
+                features: "control-events".to_string(),
+            };
+
+            reconcile_known_runtime_device(
+                &mut known_devices,
+                &mut allocator,
+                source_address,
+                &probed,
+            );
+
+            assert_eq!(known_devices.len(), 1);
+            assert_eq!(known_devices[&source_address].device_id, "device-a");
+            assert_eq!(
+                allocator.used_addresses,
+                known_devices.keys().copied().collect()
+            );
+            assert!(allocator.join_addresses.is_empty());
+        }
+    }
+
+    #[test]
+    fn runtime_address_allocator_rejects_reserved_addresses_when_exhausted() {
+        let known_devices: HashMap<u8, KnownRuntimeDevice> = (IMCP_FIRST_DEVICE_ADDRESS
+            ..=IMCP_LAST_DEVICE_ADDRESS)
+            .map(|address| {
+                (
+                    address,
+                    KnownRuntimeDevice {
+                        device_id: format!("device-{address}"),
+                        control_count: 1,
+                    },
+                )
+            })
+            .collect();
+        let mut allocator = RuntimeAddressAllocator::from_known_devices(&known_devices);
+
+        assert_eq!(
+            allocator.allocate_for_join(1),
+            Err("IMCP device address pool exhausted.".to_string())
+        );
+        assert!(allocator.join_addresses.is_empty());
     }
 
     #[test]
