@@ -137,6 +137,11 @@ const DeviceSettings = ({
   return (
     <div className="h-full overflow-y-auto p-8">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
+        <datalist id="serial-port-options">
+          {serialPorts.map((port) => (
+            <option key={port} value={port} />
+          ))}
+        </datalist>
         <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
@@ -174,20 +179,15 @@ const DeviceSettings = ({
             </label>
             <label className="flex flex-col gap-2 text-sm text-gray-700">
               <span>COM ポート</span>
-              <select
+              <input
+                list="serial-port-options"
                 value={newEndpoint.address}
                 onChange={(event) =>
                   setNewEndpoint((current) => ({ ...current, address: event.target.value }))
                 }
+                placeholder="/dev/ttys001 または COM3"
                 className="rounded-md border border-gray-300 px-3 py-2 outline-none transition focus:border-blue-500"
-              >
-                <option value="">選択してください</option>
-                {serialPorts.map((port) => (
-                  <option key={port} value={port}>
-                    {port}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
             <label className="flex flex-col gap-2 text-sm text-gray-700">
               <span>Baud Rate</span>
@@ -266,7 +266,8 @@ const DeviceSettings = ({
                     }
                     className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500"
                   />
-                  <select
+                  <input
+                    list="serial-port-options"
                     value={endpoint.address}
                     onChange={(event) =>
                       updateEndpoint(endpoint.id, (current) => ({
@@ -274,15 +275,9 @@ const DeviceSettings = ({
                         address: event.target.value,
                       }))
                     }
+                    placeholder="/dev/ttys001 または COM3"
                     className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500"
-                  >
-                    <option value="">選択してください</option>
-                    {serialPorts.map((port) => (
-                      <option key={port} value={port}>
-                        {port}
-                      </option>
-                    ))}
-                  </select>
+                  />
                   <select
                     value={endpoint.baudRate}
                     onChange={(event) =>

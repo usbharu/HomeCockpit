@@ -61,14 +61,14 @@ const IMCP_CHILD_ENUMERATION_TIMEOUT: Duration = Duration::from_millis(600);
 const IMCP_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SETTINGS_FILE_NAME: &str = "manager-state.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum CommandTransport {
     Udp,
     Tcp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct DcsBiosConnectionConfig {
     export_host: String,
@@ -224,6 +224,14 @@ struct DcsBiosCommandRequest {
     argument: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoleInputTriggerRequest {
+    role_id: String,
+    logical_control_id: String,
+    event_kind: EventKind,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LearnSessionStatus {
@@ -270,6 +278,8 @@ struct PersistedManagerState {
     #[serde(default = "default_schema_version")]
     schema_version: u32,
     #[serde(default)]
+    dcsbios_config: DcsBiosConnectionConfig,
+    #[serde(default)]
     device_endpoints: Vec<DeviceEndpointConfig>,
     #[serde(default)]
     device_role_assignments: Vec<DeviceRoleAssignment>,
@@ -283,6 +293,7 @@ impl Default for PersistedManagerState {
     fn default() -> Self {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: DcsBiosConnectionConfig::default(),
             device_endpoints: Vec::new(),
             device_role_assignments: Vec::new(),
             adapter_mappings: Vec::new(),
@@ -377,6 +388,12 @@ struct DcsBiosMemoryUpdate {
     data: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DcsBiosStreamEvent {
+    FrameBoundary,
+    MemoryUpdate(DcsBiosMemoryUpdate),
+}
+
 #[derive(Debug, Default)]
 struct DcsBiosStreamDecoder {
     buffer: Vec<u8>,
@@ -384,9 +401,9 @@ struct DcsBiosStreamDecoder {
 }
 
 impl DcsBiosStreamDecoder {
-    fn feed(&mut self, bytes: &[u8]) -> Vec<DcsBiosMemoryUpdate> {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<DcsBiosStreamEvent> {
         self.buffer.extend_from_slice(bytes);
-        let mut updates = Vec::new();
+        let mut events = Vec::new();
 
         loop {
             if !self.in_frame {
@@ -412,6 +429,7 @@ impl DcsBiosStreamDecoder {
 
             if self.buffer[..4] == [0x55; 4] {
                 self.buffer.drain(..4);
+                events.push(DcsBiosStreamEvent::FrameBoundary);
                 continue;
             }
 
@@ -431,14 +449,14 @@ impl DcsBiosStreamDecoder {
                 break;
             }
 
-            updates.push(DcsBiosMemoryUpdate {
+            events.push(DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                 address,
                 data: self.buffer[4..total].to_vec(),
-            });
+            }));
             self.buffer.drain(..total);
         }
 
-        updates
+        events
     }
 }
 
@@ -460,20 +478,48 @@ impl InputAdapter for DcsBiosAdapter {
         action: &AdapterActionConfig,
         event: &LogicalInputEvent,
     ) -> Result<(), String> {
-        if action.action_id != "control-command" {
-            return Err(format!(
-                "Unsupported DCS-BIOS action '{}'.",
-                action.action_id
-            ));
-        }
-
-        let identifier = action
-            .parameters
-            .get("identifier")
-            .ok_or_else(|| "DCS-BIOS action is missing identifier parameter.".to_string())?;
-        let argument = resolve_dcsbios_argument(action, event)?;
-        let payload = encode_import_command(identifier, &argument)?;
+        let payload = encode_dcsbios_action_payload(action, event)?;
         send_command_to_dcsbios(config, &payload)
+    }
+}
+
+fn encode_dcsbios_action_payload(
+    action: &AdapterActionConfig,
+    event: &LogicalInputEvent,
+) -> Result<String, String> {
+    let identifier = action
+        .parameters
+        .get("identifier")
+        .ok_or_else(|| "DCS-BIOS action is missing identifier parameter.".to_string())?;
+    match action.action_id.as_str() {
+        "control-command" => {
+            let argument = resolve_dcsbios_argument(action, event)?;
+            encode_import_command(identifier, &argument)
+        }
+        "control-pulse" => {
+            if event.event_kind != EventKind::ButtonPushed {
+                return Err("DCS-BIOS control pulse requires a Button Pushed event.".to_string());
+            }
+            let press_argument = action
+                .parameters
+                .get("argument")
+                .map(String::as_str)
+                .unwrap_or("1");
+            let release_argument = action
+                .parameters
+                .get("releaseArgument")
+                .map(String::as_str)
+                .unwrap_or("0");
+            Ok(format!(
+                "{}{}",
+                encode_import_command(identifier, press_argument)?,
+                encode_import_command(identifier, release_argument)?
+            ))
+        }
+        _ => Err(format!(
+            "Unsupported DCS-BIOS action '{}'.",
+            action.action_id
+        )),
     }
 }
 
@@ -976,6 +1022,7 @@ impl RuntimeState {
         );
         let persisted = PersistedManagerState {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: self.config.lock().unwrap().clone(),
             device_endpoints: self.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: assignments.clone(),
             adapter_mappings: self.adapter_mappings.lock().unwrap().clone(),
@@ -1183,6 +1230,7 @@ impl RuntimeState {
 
             let mut buf = [0_u8; 65535];
             let mut stream_decoder = DcsBiosStreamDecoder::default();
+            let mut aircraft_name_dirty = false;
             let mut last_rate_tick = Instant::now();
             let mut packets_in_window = 0_u32;
 
@@ -1190,16 +1238,35 @@ impl RuntimeState {
                 match socket.recv(&mut buf) {
                     Ok(size) => {
                         packets_in_window = packets_in_window.saturating_add(1);
-                        let updates = stream_decoder.feed(&buf[..size]);
-                        if let Err(error) =
-                            apply_dcsbios_memory_updates(dcsbios_memory.clone(), &updates)
-                        {
-                            state.push_log(&app_for_thread, "WARN", "dcsbios", error);
-                        }
-                        let aircraft_update =
-                            updates.iter().find_map(extract_aircraft_name_from_update);
-                        for update in updates {
-                            state.dispatch_dcsbios_memory_update(&app_for_thread, &update);
+                        let events = stream_decoder.feed(&buf[..size]);
+                        let mut aircraft_update = None;
+                        for event in events {
+                            match event {
+                                DcsBiosStreamEvent::FrameBoundary => {
+                                    if aircraft_name_dirty {
+                                        match extract_aircraft_name_from_memory(&dcsbios_memory) {
+                                            Ok(name) => aircraft_update = Some(name),
+                                            Err(error) => state.push_log(
+                                                &app_for_thread,
+                                                "WARN",
+                                                "dcsbios",
+                                                error,
+                                            ),
+                                        }
+                                        aircraft_name_dirty = false;
+                                    }
+                                }
+                                DcsBiosStreamEvent::MemoryUpdate(update) => {
+                                    aircraft_name_dirty |= update_overlaps_aircraft_name(&update);
+                                    if let Err(error) = apply_dcsbios_memory_updates(
+                                        dcsbios_memory.clone(),
+                                        std::slice::from_ref(&update),
+                                    ) {
+                                        state.push_log(&app_for_thread, "WARN", "dcsbios", error);
+                                    }
+                                    state.dispatch_dcsbios_memory_update(&app_for_thread, &update);
+                                }
+                            }
                         }
                         let now = now_iso8601();
                         let preview = extract_ascii_preview(&buf[..size]);
@@ -1301,6 +1368,17 @@ fn update_dcsbios_config(
     state: State<'_, AppState>,
     config: DcsBiosConnectionConfig,
 ) -> Result<AppSnapshot, String> {
+    persist_manager_state(
+        &app,
+        &PersistedManagerState {
+            schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: config.clone(),
+            device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
+            device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
+            adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
+            adapter_profiles: state.inner.adapter_profiles.lock().unwrap().clone(),
+        },
+    )?;
     *state.inner.config.lock().unwrap() = config.clone();
     state.inner.restart_endpoint_listeners(&app)?;
     state.inner.update_status(&app, |_| {});
@@ -1357,6 +1435,85 @@ fn send_dcsbios_command(
 }
 
 #[tauri::command]
+fn trigger_role_input(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: RoleInputTriggerRequest,
+) -> Result<usize, String> {
+    let event = build_role_input_event(request)?;
+    let mappings = state.inner.active_adapter_mappings();
+    let actions = resolve_adapter_actions(&mappings, &event);
+    if actions.is_empty() {
+        return Err(format!(
+            "No Adapter mapping for Role action '{}:{} {:?}'.",
+            event.role_id, event.logical_control_id, event.event_kind
+        ));
+    }
+
+    let config = state.inner.config.lock().unwrap().clone();
+    let registry = AdapterRegistry::new();
+    for resolved in &actions {
+        let adapter = registry
+            .get(&resolved.adapter_id)
+            .ok_or_else(|| format!("Adapter '{}' is not registered.", resolved.adapter_id))?;
+        adapter.dispatch_input(&config, &resolved.action, &resolved.event)?;
+    }
+    state.inner.push_log(
+        &app,
+        "SUCCESS",
+        "mapping",
+        format!(
+            "Triggered Role action {}:{} {:?} -> {} Adapter action(s).",
+            event.role_id,
+            event.logical_control_id,
+            event.event_kind,
+            actions.len()
+        ),
+    );
+    Ok(actions.len())
+}
+
+fn build_role_input_event(request: RoleInputTriggerRequest) -> Result<LogicalInputEvent, String> {
+    let role = default_role_definitions()
+        .into_iter()
+        .find(|role| role.role_id == request.role_id)
+        .ok_or_else(|| format!("Unknown Role '{}'.", request.role_id))?;
+    let control = role
+        .controls
+        .into_iter()
+        .find(|control| control.logical_control_id == request.logical_control_id)
+        .ok_or_else(|| {
+            format!(
+                "Unknown logical control '{}:{}'.",
+                request.role_id, request.logical_control_id
+            )
+        })?;
+    if !control.supported_events.contains(&request.event_kind) {
+        return Err(format!(
+            "Role action {:?} is not supported by '{}:{}'.",
+            request.event_kind, request.role_id, request.logical_control_id
+        ));
+    }
+
+    let value = match request.event_kind {
+        EventKind::ButtonDown => ControlValue::Button { pressed: true },
+        EventKind::ButtonUp | EventKind::ButtonPushed => ControlValue::Button { pressed: false },
+        EventKind::EncoderDelta => ControlValue::EncoderDelta { steps: 1 },
+        EventKind::AbsoluteChanged => ControlValue::Absolute { value: 0 },
+        EventKind::ToggleOn => ControlValue::Toggle { state: true },
+        EventKind::ToggleOff => ControlValue::Toggle { state: false },
+    };
+    Ok(LogicalInputEvent {
+        device_id: "manager-role-input".to_string(),
+        physical_control_id: u16::MAX,
+        role_id: request.role_id,
+        logical_control_id: request.logical_control_id,
+        event_kind: request.event_kind,
+        value,
+    })
+}
+
+#[tauri::command]
 fn save_device_endpoints(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1367,6 +1524,7 @@ fn save_device_endpoints(
         &app,
         &PersistedManagerState {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: state.inner.config.lock().unwrap().clone(),
             device_endpoints: device_endpoints.clone(),
             device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
             adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
@@ -1421,7 +1579,6 @@ async fn refresh_devices(
             "Refreshed devices from {count_endpoints} configured endpoint(s). {count_devices} device(s) available."
         ),
     );
-    runtime.restart_endpoint_listeners(&app)?;
     Ok(devices)
 }
 
@@ -1436,6 +1593,7 @@ fn save_device_role_assignments(
         &app,
         &PersistedManagerState {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: state.inner.config.lock().unwrap().clone(),
             device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: device_role_assignments.clone(),
             adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
@@ -1463,6 +1621,7 @@ fn save_adapter_mappings(
         &app,
         &PersistedManagerState {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: state.inner.config.lock().unwrap().clone(),
             device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
             adapter_mappings: adapter_mappings.clone(),
@@ -1541,6 +1700,7 @@ fn save_adapter_profile(
         &app,
         &PersistedManagerState {
             schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: state.inner.config.lock().unwrap().clone(),
             device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
             device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
             adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
@@ -1677,6 +1837,33 @@ fn enumerate_serial_endpoint(
     Ok(devices)
 }
 
+fn open_serial_endpoint(
+    endpoint: &DeviceEndpointConfig,
+) -> serialport::Result<Box<dyn serialport::SerialPort>> {
+    serialport::new(&endpoint.address, serial_endpoint_open_baud_rate(endpoint))
+        .timeout(IMCP_READ_TIMEOUT)
+        .open()
+}
+
+fn serial_endpoint_open_baud_rate(endpoint: &DeviceEndpointConfig) -> u32 {
+    #[cfg(target_os = "macos")]
+    if is_macos_pty_path(&endpoint.address) {
+        // serialport uses IOSSIOSPEED for every non-zero baud rate on macOS.
+        // That ioctl is unsupported by PTYs and fails with ENOTTY. A zero baud
+        // rate is the crate's documented way to leave a PTY's speed unchanged.
+        return 0;
+    }
+
+    endpoint.baud_rate
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_pty_path(path: &str) -> bool {
+    path.strip_prefix("/dev/ttys").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
 struct EndpointProbe {
     port: Box<dyn serialport::SerialPort>,
     root: ProbedImcpDevice,
@@ -1696,9 +1883,7 @@ struct ProbedImcpDevice {
 }
 
 fn probe_endpoint_root_device(endpoint: &DeviceEndpointConfig) -> Result<EndpointProbe, String> {
-    let mut port = serialport::new(&endpoint.address, endpoint.baud_rate)
-        .timeout(IMCP_READ_TIMEOUT)
-        .open()
+    let mut port = open_serial_endpoint(endpoint)
         .map_err(|error| format!("Failed to open {}: {error}", endpoint.address))?;
 
     let _ = port.clear(serialport::ClearBuffer::All);
@@ -2094,6 +2279,7 @@ fn migrate_legacy_state(legacy: LegacyPersistedManagerState) -> PersistedManager
 
     normalize_persisted_state(PersistedManagerState {
         schema_version: STATE_SCHEMA_VERSION,
+        dcsbios_config: DcsBiosConnectionConfig::default(),
         device_endpoints: legacy.device_endpoints,
         device_role_assignments: assignments,
         adapter_mappings: if dcsbios_mappings.is_empty() {
@@ -2341,62 +2527,87 @@ fn build_profile_adapter_mapping(
     adapter_id: &str,
     profile: &AdapterProfile,
 ) -> AdapterMappingConfig {
-    let mappings = profile
-        .role_bindings
-        .iter()
-        .flat_map(|binding| {
-            profile
-                .controls
-                .iter()
-                .filter(move |control| control.category == binding.category)
-                .filter_map(|control| {
-                    let input = control
-                        .inputs
+    let mut mappings = Vec::new();
+    for binding in &profile.role_bindings {
+        for (index, control) in profile
+            .controls
+            .iter()
+            .filter(|control| control.category == binding.category)
+            .enumerate()
+        {
+            let momentary_input = control.inputs.iter().find(|input| {
+                input.interface == "set_state"
+                    && input.max_value == Some(1)
+                    && input
+                        .argument_options
                         .iter()
-                        .find(|input| {
-                            input.interface == "action" && !input.argument_options.is_empty()
-                        })
-                        .or_else(|| {
-                            control
-                                .inputs
-                                .iter()
-                                .find(|input| !input.argument_options.is_empty())
-                        })?;
-                    let argument = input.argument_options.first()?.value.clone();
-                    Some((control, input, argument))
-                })
-                .enumerate()
-                .map(move |(index, (control, input, argument))| {
-                    let logical_control_id = format!("button-{index}");
-                    let mut parameters = HashMap::new();
-                    parameters.insert("identifier".to_string(), control.control_id.clone());
-                    parameters.insert("argument".to_string(), argument);
-                    parameters.insert("argumentMode".to_string(), "fixed".to_string());
-                    parameters.insert("referenceAdapter".to_string(), adapter_id.to_string());
-                    parameters.insert("referenceProfile".to_string(), profile.profile_id.clone());
-                    parameters.insert("referenceCategory".to_string(), control.category.clone());
-                    parameters.insert("referenceControl".to_string(), control.control_id.clone());
-                    parameters.insert("referenceInput".to_string(), input.input_id.clone());
-                    parameters.insert("referenceInterface".to_string(), input.interface.clone());
-                    if let Some(max_value) = input.max_value {
-                        parameters.insert("maxValue".to_string(), max_value.to_string());
-                    }
-                    if let Some(suggested_step) = input.suggested_step {
-                        parameters.insert("suggestedStep".to_string(), suggested_step.to_string());
-                    }
+                        .any(|option| option.value == "0")
+                    && input
+                        .argument_options
+                        .iter()
+                        .any(|option| option.value == "1")
+            });
+            let input = momentary_input.or_else(|| {
+                control
+                    .inputs
+                    .iter()
+                    .find(|input| input.interface == "action" && !input.argument_options.is_empty())
+                    .or_else(|| {
+                        control
+                            .inputs
+                            .iter()
+                            .find(|input| !input.argument_options.is_empty())
+                    })
+            });
+            let Some(input) = input else {
+                continue;
+            };
+            let logical_control_id = format!("button-{index}");
+            let event_arguments: Vec<(EventKind, &str, String)> = if momentary_input.is_some() {
+                vec![(EventKind::ButtonPushed, "control-pulse", "1".to_string())]
+            } else if let Some(argument) = input.argument_options.first() {
+                vec![(
+                    EventKind::ButtonPushed,
+                    "control-command",
+                    argument.value.clone(),
+                )]
+            } else {
+                continue;
+            };
 
-                    AdapterControlMapping {
-                        role_id: binding.role_id.clone(),
-                        logical_control_id,
-                        event_kind: EventKind::ButtonPushed,
-                        action: AdapterActionConfig {
-                            action_id: "control-command".to_string(),
-                            parameters,
-                        },
-                    }
-                })
-        })
-        .collect();
+            for (event_kind, action_id, argument) in event_arguments {
+                let mut parameters = HashMap::new();
+                parameters.insert("identifier".to_string(), control.control_id.clone());
+                parameters.insert("argument".to_string(), argument);
+                parameters.insert("argumentMode".to_string(), "fixed".to_string());
+                parameters.insert("referenceAdapter".to_string(), adapter_id.to_string());
+                parameters.insert("referenceProfile".to_string(), profile.profile_id.clone());
+                parameters.insert("referenceCategory".to_string(), control.category.clone());
+                parameters.insert("referenceControl".to_string(), control.control_id.clone());
+                parameters.insert("referenceInput".to_string(), input.input_id.clone());
+                parameters.insert("referenceInterface".to_string(), input.interface.clone());
+                if let Some(max_value) = input.max_value {
+                    parameters.insert("maxValue".to_string(), max_value.to_string());
+                }
+                if let Some(suggested_step) = input.suggested_step {
+                    parameters.insert("suggestedStep".to_string(), suggested_step.to_string());
+                }
+                if action_id == "control-pulse" {
+                    parameters.insert("releaseArgument".to_string(), "0".to_string());
+                }
+
+                mappings.push(AdapterControlMapping {
+                    role_id: binding.role_id.clone(),
+                    logical_control_id: logical_control_id.clone(),
+                    event_kind,
+                    action: AdapterActionConfig {
+                        action_id: action_id.to_string(),
+                        parameters,
+                    },
+                });
+            }
+        }
+    }
 
     AdapterMappingConfig {
         adapter_id: adapter_id.to_string(),
@@ -2781,15 +2992,12 @@ fn run_endpoint_listener(
     display_receiver: Receiver<DisplayCommand>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let mut port = serialport::new(&endpoint.address, endpoint.baud_rate)
-        .timeout(IMCP_READ_TIMEOUT)
-        .open()
-        .map_err(|error| {
-            format!(
-                "Failed to open endpoint listener {}: {error}",
-                endpoint.address
-            )
-        })?;
+    let mut port = open_serial_endpoint(&endpoint).map_err(|error| {
+        format!(
+            "Failed to open endpoint listener {}: {error}",
+            endpoint.address
+        )
+    })?;
     let _ = port.clear(serialport::ClearBuffer::All);
 
     let mut serial_buffer = [0u8; 64];
@@ -3027,23 +3235,35 @@ fn extract_ascii_preview(buf: &[u8]) -> Option<String> {
     segments.into_iter().max_by_key(|segment| segment.len())
 }
 
-fn extract_aircraft_name_from_update(update: &DcsBiosMemoryUpdate) -> Option<Option<String>> {
-    if update.address != DCS_BIOS_AIRCRAFT_NAME_ADDRESS {
-        return None;
-    }
+fn update_overlaps_aircraft_name(update: &DcsBiosMemoryUpdate) -> bool {
+    let update_start = usize::from(update.address);
+    let update_end = update_start.saturating_add(update.data.len());
+    let aircraft_start = usize::from(DCS_BIOS_AIRCRAFT_NAME_ADDRESS);
+    let aircraft_end = aircraft_start + DCS_BIOS_AIRCRAFT_NAME_LENGTH;
+    update_start < aircraft_end && update_end > aircraft_start
+}
 
-    let bytes = update
-        .data
+fn extract_aircraft_name_from_memory(
+    memory_map: &Arc<Mutex<VecMemoryMap>>,
+) -> Result<Option<String>, String> {
+    let memory_map = memory_map
+        .lock()
+        .map_err(|_| "DCS-BIOS memory map lock is poisoned.".to_string())?;
+    let end_address = DCS_BIOS_AIRCRAFT_NAME_ADDRESS
+        .saturating_add(DCS_BIOS_AIRCRAFT_NAME_LENGTH as u16)
+        .saturating_sub(1);
+    let bytes = memory_map
+        .read(DCS_BIOS_AIRCRAFT_NAME_ADDRESS..=end_address)
+        .ok_or_else(|| "DCS-BIOS aircraft name is incomplete.".to_string())?
         .iter()
-        .take(DCS_BIOS_AIRCRAFT_NAME_LENGTH)
         .copied()
         .take_while(|byte| *byte != 0)
         .collect::<Vec<_>>();
     let name = String::from_utf8_lossy(&bytes).trim().to_string();
     if name.is_empty() || name.eq_ignore_ascii_case("NONE") {
-        Some(None)
+        Ok(None)
     } else {
-        Some(Some(name))
+        Ok(Some(name))
     }
 }
 
@@ -3062,6 +3282,7 @@ pub fn run() {
 
             match load_manager_state(&app_handle) {
                 Ok(manager_state) => {
+                    *state.config.lock().unwrap() = manager_state.dcsbios_config.clone();
                     state.set_device_endpoints(&app_handle, manager_state.device_endpoints.clone());
                     state.set_device_role_assignments(
                         &app_handle,
@@ -3081,8 +3302,7 @@ pub fn run() {
                                 }
                             }
                         });
-                    }
-                    if let Err(error) = state.restart_endpoint_listeners(&app_handle) {
+                    } else if let Err(error) = state.restart_endpoint_listeners(&app_handle) {
                         state.push_log(&app_handle, "WARN", "devices", error);
                     }
                 }
@@ -3101,6 +3321,7 @@ pub fn run() {
             start_dcsbios,
             stop_dcsbios,
             send_dcsbios_command,
+            trigger_role_input,
             save_device_endpoints,
             save_device_role_assignments,
             save_adapter_mappings,
@@ -3174,6 +3395,48 @@ mod tests {
         }]);
 
         assert_eq!(endpoints[0].baud_rate, DEFAULT_DEVICE_ENDPOINT_BAUD_RATE);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pty_endpoint_opens_without_applying_serial_baud_ioctl() {
+        let (_master, slave) = serialport::TTYPort::pair().expect("PTY pair");
+        let path = serialport::SerialPort::name(&slave).expect("PTY slave path");
+        drop(slave);
+        let endpoint = DeviceEndpointConfig {
+            id: "mock-ddi".to_string(),
+            name: "Mock DDI".to_string(),
+            transport: DeviceEndpointTransport::Serial,
+            address: path.clone(),
+            enabled: true,
+            baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
+            role_hint: EndpointRoleHint::DirectDevice,
+        };
+
+        assert!(is_macos_pty_path(&path));
+        assert_eq!(serial_endpoint_open_baud_rate(&endpoint), 0);
+        let reopened = open_serial_endpoint(&endpoint).expect("open PTY endpoint");
+        assert_eq!(reopened.name().as_deref(), Some(path.as_str()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_physical_serial_endpoint_keeps_configured_baud_rate() {
+        let endpoint = DeviceEndpointConfig {
+            id: "physical".to_string(),
+            name: "Physical device".to_string(),
+            transport: DeviceEndpointTransport::Serial,
+            address: "/dev/cu.usbmodem1234".to_string(),
+            enabled: true,
+            baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
+            role_hint: EndpointRoleHint::Auto,
+        };
+
+        assert!(!is_macos_pty_path(&endpoint.address));
+        assert_eq!(
+            serial_endpoint_open_baud_rate(&endpoint),
+            DEFAULT_DEVICE_ENDPOINT_BAUD_RATE
+        );
     }
 
     #[test]
@@ -3419,6 +3682,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn current_state_preserves_remote_dcsbios_command_destination() {
+        let (state, migrated) = normalize_manager_state_json(
+            r#"{
+                "schemaVersion": 2,
+                "dcsbiosConfig": {
+                    "exportHost": "239.255.50.10",
+                    "exportPort": 5010,
+                    "commandHost": "192.168.1.97",
+                    "commandPort": 7778,
+                    "commandTransport": "udp"
+                },
+                "deviceEndpoints": [],
+                "deviceRoleAssignments": [],
+                "adapterMappings": [],
+                "adapterProfiles": []
+            }"#,
+        )
+        .expect("current state");
+
+        assert!(!migrated);
+        assert_eq!(state.dcsbios_config.command_host, "192.168.1.97");
+        assert_eq!(state.dcsbios_config.command_port, 7778);
+        assert!(matches!(
+            state.dcsbios_config.command_transport,
+            CommandTransport::Udp
+        ));
+    }
+
     struct FakeAdapter {
         calls: Arc<Mutex<Vec<String>>>,
     }
@@ -3575,7 +3867,14 @@ mod tests {
         let memory = Arc::new(Mutex::new(VecMemoryMap::default()));
         let packet = vec![0x55, 0x55, 0x55, 0x55, 0x00, 0x10, 0x02, 0x00, 0x34, 0x12];
         let mut decoder = DcsBiosStreamDecoder::default();
-        let updates = decoder.feed(&packet);
+        let updates = decoder
+            .feed(&packet)
+            .into_iter()
+            .filter_map(|event| match event {
+                DcsBiosStreamEvent::MemoryUpdate(update) => Some(update),
+                DcsBiosStreamEvent::FrameBoundary => None,
+            })
+            .collect::<Vec<_>>();
 
         apply_dcsbios_memory_updates(memory.clone(), &updates).expect("packet must decode");
 
@@ -3585,28 +3884,45 @@ mod tests {
     }
 
     #[test]
-    fn aircraft_name_is_read_only_from_the_dcsbios_aircraft_memory_update() {
-        assert_eq!(
-            extract_aircraft_name_from_update(&DcsBiosMemoryUpdate {
+    fn aircraft_name_is_reassembled_from_split_memory_updates() {
+        let memory = Arc::new(Mutex::new(VecMemoryMap::default()));
+        let fa18_updates = [
+            DcsBiosMemoryUpdate {
                 address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS,
-                data: b"F-16C_50\0padding".to_vec(),
-            }),
-            Some(Some("F-16C_50".to_string()))
-        );
+                data: b"FA-18C_h".to_vec(),
+            },
+            DcsBiosMemoryUpdate {
+                address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS + 8,
+                data: b"ornet\0\0\0\0\0\0\0\0\0\0\0".to_vec(),
+            },
+        ];
+        assert!(fa18_updates.iter().all(update_overlaps_aircraft_name));
+        apply_dcsbios_memory_updates(memory.clone(), &fa18_updates).expect("FA-18 update");
         assert_eq!(
-            extract_aircraft_name_from_update(&DcsBiosMemoryUpdate {
+            extract_aircraft_name_from_memory(&memory).expect("aircraft name"),
+            Some("FA-18C_hornet".to_string())
+        );
+
+        let f16_updates = [
+            DcsBiosMemoryUpdate {
                 address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS,
-                data: b"NONE\0".to_vec(),
-            }),
-            Some(None)
-        );
+                data: b"F-16".to_vec(),
+            },
+            DcsBiosMemoryUpdate {
+                address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS + 4,
+                data: b"C_50\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec(),
+            },
+        ];
+        apply_dcsbios_memory_updates(memory.clone(), &f16_updates).expect("F-16 update");
         assert_eq!(
-            extract_aircraft_name_from_update(&DcsBiosMemoryUpdate {
-                address: 0x0010,
-                data: b"F-16C_50\0".to_vec(),
-            }),
-            None
+            extract_aircraft_name_from_memory(&memory).expect("aircraft name"),
+            Some("F-16C_50".to_string())
         );
+
+        assert!(!update_overlaps_aircraft_name(&DcsBiosMemoryUpdate {
+            address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS + DCS_BIOS_AIRCRAFT_NAME_LENGTH as u16,
+            data: vec![0],
+        }));
     }
 
     #[test]
@@ -3639,6 +3955,75 @@ mod tests {
                 .map(String::as_str),
             Some("MFD_R_1")
         );
+        assert_eq!(mapping.mappings[0].event_kind, EventKind::ButtonPushed);
+        assert_eq!(mapping.mappings[0].action.action_id, "control-pulse");
+        assert_eq!(
+            mapping.mappings[0]
+                .action
+                .parameters
+                .get("argument")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            mapping.mappings[0]
+                .action
+                .parameters
+                .get("releaseArgument")
+                .map(String::as_str),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn button_pushed_pulse_encodes_press_and_release_commands() {
+        let action = AdapterActionConfig {
+            action_id: "control-pulse".to_string(),
+            parameters: HashMap::from([
+                ("identifier".to_string(), "LEFT_DDI_PB_01".to_string()),
+                ("argument".to_string(), "1".to_string()),
+                ("releaseArgument".to_string(), "0".to_string()),
+            ]),
+        };
+        let event = LogicalInputEvent {
+            device_id: "device-a".to_string(),
+            physical_control_id: 0,
+            role_id: "left-ddi".to_string(),
+            logical_control_id: "button-0".to_string(),
+            event_kind: EventKind::ButtonPushed,
+            value: ControlValue::Button { pressed: false },
+        };
+
+        assert_eq!(
+            encode_dcsbios_action_payload(&action, &event).expect("pulse payload"),
+            "LEFT_DDI_PB_01 1\nLEFT_DDI_PB_01 0\n"
+        );
+    }
+
+    #[test]
+    fn manual_role_button_pushed_uses_the_role_event_path() {
+        let event = build_role_input_event(RoleInputTriggerRequest {
+            role_id: "left-ddi".to_string(),
+            logical_control_id: "button-0".to_string(),
+            event_kind: EventKind::ButtonPushed,
+        })
+        .expect("built-in Role action");
+
+        assert_eq!(event.device_id, "manager-role-input");
+        assert_eq!(event.event_kind, EventKind::ButtonPushed);
+        assert_eq!(event.value, ControlValue::Button { pressed: false });
+    }
+
+    #[test]
+    fn manual_role_input_rejects_an_unsupported_action() {
+        let error = build_role_input_event(RoleInputTriggerRequest {
+            role_id: "left-ddi".to_string(),
+            logical_control_id: "button-0".to_string(),
+            event_kind: EventKind::EncoderDelta,
+        })
+        .expect_err("DDI pushbutton does not support encoder actions");
+
+        assert!(error.contains("is not supported"));
     }
 
     #[test]
@@ -3682,10 +4067,10 @@ mod tests {
 
         assert_eq!(
             decoder.feed(&packet),
-            vec![DcsBiosMemoryUpdate {
+            vec![DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                 address: 0x2000,
                 data: vec![0x7F],
-            }]
+            })]
         );
     }
 
@@ -3697,10 +4082,10 @@ mod tests {
         assert!(decoder.feed(&packet[..7]).is_empty());
         assert_eq!(
             decoder.feed(&packet[7..]),
-            vec![DcsBiosMemoryUpdate {
+            vec![DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                 address: 0x1000,
                 data: vec![0x34, 0x12],
-            }]
+            })]
         );
     }
 
@@ -3715,18 +4100,19 @@ mod tests {
         assert_eq!(
             decoder.feed(&bytes),
             vec![
-                DcsBiosMemoryUpdate {
+                DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                     address: 0x1000,
                     data: vec![0xAA],
-                },
-                DcsBiosMemoryUpdate {
+                }),
+                DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                     address: 0x1010,
                     data: vec![0xBB],
-                },
-                DcsBiosMemoryUpdate {
+                }),
+                DcsBiosStreamEvent::FrameBoundary,
+                DcsBiosStreamEvent::MemoryUpdate(DcsBiosMemoryUpdate {
                     address: 0x1020,
                     data: vec![0xCC],
-                },
+                }),
             ]
         );
     }

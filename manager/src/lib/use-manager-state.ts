@@ -20,6 +20,7 @@ import {
   type LearnSessionStatus,
   type ManagerLogEntry,
   type ManagedDeviceSummary,
+  type RoleInputTriggerRequest,
 } from "@/lib/manager-types";
 
 export function useManagerState() {
@@ -40,7 +41,7 @@ export function useManagerState() {
   const mergeLog = useCallback((entry: ManagerLogEntry) => {
     setSnapshot((current) => ({
       ...current,
-      logs: [entry, ...current.logs].slice(0, 250),
+      logs: [entry, ...current.logs.filter((log) => log.id !== entry.id)].slice(0, 250),
     }));
   }, []);
 
@@ -322,6 +323,25 @@ export function useManagerState() {
         );
       } catch (error) {
         setRuntimeError(String(error));
+        throw error;
+      }
+    },
+    [runAction],
+  );
+
+  const triggerRoleInput = useCallback(
+    async (request: RoleInputTriggerRequest) => {
+      if (!isTauri()) {
+        return 0;
+      }
+
+      try {
+        return await runAction("trigger-role-input", () =>
+          invoke<number>("trigger_role_input", { request }),
+        );
+      } catch (error) {
+        setRuntimeError(String(error));
+        throw error;
       }
     },
     [runAction],
@@ -419,6 +439,7 @@ export function useManagerState() {
     cancelLearn,
     refreshSerialPorts,
     sendCommand,
+    triggerRoleInput,
     refreshSnapshot,
   };
 }

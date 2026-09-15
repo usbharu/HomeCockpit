@@ -229,6 +229,12 @@ export type DcsBiosCommandRequest = {
   argument?: string | null;
 };
 
+export type RoleInputTriggerRequest = {
+  roleId: string;
+  logicalControlId: string;
+  eventKind: EventKind;
+};
+
 export type LearnRequest = {
   roleId: string;
   logicalControlId: string;
@@ -242,7 +248,11 @@ export function defaultRoleDefinitions(): RoleDefinition[] {
   return ["left-ddi", "right-ddi"].map((roleId) => ({
     roleId,
     version: 1,
-    controls: [],
+    controls: Array.from({ length: 20 }, (_, index) => ({
+      logicalControlId: `button-${index}`,
+      label: `Button ${index + 1}`,
+      supportedEvents: ["button-down", "button-up", "button-pushed"],
+    })),
   }));
 }
 

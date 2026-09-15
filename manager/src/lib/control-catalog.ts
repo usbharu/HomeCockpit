@@ -77,12 +77,16 @@ export function getImplementedRoleControls(
   roleDefinition: RoleDefinition | null,
   controlCount: number,
 ): RoleDefinition["controls"] {
-  if (!roleDefinition || controlCount <= 0) {
+  if (!roleDefinition) {
     return [];
   }
 
   if (roleDefinition.controls.length > 0) {
-    return roleDefinition.controls.slice(0, controlCount);
+    return roleDefinition.controls;
+  }
+
+  if (controlCount <= 0) {
+    return [];
   }
 
   return Array.from({ length: controlCount }, (_, index) => ({
@@ -99,7 +103,7 @@ export function getRoleDefinitions(
 }
 
 export function normalizeAircraftName(value: string): string {
-  return value.trim().toLowerCase().replace(/[_\-\s]/g, "");
+  return value.trim().toLowerCase().replace(/[_\-/\s]/g, "");
 }
 
 export function findAdapterProfileForAircraft(
