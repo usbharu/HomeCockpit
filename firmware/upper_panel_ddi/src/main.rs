@@ -53,6 +53,9 @@ const USB_VENDOR_ID: u16 = 0xc0de;
 const USB_PRODUCT_ID: u16 = 0xcafe;
 const CONTROL_MATRIX_COLUMNS: u8 = 5;
 const CONTROL_MATRIX_ROWS: u8 = 8;
+// A RequestDeviceHello frame produces an ACK and a DeviceHello response.
+const FRAME_CHANNEL_CAPACITY: usize = 7;
+const RESERVED_PROTOCOL_FRAME_SLOTS: usize = 2;
 #[cfg(feature = "rp2040")]
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 
@@ -60,7 +63,8 @@ static RESULT: Mutex<CriticalSectionRawMutex, [[Level; 5]; 8]> = Mutex::new([[Le
 static DEVICE_STATE: Mutex<CriticalSectionRawMutex, DeviceRuntimeState> =
     Mutex::new(DeviceRuntimeState::new());
 
-static FRAME_CHANNEL: Channel<CriticalSectionRawMutex, Frame, 5> = Channel::new();
+static FRAME_CHANNEL: Channel<CriticalSectionRawMutex, Frame, FRAME_CHANNEL_CAPACITY> =
+    Channel::new();
 
 static RX_BUFFER_CELL: StaticCell<[u8; 128]> = StaticCell::new();
 static PARSER_FRAME_BUFFER_CELL: StaticCell<[u8; 64]> = StaticCell::new();
@@ -244,8 +248,8 @@ async fn imcp_task(
     mut imcp: Imcp<
         'static,
         'static,
-        EmbassyReceiver<'static, CriticalSectionRawMutex, 5>,
-        EmbassySender<'static, CriticalSectionRawMutex, 5>,
+        EmbassyReceiver<'static, CriticalSectionRawMutex, FRAME_CHANNEL_CAPACITY>,
+        EmbassySender<'static, CriticalSectionRawMutex, FRAME_CHANNEL_CAPACITY>,
     >,
     mut imcp_transport: ImcpTransport,
     device_identity: DeviceIdentity,
@@ -319,11 +323,21 @@ async fn reset_device_runtime_state() {
 }
 
 fn enqueue_control_event(
-    sender: &embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, Frame, 5>,
+    sender: &embassy_sync::channel::Sender<
+        'static,
+        CriticalSectionRawMutex,
+        Frame,
+        FRAME_CHANNEL_CAPACITY,
+    >,
     row: u8,
     column: u8,
     pressed: bool,
 ) {
+    if sender.free_capacity() <= RESERVED_PROTOCOL_FRAME_SLOTS {
+        warn!("frame queue is at reserved capacity; dropping control event");
+        return;
+    }
+
     let frame = if let Ok(mut state) = DEVICE_STATE.try_lock() {
         let Some(address) = state.address() else {
             return;
@@ -367,7 +381,12 @@ fn device_descriptor() -> DeviceDescriptor {
 }
 
 fn handle_incoming_frame(
-    sender: &embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, Frame, 5>,
+    sender: &embassy_sync::channel::Sender<
+        'static,
+        CriticalSectionRawMutex,
+        Frame,
+        FRAME_CHANNEL_CAPACITY,
+    >,
     frame: &Frame,
     device_id: u64,
 ) {
@@ -420,7 +439,12 @@ fn handle_incoming_frame(
 }
 
 fn enqueue_device_hello(
-    sender: &embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, Frame, 5>,
+    sender: &embassy_sync::channel::Sender<
+        'static,
+        CriticalSectionRawMutex,
+        Frame,
+        FRAME_CHANNEL_CAPACITY,
+    >,
     address: u8,
     device_id: u64,
 ) {
