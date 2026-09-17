@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 imcp = { path = "../" }
-embassy-sync = { version = "0.7.2" }
+embassy-sync = { version = "0.8.0" }
 
 [dev-dependencies]
-embassy-sync = { version = "0.7.2", features = ["std"] }
-embassy-executor = { version = "0.9.1", features = ["arch-std"] }
+embassy-sync = { version = "0.8.0", features = ["std"] }
+embassy-executor = { version = "0.10.0", features = ["platform-std"] }
 critical-section = { version = "1.2", features = ["std"] }
 imcp = {path = "../",features = ["test-utils"]}
 futures = "0.3.31"
