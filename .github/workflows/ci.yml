@@ -587,7 +587,7 @@ jobs:
       - name: Upload KiCad reports
         if: always()
         id: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}-reports
           path: ${{ runner.temp }}/kicad/${{ matrix.name }}.*
@@ -627,7 +627,7 @@ jobs:
       - name: Download KiCad reports
         if: always()
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: '*-reports'
           path: ${{ runner.temp }}/kicad-reports
