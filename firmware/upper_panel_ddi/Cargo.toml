@@ -64,7 +64,7 @@ imcp-embedded = { path = "../../imcp/imcp-embedded",features = ["defmt", "embass
 imcp-embassy = { path = "../../imcp/imcp-embassy" }
 imcp = { path = "../../imcp",features = ["defmt"] }
 
-embedded-io-async = "0.6.1"
+embedded-io-async = "0.7.0"
 hcp = { path = "../hcp", features = ["defmt"] }
 homecockpit_firmware_base = { path = "../homecockpit_firmware_base", features = ["defmt"] }
 
