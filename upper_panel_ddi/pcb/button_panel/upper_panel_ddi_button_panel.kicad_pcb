@@ -149,6 +149,7 @@
 		(sheetname "/")
 		(sheetfile "upper_panel_ddi_button_panel.kicad_sch")
 		(attr through_hole)
+		(duplicate_pad_numbers_are_jumpers yes)
 		(fp_line
 			(start 12.36 -3.61)
 			(end 12.36 -1.1)
@@ -396,6 +397,7 @@
 		(sheetname "/")
 		(sheetfile "upper_panel_ddi_button_panel.kicad_sch")
 		(attr through_hole)
+		(duplicate_pad_numbers_are_jumpers yes)
 		(fp_line
 			(start 12.36 -3.61)
 			(end 12.36 -1.1)
@@ -838,6 +840,7 @@
 		(sheetname "/")
 		(sheetfile "upper_panel_ddi_button_panel.kicad_sch")
 		(attr through_hole)
+		(duplicate_pad_numbers_are_jumpers yes)
 		(fp_line
 			(start 12.36 -3.61)
 			(end 12.36 -1.1)
@@ -1475,6 +1478,7 @@
 		(sheetname "/")
 		(sheetfile "upper_panel_ddi_button_panel.kicad_sch")
 		(attr through_hole)
+		(duplicate_pad_numbers_are_jumpers yes)
 		(fp_line
 			(start 12.36 -3.61)
 			(end 12.36 -1.1)
@@ -2112,6 +2116,7 @@
 		(sheetname "/")
 		(sheetfile "upper_panel_ddi_button_panel.kicad_sch")
 		(attr through_hole)
+		(duplicate_pad_numbers_are_jumpers yes)
 		(fp_line
 			(start 12.36 -3.61)
 			(end 12.36 -1.1)
