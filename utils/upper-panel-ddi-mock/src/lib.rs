@@ -27,6 +27,9 @@ pub mod pty;
 
 pub const CONTROL_COUNT: u16 = 40;
 const CONTROL_COUNT_USIZE: usize = 40;
+// A RequestDeviceHello frame produces an ACK and a DeviceHello response.
+const FRAME_QUEUE_CAPACITY: usize = 7;
+const RESERVED_PROTOCOL_FRAME_SLOTS: usize = 2;
 pub const DEFAULT_DEVICE_ID: u64 = 0xDD10_0000_0000_0001;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +101,7 @@ fn parse_control_id(value: Option<&str>) -> Result<u16, CommandParseError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrameChannelError {
     Empty,
+    Full,
     Poisoned,
 }
 
@@ -130,11 +134,39 @@ impl FrameSender {
     }
 
     fn enqueue(&self, frame: Frame) -> Result<(), FrameChannelError> {
-        self.frames
+        let mut frames = self
+            .frames
             .lock()
-            .map_err(|_| FrameChannelError::Poisoned)?
-            .push_back(frame);
+            .map_err(|_| FrameChannelError::Poisoned)?;
+        if frames.len() >= FRAME_QUEUE_CAPACITY {
+            return Err(FrameChannelError::Full);
+        }
+        frames.push_back(frame);
         Ok(())
+    }
+
+    fn enqueue_control(&self, frame: Frame) -> Result<(), FrameChannelError> {
+        let mut frames = self
+            .frames
+            .lock()
+            .map_err(|_| FrameChannelError::Poisoned)?;
+        if frames.len() + RESERVED_PROTOCOL_FRAME_SLOTS >= FRAME_QUEUE_CAPACITY {
+            return Err(FrameChannelError::Full);
+        }
+        frames.push_back(frame);
+        Ok(())
+    }
+
+    fn has_control_capacity(&self, frame_count: usize) -> Result<bool, FrameChannelError> {
+        let frames = self
+            .frames
+            .lock()
+            .map_err(|_| FrameChannelError::Poisoned)?;
+        Ok(frames
+            .len()
+            .saturating_add(frame_count)
+            .saturating_add(RESERVED_PROTOCOL_FRAME_SLOTS)
+            <= FRAME_QUEUE_CAPACITY)
     }
 }
 
@@ -276,6 +308,13 @@ impl<'a> MockDevice<'a> {
         if self.buttons[usize::from(control_id)] {
             return Err(MockError::AlreadyPressed(control_id));
         }
+        if !self
+            .injector
+            .has_control_capacity(2)
+            .map_err(|_| MockError::ChannelUnavailable)?
+        {
+            return Err(MockError::ChannelUnavailable);
+        }
         self.enqueue_button_event(control_id, true)?;
         self.enqueue_button_event(control_id, false)?;
         self.buttons[usize::from(control_id)] = false;
@@ -309,12 +348,19 @@ impl<'a> MockDevice<'a> {
 
     fn enqueue_button_event(&mut self, control_id: u16, pressed: bool) -> Result<(), MockError> {
         let address = self.address().ok_or(MockError::NotReady)?;
+        if !self
+            .injector
+            .has_control_capacity(1)
+            .map_err(|_| MockError::ChannelUnavailable)?
+        {
+            return Err(MockError::ChannelUnavailable);
+        }
         let packet = build_button_control_event(&mut self.runtime, control_id, pressed)
             .map_err(|error| MockError::Protocol(format!("{error:?}")))?;
         let frame = encode_set_frame(address, &packet)
             .map_err(|error| MockError::Protocol(format!("{error:?}")))?;
         self.injector
-            .enqueue(frame)
+            .enqueue_control(frame)
             .map_err(|_| MockError::ChannelUnavailable)
     }
 
@@ -611,5 +657,83 @@ mod tests {
         );
         let hello = decode_frame(&device.next_wire_frame().unwrap().unwrap());
         assert!(matches!(hello.payload(), FramePayload::Set(_)));
+    }
+
+    #[test]
+    fn protocol_responses_fit_when_normal_event_queue_is_full() {
+        let mut device = device();
+        assign_address(&mut device, 0x02);
+        let _assignment_ack = device.next_wire_frame().unwrap().unwrap();
+        let _hello = device.next_wire_frame().unwrap().unwrap();
+        let hello_ack = Frame::new(Address::Unicast(0x02), 0x01, FramePayload::Ack(0x01));
+        device
+            .receive_bytes(&encode_frame(&hello_ack).unwrap())
+            .unwrap();
+
+        for control_id in 0..5 {
+            assert!(device.press(control_id).is_ok());
+        }
+        assert_eq!(
+            device.press(5),
+            Err(MockError::ChannelUnavailable),
+            "normal events must leave two protocol slots available"
+        );
+
+        let request = encode_set_packet(&AppPacketKind::ControlEvent(ControlEvent {
+            seq: 4,
+            control_id: hcp::CONTROL_ID_REQUEST_DEVICE_HELLO,
+            event: ControlValue::RequestDeviceHello,
+        }))
+        .unwrap();
+        let request = Frame::new(Address::Broadcast, 0x01, FramePayload::Set(request));
+        assert_eq!(
+            device
+                .receive_bytes(&encode_frame(&request).unwrap())
+                .unwrap(),
+            vec![DeviceNotice::DeviceHelloRequested]
+        );
+
+        for expected_seq in 0u16..5 {
+            let event = decode_frame(&device.next_wire_frame().unwrap().unwrap());
+            let FramePayload::Set(payload) = event.payload() else {
+                panic!("expected button event Set");
+            };
+            assert!(matches!(
+                decode_set_packet(payload.as_slice()),
+                Ok(AppPacketKind::ControlEvent(event)) if event.seq == expected_seq
+            ));
+            let event_ack = Frame::new(Address::Unicast(0x02), 0x01, FramePayload::Ack(0x01));
+            device
+                .receive_bytes(&encode_frame(&event_ack).unwrap())
+                .unwrap();
+        }
+
+        let request_ack = decode_frame(&device.next_wire_frame().unwrap().unwrap());
+        assert_eq!(
+            request_ack,
+            Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ack(0xFF))
+        );
+        let hello = decode_frame(&device.next_wire_frame().unwrap().unwrap());
+        let FramePayload::Set(payload) = hello.payload() else {
+            panic!("expected DeviceHello Set");
+        };
+        assert!(matches!(
+            decode_set_packet(payload.as_slice()),
+            Ok(AppPacketKind::DeviceHello(hello)) if hello.device_id == DEFAULT_DEVICE_ID
+        ));
+
+        let hello_ack = Frame::new(Address::Unicast(0x02), 0x01, FramePayload::Ack(0x01));
+        device
+            .receive_bytes(&encode_frame(&hello_ack).unwrap())
+            .unwrap();
+        assert!(device.press(5).is_ok());
+        let event = decode_frame(&device.next_wire_frame().unwrap().unwrap());
+        let FramePayload::Set(payload) = event.payload() else {
+            panic!("expected button event Set");
+        };
+        assert!(matches!(
+            decode_set_packet(payload.as_slice()),
+            Ok(AppPacketKind::ControlEvent(event)) if event.seq == 5
+        ));
     }
 }
