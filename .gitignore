@@ -1,7 +1,7 @@
 **/target
-*/production/**
-*/fp-info-cache
-*/fp-lib-table
-*/**-backups/*.zip
+**/production/**
+**/fp-info-cache
+**/fp-lib-table
+**/*-backups/*.zip
 
 .pnpm-store
