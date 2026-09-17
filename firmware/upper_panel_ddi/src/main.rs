@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-mod packetization;
 mod transport;
 
 use defmt::{debug, info, warn};
@@ -45,6 +44,10 @@ use imcp_embassy::{EmbassyReceiver, EmbassySender, new};
 use imcp_embedded::{ImcpEmbedded, RpUartCarrierSense};
 use static_cell::StaticCell;
 use transport::{ImcpTransport, ReadEvent, USB_MAX_PACKET_SIZE, WriteEvent};
+use upper_panel_ddi::packetization::{
+    FRAME_CHANNEL_CAPACITY, IMCP_FRAME_BUFFER_SIZE, IMCP_RX_BUFFER_SIZE,
+    RESERVED_PROTOCOL_FRAME_SLOTS, can_enqueue_control_event,
+};
 use {defmt_rtt as _, panic_probe as _};
 
 const BAUD_RATE: u32 = 115200;
@@ -60,10 +63,11 @@ static RESULT: Mutex<CriticalSectionRawMutex, [[Level; 5]; 8]> = Mutex::new([[Le
 static DEVICE_STATE: Mutex<CriticalSectionRawMutex, DeviceRuntimeState> =
     Mutex::new(DeviceRuntimeState::new());
 
-static FRAME_CHANNEL: Channel<CriticalSectionRawMutex, Frame, 5> = Channel::new();
+static FRAME_CHANNEL: Channel<CriticalSectionRawMutex, Frame, FRAME_CHANNEL_CAPACITY> =
+    Channel::new();
 
-static RX_BUFFER_CELL: StaticCell<[u8; 128]> = StaticCell::new();
-static PARSER_FRAME_BUFFER_CELL: StaticCell<[u8; 64]> = StaticCell::new();
+static RX_BUFFER_CELL: StaticCell<[u8; IMCP_RX_BUFFER_SIZE]> = StaticCell::new();
+static PARSER_FRAME_BUFFER_CELL: StaticCell<[u8; IMCP_FRAME_BUFFER_SIZE]> = StaticCell::new();
 static USB_RX_BUFFER_CELL: StaticCell<[u8; USB_MAX_PACKET_SIZE]> = StaticCell::new();
 static USB_CONFIG_DESCRIPTOR_CELL: StaticCell<[u8; 256]> = StaticCell::new();
 static USB_BOS_DESCRIPTOR_CELL: StaticCell<[u8; 256]> = StaticCell::new();
@@ -168,8 +172,8 @@ async fn main(spawner: Spawner) {
     )
     .expect("failed init imcp embedded");
 
-    let rx_buffer = RX_BUFFER_CELL.init([0; 128]);
-    let parser_frame_buffer = PARSER_FRAME_BUFFER_CELL.init([0; 64]);
+    let rx_buffer = RX_BUFFER_CELL.init([0; IMCP_RX_BUFFER_SIZE]);
+    let parser_frame_buffer = PARSER_FRAME_BUFFER_CELL.init([0; IMCP_FRAME_BUFFER_SIZE]);
 
     let sender = FRAME_CHANNEL.sender();
     let sender2 = sender;
@@ -214,6 +218,14 @@ async fn main(spawner: Spawner) {
 
 type UsbDriverType = UsbDriver<'static, USB>;
 type UsbDeviceType = UsbDevice<'static, UsbDriverType>;
+type FrameSender =
+    embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, Frame, FRAME_CHANNEL_CAPACITY>;
+type ImcpClient = Imcp<
+    'static,
+    'static,
+    EmbassyReceiver<'static, CriticalSectionRawMutex, FRAME_CHANNEL_CAPACITY>,
+    EmbassySender<'static, CriticalSectionRawMutex, FRAME_CHANNEL_CAPACITY>,
+>;
 
 #[embassy_executor::task]
 async fn usb_task(mut usb: UsbDeviceType) -> ! {
@@ -241,12 +253,7 @@ async fn scan_matrix(inputs: [Input<'static>; 5], mut outputs: [Output<'static>;
 }
 #[embassy_executor::task]
 async fn imcp_task(
-    mut imcp: Imcp<
-        'static,
-        'static,
-        EmbassyReceiver<'static, CriticalSectionRawMutex, 5>,
-        EmbassySender<'static, CriticalSectionRawMutex, 5>,
-    >,
+    mut imcp: ImcpClient,
     mut imcp_transport: ImcpTransport,
     device_identity: DeviceIdentity,
 ) {
@@ -259,16 +266,21 @@ async fn imcp_task(
         .unwrap_or_else(|e| warn!("client restart error {:?}", e));
 
     loop {
+        if imcp.has_complete_frame() && tx_sender.free_capacity() >= RESERVED_PROTOCOL_FRAME_SLOTS {
+            process_received_frames(&mut imcp, &tx_sender, &[], device_identity.device_id).await;
+            continue;
+        }
+
         match select(imcp_transport.read(&mut read_buffer), imcp.write_tick()).await {
             embassy_futures::select::Either::First(ReadEvent::Data(s)) => {
                 debug!("imcp rx {} bytes: {:?}", s, &read_buffer[..s]);
-                let frame = imcp.read_tick(&read_buffer[..s]).await.unwrap_or_else(|e| {
-                    warn!("failed parse frame {:?}, bytes: {:?}", e, &read_buffer[..s]);
-                    None
-                });
-                if let Some(frame) = frame {
-                    handle_incoming_frame(&tx_sender, &frame, device_identity.device_id);
-                }
+                process_received_frames(
+                    &mut imcp,
+                    &tx_sender,
+                    &read_buffer[..s],
+                    device_identity.device_id,
+                )
+                .await;
             }
             embassy_futures::select::Either::First(ReadEvent::UsbConnected) => {
                 info!("usb cdc connected; switching IMCP transport");
@@ -310,17 +322,48 @@ async fn imcp_task(
     }
 }
 
+async fn process_received_frames(
+    imcp: &mut ImcpClient,
+    sender: &FrameSender,
+    mut new_data: &[u8],
+    device_id: u64,
+) {
+    loop {
+        if sender.free_capacity() < RESERVED_PROTOCOL_FRAME_SLOTS {
+            return;
+        }
+
+        let frame = match imcp.read_tick(new_data).await {
+            Ok(frame) => frame,
+            Err(error) => {
+                warn!("failed parse frame {:?}, bytes: {:?}", error, new_data);
+                return;
+            }
+        };
+        new_data = &[];
+
+        if let Some(frame) = frame {
+            handle_incoming_frame(sender, &frame, device_id);
+        }
+
+        if !imcp.has_complete_frame() {
+            return;
+        }
+    }
+}
+
 async fn reset_device_runtime_state() {
     let mut state = DEVICE_STATE.lock().await;
     *state = DeviceRuntimeState::new();
+    FRAME_CHANNEL.clear();
 }
 
-fn enqueue_control_event(
-    sender: &embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, Frame, 5>,
-    row: u8,
-    column: u8,
-    pressed: bool,
-) {
+fn enqueue_control_event(sender: &FrameSender, row: u8, column: u8, pressed: bool) {
+    if !can_enqueue_control_event(sender.free_capacity()) {
+        warn!("dropping control event to preserve protocol response capacity");
+        return;
+    }
+
     let frame = if let Ok(mut state) = DEVICE_STATE.try_lock() {
         let Some(address) = state.address() else {
             return;
@@ -363,11 +406,7 @@ fn device_descriptor() -> DeviceDescriptor {
     }
 }
 
-fn handle_incoming_frame(
-    sender: &embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, Frame, 5>,
-    frame: &Frame,
-    device_id: u64,
-) {
+fn handle_incoming_frame(sender: &FrameSender, frame: &Frame, device_id: u64) {
     let address = if let Ok(mut state) = DEVICE_STATE.try_lock() {
         try_assign_address_from_frame(&mut state, frame)
     } else {
@@ -416,11 +455,7 @@ fn handle_incoming_frame(
     }
 }
 
-fn enqueue_device_hello(
-    sender: &embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, Frame, 5>,
-    address: u8,
-    device_id: u64,
-) {
+fn enqueue_device_hello(sender: &FrameSender, address: u8, device_id: u64) {
     let hello = build_device_hello_packet(DeviceDescriptor {
         device_id,
         ..device_descriptor()
