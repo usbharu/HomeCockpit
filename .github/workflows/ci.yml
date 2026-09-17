@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  push:
+    branches:
+      - master
   pull_request:
     branches:
       - master
@@ -775,6 +778,7 @@ jobs:
     if: >-
       ${{
         always() &&
+        github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         (needs.kicad-upper.result == 'failure' || needs.kicad-button.result == 'failure')
       }}
