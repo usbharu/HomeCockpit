@@ -6,6 +6,7 @@
 
 - 不具合調査の範囲・必要環境・ユーザー操作: [`docs/debugging-scope.md`](docs/debugging-scope.md)
 - CI と検証コマンド: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+- KiCad の開発環境・移行手順: [`docs/kicad.md`](docs/kicad.md)
 - Firmware のbuild・書き込み・実機検証: [`firmware/AGENTS.md`](firmware/AGENTS.md)
 - IMCP の作業規約: [`imcp/AGENTS.md`](imcp/AGENTS.md)
 - Manager の作業規約: [`manager/AGENTS.md`](manager/AGENTS.md)
