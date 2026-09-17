@@ -548,6 +548,96 @@ struct KnownRuntimeDevice {
     control_count: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingChildDiscovery {
+    join_id: u32,
+    assigned_address: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingHubDiscovery {
+    gateway_id: String,
+    gateway_display_name: String,
+    children: Vec<PendingChildDiscovery>,
+}
+
+impl PendingHubDiscovery {
+    fn new(gateway_id: String, gateway_display_name: String) -> Self {
+        Self {
+            gateway_id,
+            gateway_display_name,
+            children: Vec::new(),
+        }
+    }
+
+    fn record_child(&mut self, join_id: u32, assigned_address: u8) {
+        if let Some(child) = self
+            .children
+            .iter_mut()
+            .find(|child| child.join_id == join_id)
+        {
+            child.assigned_address = assigned_address;
+            return;
+        }
+
+        self.children.push(PendingChildDiscovery {
+            join_id,
+            assigned_address,
+        });
+    }
+}
+
+fn pending_hub_address_for_join(
+    pending: &HashMap<u8, PendingHubDiscovery>,
+    source_address: u8,
+    preferred_hub_address: Option<u8>,
+) -> Option<u8> {
+    if pending.contains_key(&source_address) {
+        return Some(source_address);
+    }
+
+    if let Some(address) = preferred_hub_address.filter(|address| pending.contains_key(address)) {
+        return Some(address);
+    }
+
+    if pending.len() == 1 {
+        return pending.keys().next().copied();
+    }
+
+    None
+}
+
+fn record_pending_child_join(
+    pending: &mut HashMap<u8, PendingHubDiscovery>,
+    source_address: u8,
+    preferred_hub_address: Option<u8>,
+    join_id: u32,
+    assigned_address: u8,
+) -> Option<u8> {
+    let hub_address = pending_hub_address_for_join(pending, source_address, preferred_hub_address)?;
+    let context = pending.get_mut(&hub_address)?;
+    context.record_child(join_id, assigned_address);
+    Some(hub_address)
+}
+
+fn pending_gateway_for_child_address(
+    pending: &HashMap<u8, PendingHubDiscovery>,
+    source_address: u8,
+) -> Option<(String, String)> {
+    pending.values().find_map(|context| {
+        context
+            .children
+            .iter()
+            .any(|child| child.assigned_address == source_address)
+            .then(|| {
+                (
+                    context.gateway_id.clone(),
+                    context.gateway_display_name.clone(),
+                )
+            })
+    })
+}
+
 struct EndpointListenerChannels {
     dispatch_sender: SyncSender<PhysicalControlEvent>,
     display_sender: SyncSender<DisplayCommand>,
@@ -786,13 +876,7 @@ impl RuntimeState {
 
             if let Some(index) = existing_index {
                 if summary.device_id == devices[index].device_id {
-                    let existing = &devices[index];
-                    let mut refreshed = summary;
-                    refreshed.id = existing.id.clone();
-                    refreshed.connection_kind = existing.connection_kind.clone();
-                    refreshed.gateway_id = existing.gateway_id.clone();
-                    refreshed.gateway_display_name = existing.gateway_display_name.clone();
-                    devices[index] = refreshed;
+                    devices[index] = summary;
                 } else {
                     devices[index] = summary;
                 }
@@ -3235,6 +3319,8 @@ fn run_endpoint_listener_session(
     let mut parser = FrameParser::new(&mut rx_buffer, &mut frame_buffer);
     let mut address_allocator = RuntimeAddressAllocator::from_known_devices(known_devices);
     let mut requested_children = HashSet::new();
+    let mut pending_hub_discoveries: HashMap<u8, PendingHubDiscovery> = HashMap::new();
+    let mut preferred_hub_address = None;
 
     state.push_log(
         app,
@@ -3283,6 +3369,13 @@ fn run_endpoint_listener_session(
                                     },
                                 ),
                             )?;
+                            record_pending_child_join(
+                                &mut pending_hub_discoveries,
+                                frame.from_address(),
+                                preferred_hub_address,
+                                *join_id,
+                                address,
+                            );
                         }
                         FramePayload::Set(payload) => {
                             if let Some(probed) = decode_device_hello(
@@ -3300,20 +3393,30 @@ fn run_endpoint_listener_session(
                                 )?;
 
                                 let source_address = frame.from_address();
+                                let pending_gateway = if probed.device_kind == DeviceKind::ImcpHub {
+                                    None
+                                } else {
+                                    pending_gateway_for_child_address(
+                                        &pending_hub_discoveries,
+                                        source_address,
+                                    )
+                                };
                                 let connection_kind = if probed.device_kind == DeviceKind::ImcpHub {
                                     "hub"
+                                } else if pending_gateway.is_some() {
+                                    "hub-child"
                                 } else {
                                     "direct"
                                 };
-                                state.upsert_device_summary(
-                                    app,
-                                    probed_device_to_summary(
-                                        endpoint,
-                                        &probed,
-                                        connection_kind,
-                                        None,
-                                    ),
+                                let summary = probed_device_to_summary(
+                                    endpoint,
+                                    &probed,
+                                    connection_kind,
+                                    pending_gateway.as_ref().map(|(id, display_name)| {
+                                        (id.as_str(), display_name.as_str())
+                                    }),
                                 );
+                                state.upsert_device_summary(app, summary.clone());
                                 reconcile_known_runtime_device(
                                     known_devices,
                                     &mut address_allocator,
@@ -3329,6 +3432,11 @@ fn run_endpoint_listener_session(
                                     && requested_children.insert(source_address)
                                 {
                                     request_child_device_hello(&mut *port, source_address)?;
+                                    pending_hub_discoveries.insert(
+                                        source_address,
+                                        PendingHubDiscovery::new(summary.id, summary.display_name),
+                                    );
+                                    preferred_hub_address = Some(source_address);
                                 }
 
                                 continue;
@@ -3843,6 +3951,112 @@ mod tests {
         ));
     }
 
+    fn test_serial_endpoint() -> DeviceEndpointConfig {
+        DeviceEndpointConfig {
+            id: "serial-hub".to_string(),
+            name: "Upper Hub".to_string(),
+            transport: DeviceEndpointTransport::Serial,
+            address: "COM4".to_string(),
+            enabled: true,
+            baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
+            role_hint: EndpointRoleHint::Auto,
+        }
+    }
+
+    fn test_probed_child(device_id: &str, assigned_address: u8) -> ProbedImcpDevice {
+        ProbedImcpDevice {
+            display_name: "Button Panel".to_string(),
+            firmware_version: "1.0.0".to_string(),
+            assigned_address: Some(assigned_address),
+            device_kind: DeviceKind::ButtonPanel,
+            protocol_version: 1,
+            device_id: device_id.to_string(),
+            displays: 0,
+            controls: 20,
+            features: "control-events".to_string(),
+        }
+    }
+
+    #[test]
+    fn pending_hub_join_correlates_device_hello_with_gateway() {
+        let endpoint = test_serial_endpoint();
+        let gateway_id = "hub:serial-hub:0000000000000001".to_string();
+        let mut pending = HashMap::new();
+        pending.insert(
+            0x02,
+            PendingHubDiscovery::new(gateway_id.clone(), "IMCP Hub".to_string()),
+        );
+
+        assert_eq!(
+            record_pending_child_join(&mut pending, 0x00, Some(0x02), 0xCAFE_BABE, 0x04),
+            Some(0x02)
+        );
+        assert_eq!(
+            pending[&0x02].children,
+            vec![PendingChildDiscovery {
+                join_id: 0xCAFE_BABE,
+                assigned_address: 0x04,
+            }]
+        );
+
+        let gateway = pending_gateway_for_child_address(&pending, 0x04).expect("gateway");
+        let child = test_probed_child("0000000000001234", 0x04);
+        let summary = probed_device_to_summary(
+            &endpoint,
+            &child,
+            "hub-child",
+            Some((gateway.0.as_str(), gateway.1.as_str())),
+        );
+
+        assert_eq!(summary.connection_kind, "hub-child");
+        assert_eq!(summary.gateway_id.as_deref(), Some(gateway_id.as_str()));
+        assert_eq!(
+            summary.id,
+            "hub-child:hub:serial-hub:0000000000000001:0000000000001234"
+        );
+    }
+
+    #[test]
+    fn multiple_pending_hub_joins_share_one_gateway() {
+        let gateway_id = "hub:serial-hub:0000000000000001".to_string();
+        let mut pending = HashMap::new();
+        pending.insert(
+            0x02,
+            PendingHubDiscovery::new(gateway_id.clone(), "IMCP Hub".to_string()),
+        );
+
+        assert_eq!(
+            record_pending_child_join(&mut pending, 0x00, Some(0x02), 0x1111_2222, 0x04),
+            Some(0x02)
+        );
+        assert_eq!(
+            record_pending_child_join(&mut pending, 0x00, Some(0x02), 0x3333_4444, 0x05),
+            Some(0x02)
+        );
+        assert_eq!(pending[&0x02].children.len(), 2);
+
+        for assigned_address in [0x04, 0x05] {
+            let gateway =
+                pending_gateway_for_child_address(&pending, assigned_address).expect("gateway");
+            assert_eq!(gateway.0, gateway_id);
+            assert_eq!(gateway.1, "IMCP Hub");
+        }
+    }
+
+    #[test]
+    fn hello_without_pending_hub_context_stays_direct() {
+        let endpoint = test_serial_endpoint();
+        let pending = HashMap::new();
+        let child = test_probed_child("0000000000001234", 0x04);
+
+        assert!(pending_gateway_for_child_address(&pending, 0x04).is_none());
+        let summary = probed_device_to_summary(&endpoint, &child, "direct", None);
+
+        assert_eq!(summary.connection_kind, "direct");
+        assert_eq!(summary.gateway_id, None);
+        assert_eq!(summary.id, "direct:serial-hub:0000000000001234");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_pty_endpoint_opens_without_applying_serial_baud_ioctl() {
@@ -3916,6 +4130,10 @@ mod tests {
         );
 
         assert_eq!(summary.connection_kind, "hub-child");
+        assert_eq!(
+            summary.id,
+            "hub-child:hub:serial-hub:0000000000000001:0000000000001234"
+        );
         assert_eq!(
             summary.gateway_id.as_deref(),
             Some("hub:serial-hub:0000000000000001")
