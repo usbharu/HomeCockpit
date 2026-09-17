@@ -3,7 +3,7 @@ use defmt::warn;
 use embassy_futures::select::select;
 use embassy_rp::{gpio::Output, peripherals::USB, usb::Driver as UsbDriver};
 use embassy_usb::{
-    class::cdc_acm::{BufferedReceiver, Sender},
+    class::cdc_acm::{BufferedReceiver, CdcAcmError, Sender},
     driver::EndpointError,
 };
 use embedded_io_async::{Read, Write};
@@ -21,7 +21,6 @@ pub enum ReadEvent {
     UsbConnected,
     UsbDisconnected,
     UartError,
-    UsbError,
 }
 
 pub enum WriteEvent {
@@ -88,13 +87,9 @@ impl ImcpTransport {
     async fn read_usb(&mut self, buf: &mut [u8]) -> ReadEvent {
         match self.usb_receiver.read(buf).await {
             Ok(size) => ReadEvent::Data(size),
-            Err(EndpointError::Disabled) => {
+            Err(CdcAcmError::NotConnected) => {
                 self.usb_active = false;
                 ReadEvent::UsbDisconnected
-            }
-            Err(EndpointError::BufferOverflow) => {
-                warn!("usb read buffer overflow");
-                ReadEvent::UsbError
             }
         }
     }
