@@ -115,8 +115,8 @@ jobs:
             echo "firmware_upper=$(changed 'firmware/upper_panel_ddi/*' 'firmware/lib/*' 'firmware/hcp/*' 'firmware/homecockpit_firmware_base/*' 'imcp/*' '.gitmodules')"
             echo "manager_frontend=$(changed 'manager/src/*' 'manager/public/*' 'manager/package.json' 'manager/package-lock.json' 'manager/pnpm-lock.yaml' 'manager/pnpm-workspace.yaml' 'manager/next.config.mjs' 'manager/postcss.config.mjs' 'manager/components.json' 'manager/tsconfig*')"
             echo "manager_backend=$(changed 'manager/src-tauri/*' 'dcs-bios-rs/*' 'firmware/hcp/*' 'imcp/*')"
-            echo "kicad_upper=$(changed 'upper_panel_ddi/*' 'HomeCockpit.kicad_sym' 'Library.pretty/*')"
-            echo "kicad_button=$(changed 'upper_panel_ddi_button_panel/*' 'HomeCockpit.kicad_sym' 'Library.pretty/*')"
+            echo "kicad_upper=$(changed 'upper_panel_ddi/pcb/main_board/*' 'HomeCockpit.kicad_sym' 'Library.pretty/*')"
+            echo "kicad_button=$(changed 'upper_panel_ddi/pcb/button_panel/*' 'HomeCockpit.kicad_sym' 'Library.pretty/*')"
           } >> "$GITHUB_OUTPUT"
 
   imcp-test:
@@ -458,11 +458,11 @@ jobs:
           - name: upper-panel-erc
             tool: sch
             check: erc
-            input: upper_panel_ddi/upper_panel_ddi.kicad_sch
+            input: upper_panel_ddi/pcb/main_board/upper_panel_ddi.kicad_sch
           - name: upper-panel-drc
             tool: pcb
             check: drc
-            input: upper_panel_ddi/upper_panel_ddi.kicad_pcb
+            input: upper_panel_ddi/pcb/main_board/upper_panel_ddi.kicad_pcb
     steps:
       - uses: actions/checkout@v4
       - name: Run KiCad checks
@@ -620,11 +620,11 @@ jobs:
           - name: button-panel-erc
             tool: sch
             check: erc
-            input: upper_panel_ddi_button_panel/upper_panel_ddi_button_panel.kicad_sch
+            input: upper_panel_ddi/pcb/button_panel/upper_panel_ddi_button_panel.kicad_sch
           - name: button-panel-drc
             tool: pcb
             check: drc
-            input: upper_panel_ddi_button_panel/upper_panel_ddi_button_panel.kicad_pcb
+            input: upper_panel_ddi/pcb/button_panel/upper_panel_ddi_button_panel.kicad_pcb
     steps:
       - uses: actions/checkout@v4
       - name: Run KiCad checks
