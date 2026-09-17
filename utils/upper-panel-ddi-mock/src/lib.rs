@@ -722,6 +722,10 @@ mod tests {
             Ok(AppPacketKind::DeviceHello(hello)) if hello.device_id == DEFAULT_DEVICE_ID
         ));
 
+        let hello_ack = Frame::new(Address::Unicast(0x02), 0x01, FramePayload::Ack(0x01));
+        device
+            .receive_bytes(&encode_frame(&hello_ack).unwrap())
+            .unwrap();
         assert!(device.press(5).is_ok());
         let event = decode_frame(&device.next_wire_frame().unwrap().unwrap());
         let FramePayload::Set(payload) = event.payload() else {
