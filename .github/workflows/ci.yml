@@ -481,7 +481,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace:ro" \
             -v "$report_dir:/reports" \
             -w /workspace \
-            ghcr.io/kicad/kicad:9.0.9 \
+            ghcr.io/kicad/kicad:10.0.2 \
             kicad-cli "$TOOL" "$CHECK" \
               --severity-all \
               --output "/reports/${REPORT_NAME}.all.rpt" \
@@ -493,7 +493,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace:ro" \
             -v "$report_dir:/reports" \
             -w /workspace \
-            ghcr.io/kicad/kicad:9.0.9 \
+            ghcr.io/kicad/kicad:10.0.2 \
             kicad-cli "$TOOL" "$CHECK" \
               --format json \
               --severity-error \
@@ -509,7 +509,7 @@ jobs:
               -v "$GITHUB_WORKSPACE:/workspace:ro" \
               -v "$report_dir:/reports" \
               -w /workspace \
-              ghcr.io/kicad/kicad:9.0.9 \
+              ghcr.io/kicad/kicad:10.0.2 \
               kicad-cli pcb export svg \
                 --page-size-mode 1 \
                 --exclude-drawing-sheet \
@@ -542,7 +542,7 @@ jobs:
               -v "$GITHUB_WORKSPACE:/workspace:ro" \
               -v "$report_dir:/reports" \
               -w /workspace \
-              ghcr.io/kicad/kicad:9.0.9 \
+              ghcr.io/kicad/kicad:10.0.2 \
               kicad-cli sch export svg \
                 --exclude-drawing-sheet \
                 --output "/reports/${REPORT_NAME}-schematic" \
