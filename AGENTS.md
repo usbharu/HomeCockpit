@@ -29,7 +29,7 @@
 | DCS-BIOS library | [`dcs-bios-rs/src/lib.rs`](dcs-bios-rs/src/lib.rs)、[`dcs-bios-rs/src/import.rs`](dcs-bios-rs/src/import.rs) |
 | IMCP CLI | [`utils/imcp-cli/src/main.rs`](utils/imcp-cli/src/main.rs) |
 | Manager | [`manager/AGENTS.md`](manager/AGENTS.md) |
-| KiCad hardware | Upper Panel DDIの製品ルート [`upper_panel_ddi/`](upper_panel_ddi/)、基板 [`upper_panel_ddi/pcb/`](upper_panel_ddi/pcb/)、機械部品 [`upper_panel_ddi/mechanical/`](upper_panel_ddi/mechanical/)、共有ライブラリ [`HomeCockpit.kicad_sym`](HomeCockpit.kicad_sym) / [`Library.pretty/`](Library.pretty/) |
+| KiCad hardware | 現行 Upper Panel DDI 基板 [`upper_panel_ddi/pcb/button_panel/`](upper_panel_ddi/pcb/button_panel/)、機械部品 [`upper_panel_ddi/mechanical/`](upper_panel_ddi/mechanical/)、共有ライブラリ [`HomeCockpit.kicad_sym`](HomeCockpit.kicad_sym) / [`Library.pretty/`](Library.pretty/) |
 
 ## 文書化されていない重要事項
 
