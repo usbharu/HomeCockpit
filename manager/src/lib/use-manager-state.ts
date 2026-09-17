@@ -287,6 +287,7 @@ export function useManagerState() {
         replaceSnapshot(next);
       } catch (error) {
         setRuntimeError(String(error));
+        throw error;
       }
     },
     [replaceSnapshot, runAction],
@@ -308,6 +309,7 @@ export function useManagerState() {
       replaceSnapshot(next);
     } catch (error) {
       setRuntimeError(String(error));
+      throw error;
     }
   }, [replaceSnapshot, runAction]);
 
