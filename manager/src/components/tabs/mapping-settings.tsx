@@ -91,6 +91,7 @@ export function MappingSettings({
     () => deviceRoleAssignments.filter((entry) => entry.roleId === selectedRoleId),
     [deviceRoleAssignments, selectedRoleId],
   );
+  const hasRoleAssignments = roleAssignments.length > 0;
   const roleControlCapacity = roleAssignments.reduce((maximum, assignment) => {
     const device = devices.find((entry) => entry.deviceId === assignment.deviceId);
     return Math.max(maximum, device?.controls ?? 0);
@@ -165,7 +166,7 @@ export function MappingSettings({
     physicalControlIdValue: string,
   ) => {
     const physicalControlId = Number(physicalControlIdValue);
-    if (!deviceId || !Number.isInteger(physicalControlId)) {
+    if (!deviceId || !physicalControlIdValue || !Number.isInteger(physicalControlId)) {
       return;
     }
 
@@ -243,6 +244,7 @@ export function MappingSettings({
 
   const startSingleLearn = async (logicalControlId: string, targetDeviceId: string) => {
     if (
+      !targetDeviceId ||
       learnSession.active ||
       (continuousLearn !== null && continuousLearn.phase !== "paused")
     ) {
@@ -818,9 +820,20 @@ export function MappingSettings({
                     </div>
                   </div>
 
-                  {roleAssignments.length === 0 ? (
+                  {!hasRoleAssignments && roleControls.length > 0 && (
+                    <div className="mt-5 rounded-lg border border-dashed border-blue-200 bg-blue-50 p-6 text-sm text-blue-800">
+                      デバイス設定タブで、このRoleに1台以上のデバイスを割り当ててください。論理Controlの一覧は先に確認できます。
+                    </div>
+                  )}
+
+                  {roleControls.length === 0 ? (
                     <div className="mt-5 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
-                      デバイス設定タブで、このRoleに1台以上のデバイスを追加してください。
+                      <p>このRoleには表示可能な論理Controlがありません。</p>
+                      <p className="mt-1">
+                        {hasRoleAssignments
+                          ? "割り当て済みデバイスのControl数が0、または未対応のDevice kindです。"
+                          : "Role定義に論理Controlが定義されていません。"}
+                      </p>
                     </div>
                   ) : (
                     <div className="mt-5 space-y-3">
@@ -888,8 +901,12 @@ export function MappingSettings({
                                       },
                                     }));
                                   }}
+                                  disabled={!hasRoleAssignments || busyAction !== null}
                                   className="w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-xs"
                                 >
+                                  {!hasRoleAssignments && (
+                                    <option value="">デバイスを割り当ててください</option>
+                                  )}
                                   {roleAssignments.map((assignment) => (
                                     <option key={assignment.deviceId} value={assignment.deviceId}>
                                       {devices.find((device) => device.deviceId === assignment.deviceId)?.displayName ?? assignment.deviceId}
@@ -908,9 +925,14 @@ export function MappingSettings({
                                       physicalControlId: event.target.value,
                                     },
                                   }))}
-                                  disabled={draftPhysicalControls.length === 0}
+                                  disabled={!hasRoleAssignments || draftPhysicalControls.length === 0 || busyAction !== null}
                                   className="w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-xs disabled:bg-gray-100"
                                 >
+                                  {draftPhysicalControls.length === 0 && (
+                                    <option value="">
+                                      {hasRoleAssignments ? "物理Control一覧なし" : "デバイス割当後に選択できます"}
+                                    </option>
+                                  )}
                                   {draftPhysicalControls.map((physical) => (
                                     <option key={physical.physicalControlId} value={physical.physicalControlId}>
                                       {physical.label} · ID {physical.physicalControlId}
@@ -925,7 +947,12 @@ export function MappingSettings({
                                   draftDeviceId,
                                   draftPhysicalControlId,
                                 )}
-                                disabled={busyAction !== null || !draftDeviceId || !draftPhysicalControlId}
+                                disabled={
+                                  busyAction !== null ||
+                                  !hasRoleAssignments ||
+                                  !draftDeviceId ||
+                                  !draftPhysicalControlId
+                                }
                                 className="inline-flex h-9 items-center justify-center gap-1.5 self-end rounded-md bg-blue-600 px-3 text-xs font-medium text-white disabled:opacity-50"
                               >
                                 <Plus size={14} /> 追加
@@ -942,7 +969,8 @@ export function MappingSettings({
                                   continuousLearn?.phase === "canceling" ||
                                   (continuousLearn !== null &&
                                     continuousLearn.phase !== "paused" &&
-                                    !learningThisControl)
+                                    !learningThisControl) ||
+                                  (!learningThisControl && (!hasRoleAssignments || !draftDeviceId))
                                 }
                                 className={`inline-flex h-9 items-center justify-center gap-1.5 self-end rounded-md px-3 text-xs font-medium disabled:opacity-50 ${
                                   learningThisControl
@@ -953,6 +981,11 @@ export function MappingSettings({
                                 <Radio size={14} /> {learningThisControl ? "学習取消" : "学習"}
                               </button>
                             </div>
+                            {hasRoleAssignments && draftPhysicalControls.length === 0 && (
+                              <p className="mt-2 text-xs text-amber-700">
+                                このデバイスの物理Control一覧を利用できません。学習で受信イベントを登録できます。
+                              </p>
+                            )}
                             {learningThisControl && (
                               <p className="mt-2 text-xs text-indigo-700">
                                 {draftDeviceId ? `${draftDevice?.displayName ?? draftDeviceId} の` : "次の"}物理入力を待っています。
