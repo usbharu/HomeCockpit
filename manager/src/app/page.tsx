@@ -152,6 +152,7 @@ export default function ManagerTabs() {
                     <Tabs.Content
                         key={tab.id}
                         value={tab.id}
+                        forceMount={tab.id === 'mapping' ? true : undefined}
                         className="h-full focus:outline-none"
                     >
                         {tab.content}
