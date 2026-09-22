@@ -610,8 +610,13 @@ impl QueuedHubDiscovery {
     }
 }
 
-fn expire_pending_hub_discoveries(pending: &mut HashMap<u8, PendingHubDiscovery>, now: Instant) {
+fn expire_pending_hub_discoveries(
+    pending: &mut HashMap<u8, PendingHubDiscovery>,
+    now: Instant,
+) -> bool {
+    let previous_len = pending.len();
     pending.retain(|_, context| context.is_active(now));
+    pending.len() != previous_len
 }
 
 fn pending_hub_address_for_join(
@@ -642,6 +647,7 @@ fn record_pending_child_join(
     let hub_address = pending_hub_address_for_join(pending, source_address, now)?;
     let context = pending.get_mut(&hub_address)?;
     context.record_child(join_id, assigned_address);
+    context.expires_at = now + IMCP_CHILD_ENUMERATION_TIMEOUT;
     Some(hub_address)
 }
 
@@ -668,14 +674,55 @@ fn pending_gateway_for_child_address(
     })
 }
 
+fn gateway_for_device_hello(
+    pending: &HashMap<u8, PendingHubDiscovery>,
+    known_child_gateways: &HashMap<String, (String, String)>,
+    source_address: u8,
+    device_id: &str,
+    now: Instant,
+) -> Option<(String, String)> {
+    pending_gateway_for_child_address(pending, source_address, now)
+        .or_else(|| known_child_gateways.get(device_id).cloned())
+}
+
+fn defer_hub_discovery_during_quiet_period(
+    pending: &HashMap<u8, PendingHubDiscovery>,
+    quiet_until: &mut Option<Instant>,
+    now: Instant,
+) {
+    if pending.is_empty() && quiet_until.is_some() {
+        *quiet_until = Some(now + IMCP_CHILD_ENUMERATION_TIMEOUT);
+    }
+}
+
+fn hub_discovery_can_advance(
+    pending: &mut HashMap<u8, PendingHubDiscovery>,
+    quiet_until: &mut Option<Instant>,
+    now: Instant,
+) -> bool {
+    if expire_pending_hub_discoveries(pending, now) {
+        *quiet_until = Some(now + IMCP_CHILD_ENUMERATION_TIMEOUT);
+        return false;
+    }
+    if !pending.is_empty() {
+        return false;
+    }
+    if quiet_until.is_some_and(|deadline| now < deadline) {
+        return false;
+    }
+
+    *quiet_until = None;
+    true
+}
+
 fn advance_hub_discovery(
     port: &mut dyn serialport::SerialPort,
     pending: &mut HashMap<u8, PendingHubDiscovery>,
     queued: &mut VecDeque<QueuedHubDiscovery>,
+    quiet_until: &mut Option<Instant>,
     now: Instant,
 ) -> Result<(), String> {
-    expire_pending_hub_discoveries(pending, now);
-    if !pending.is_empty() {
+    if !hub_discovery_can_advance(pending, quiet_until, now) {
         return Ok(());
     }
 
@@ -930,11 +977,7 @@ impl RuntimeState {
             });
 
             if let Some(index) = existing_index {
-                if summary.device_id == devices[index].device_id {
-                    devices[index] = summary;
-                } else {
-                    devices[index] = summary;
-                }
+                devices[index] = summary;
             } else {
                 devices.push(summary);
             }
@@ -3376,6 +3419,8 @@ fn run_endpoint_listener_session(
     let mut requested_children = HashSet::new();
     let mut pending_hub_discoveries: HashMap<u8, PendingHubDiscovery> = HashMap::new();
     let mut queued_hub_discoveries: VecDeque<QueuedHubDiscovery> = VecDeque::new();
+    let mut hub_discovery_quiet_until = None;
+    let mut known_child_gateways: HashMap<String, (String, String)> = HashMap::new();
 
     state.push_log(
         app,
@@ -3385,12 +3430,6 @@ fn run_endpoint_listener_session(
     );
 
     while !stop.load(Ordering::Relaxed) {
-        advance_hub_discovery(
-            &mut *port,
-            &mut pending_hub_discoveries,
-            &mut queued_hub_discoveries,
-            Instant::now(),
-        )?;
         drain_display_commands(
             &mut *port,
             &channels.display_receiver,
@@ -3416,12 +3455,19 @@ fn run_endpoint_listener_session(
                         Err(_) => continue,
                     };
 
-                    advance_hub_discovery(
-                        &mut *port,
+                    let frame_received_at = Instant::now();
+                    if expire_pending_hub_discoveries(
                         &mut pending_hub_discoveries,
-                        &mut queued_hub_discoveries,
-                        Instant::now(),
-                    )?;
+                        frame_received_at,
+                    ) {
+                        hub_discovery_quiet_until =
+                            Some(frame_received_at + IMCP_CHILD_ENUMERATION_TIMEOUT);
+                    }
+                    defer_hub_discovery_during_quiet_period(
+                        &pending_hub_discoveries,
+                        &mut hub_discovery_quiet_until,
+                        frame_received_at,
+                    );
 
                     match frame.payload() {
                         FramePayload::Join(join_id) => {
@@ -3467,12 +3513,18 @@ fn run_endpoint_listener_session(
                                 let pending_gateway = if probed.device_kind == DeviceKind::ImcpHub {
                                     None
                                 } else {
-                                    pending_gateway_for_child_address(
+                                    gateway_for_device_hello(
                                         &pending_hub_discoveries,
+                                        &known_child_gateways,
                                         source_address,
+                                        &probed.device_id,
                                         Instant::now(),
                                     )
                                 };
+                                if let Some(gateway) = pending_gateway.as_ref() {
+                                    known_child_gateways
+                                        .insert(probed.device_id.clone(), gateway.clone());
+                                }
                                 let connection_kind = if probed.device_kind == DeviceKind::ImcpHub {
                                     "hub"
                                 } else if pending_gateway.is_some() {
@@ -3512,6 +3564,7 @@ fn run_endpoint_listener_session(
                                         &mut *port,
                                         &mut pending_hub_discoveries,
                                         &mut queued_hub_discoveries,
+                                        &mut hub_discovery_quiet_until,
                                         Instant::now(),
                                     )?;
                                 }
@@ -3574,7 +3627,15 @@ fn run_endpoint_listener_session(
                 }
             }
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                advance_hub_discovery(
+                    &mut *port,
+                    &mut pending_hub_discoveries,
+                    &mut queued_hub_discoveries,
+                    &mut hub_discovery_quiet_until,
+                    Instant::now(),
+                )?;
+            }
             Err(error) => {
                 return Err(format!(
                     "Failed to read endpoint {} for control events: {error}",
@@ -4131,6 +4192,28 @@ mod tests {
     }
 
     #[test]
+    fn child_join_refreshes_pending_hub_deadline() {
+        let now = Instant::now();
+        let mut pending = HashMap::from([(
+            0x02,
+            PendingHubDiscovery::with_expiry(
+                "hub:serial-hub:0000000000000001".to_string(),
+                "IMCP Hub".to_string(),
+                now + Duration::from_millis(1),
+            ),
+        )]);
+
+        assert_eq!(
+            record_pending_child_join(&mut pending, 0x00, 0xCAFE_BABE, 0x04, now),
+            Some(0x02)
+        );
+        assert_eq!(
+            pending[&0x02].expires_at,
+            now + IMCP_CHILD_ENUMERATION_TIMEOUT
+        );
+    }
+
+    #[test]
     fn expired_pending_hub_context_does_not_correlate_later_join() {
         let now = Instant::now();
         let mut pending = HashMap::new();
@@ -4150,8 +4233,43 @@ mod tests {
         );
         assert!(pending[&0x02].children.is_empty());
 
-        expire_pending_hub_discoveries(&mut pending, now);
+        assert!(expire_pending_hub_discoveries(&mut pending, now));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn expired_hub_context_requires_a_quiet_period_before_the_next_hub() {
+        let now = Instant::now();
+        let mut pending = HashMap::from([(
+            0x02,
+            PendingHubDiscovery::with_expiry(
+                "hub:serial-hub:0000000000000001".to_string(),
+                "IMCP Hub 1".to_string(),
+                now - Duration::from_millis(1),
+            ),
+        )]);
+        let mut quiet_until = None;
+
+        assert!(!hub_discovery_can_advance(
+            &mut pending,
+            &mut quiet_until,
+            now
+        ));
+        let first_deadline = quiet_until.expect("quiet deadline");
+
+        let delayed_frame_at = now + Duration::from_millis(100);
+        defer_hub_discovery_during_quiet_period(&pending, &mut quiet_until, delayed_frame_at);
+        assert!(quiet_until.expect("extended deadline") > first_deadline);
+        assert!(!hub_discovery_can_advance(
+            &mut pending,
+            &mut quiet_until,
+            first_deadline
+        ));
+        assert!(hub_discovery_can_advance(
+            &mut pending,
+            &mut quiet_until,
+            delayed_frame_at + IMCP_CHILD_ENUMERATION_TIMEOUT
+        ));
     }
 
     #[test]
@@ -4196,6 +4314,27 @@ mod tests {
         assert_eq!(summary.connection_kind, "direct");
         assert_eq!(summary.gateway_id, None);
         assert_eq!(summary.id, "direct:serial-hub:0000000000001234");
+    }
+
+    #[test]
+    fn child_gateway_memory_is_limited_to_the_listener_session() {
+        let pending = HashMap::new();
+        let now = Instant::now();
+        let device_id = "0000000000001234";
+        let known_in_session = HashMap::from([(
+            device_id.to_string(),
+            (
+                "hub:serial-hub:0000000000000001".to_string(),
+                "IMCP Hub".to_string(),
+            ),
+        )]);
+
+        assert!(
+            gateway_for_device_hello(&pending, &known_in_session, 0x04, device_id, now).is_some()
+        );
+
+        let next_session = HashMap::new();
+        assert!(gateway_for_device_hello(&pending, &next_session, 0x04, device_id, now).is_none());
     }
 
     #[cfg(target_os = "macos")]
