@@ -170,6 +170,7 @@ struct MasterRetryState {
     expected_ack: Option<u8>,
     attempts: u8,
     next_retry_at: Option<Instant>,
+    pending_set: bool,
 }
 
 impl MasterRetryState {
@@ -181,6 +182,7 @@ impl MasterRetryState {
         self.expected_ack = None;
         self.attempts = 0;
         self.next_retry_at = None;
+        self.pending_set = false;
     }
 
     fn observe_ack(&mut self, address: u8) {
@@ -195,8 +197,15 @@ impl MasterRetryState {
                 self.expected_ack = Some(0x00);
                 self.attempts = self.attempts.saturating_add(1);
                 self.next_retry_at = Some(now + MASTER_RETRY_INTERVAL);
+                self.pending_set = false;
             }
-            FramePayload::Join(_) | FramePayload::Set(_) => {
+            FramePayload::Set(_) => {
+                self.expected_ack = Some(frame.to_address().as_byte());
+                self.attempts = self.attempts.saturating_add(1);
+                self.next_retry_at = Some(now + MASTER_RETRY_INTERVAL);
+                self.pending_set = true;
+            }
+            FramePayload::Join(_) => {
                 self.expected_ack = Some(frame.to_address().as_byte());
                 self.next_retry_at = None;
             }
@@ -869,6 +878,26 @@ fn flush_master_tx(
     now: Instant,
     transmit: &mut impl FnMut(&[u8]) -> Result<(), String>,
 ) -> Result<(), String> {
+    // ACK and Pong are responses to received frames. They must not wait for
+    // an unrelated reliable transmission to complete.
+    loop {
+        let response = {
+            let mut frames = queue.borrow_mut();
+            frames
+                .iter()
+                .position(|frame| {
+                    matches!(frame.payload(), FramePayload::Ack(_) | FramePayload::Pong)
+                })
+                .and_then(|index| frames.remove(index))
+        };
+        let Some(response) = response else { break };
+        let mut bytes = [0u8; MAX_ENCODED_FRAME_SIZE];
+        let len = response
+            .encode(&mut bytes)
+            .map_err(|error| format!("failed to encode master response: {error:?}"))?;
+        transmit(&bytes[..len])?;
+    }
+
     if retry_state.expected_ack.is_some() {
         return Ok(());
     }
@@ -906,6 +935,14 @@ fn retry_master_frame(
         transmit(encoded.as_slice())?;
         retry_state.observe_transmit(&frame, now);
         return Ok(false);
+    }
+
+    if retry_state.pending_set {
+        if !imcp.abandon_pending_set() {
+            return Err("failed to expire pending Set: protocol state changed".to_string());
+        }
+        retry_state.clear();
+        return Ok(true);
     }
 
     // Let the core state machine consume its exhausted SetAddress pending
@@ -1222,5 +1259,142 @@ mod tests {
                 .expect("master should expire the retry");
         assert!(can_flush_queue);
         assert!(retry_state.expected_ack.is_none());
+    }
+
+    #[test]
+    fn master_acks_incoming_set_while_outgoing_set_awaits_ack() {
+        let queue = Rc::new(RefCell::new(VecDeque::from([Frame::new(
+            Address::Unicast(0x02),
+            0x01,
+            FramePayload::Set([0x01].into()),
+        )])));
+        let sender = super::FrameQueueSender(Rc::clone(&queue));
+        let receiver = super::FrameQueueReceiver(Rc::clone(&queue));
+        let mut imcp = Imcp::new_master(
+            receiver,
+            sender,
+            Box::leak(Box::new([0u8; 128])),
+            Box::leak(Box::new([0u8; 128])),
+        );
+        let mut wire_parser = FrameParser::new(
+            Box::leak(Box::new([0u8; 128])),
+            Box::leak(Box::new([0u8; 128])),
+        );
+        let mut retry_state = MasterRetryState::default();
+        let transmitted = RefCell::new(Vec::new());
+        let mut transmit = |bytes: &[u8]| {
+            transmitted.borrow_mut().push(bytes.to_vec());
+            Ok(())
+        };
+
+        flush_master_tx(
+            &mut imcp,
+            &queue,
+            &mut retry_state,
+            Instant::now(),
+            &mut transmit,
+        )
+        .expect("outgoing Set should be sent");
+        queue
+            .borrow_mut()
+            .push_back(Frame::new(Address::Unicast(0x02), 0x01, FramePayload::Ping));
+        let incoming = encode(&Frame::new(
+            Address::Unicast(0x01),
+            0x02,
+            FramePayload::Set([0x02].into()),
+        ));
+        process_master_bytes(
+            &mut imcp,
+            &mut wire_parser,
+            &queue,
+            &incoming,
+            OutputFormat::Debug,
+            &mut retry_state,
+            &mut transmit,
+        )
+        .expect("incoming Set should be processed");
+
+        let sent = transmitted.borrow();
+        assert_eq!(sent.len(), 2, "incoming Set must be ACKed immediately");
+        assert_eq!(decode(&sent[1]).payload(), &FramePayload::Ack(0x01));
+        assert_eq!(retry_state.expected_ack, Some(0x02));
+        assert_eq!(queue.borrow().len(), 1, "queued Ping must remain pending");
+        drop(sent);
+
+        let reply_ack = encode(&Frame::new(
+            Address::Unicast(0x01),
+            0x02,
+            FramePayload::Ack(0x02),
+        ));
+        process_master_bytes(
+            &mut imcp,
+            &mut wire_parser,
+            &queue,
+            &reply_ack,
+            OutputFormat::Debug,
+            &mut retry_state,
+            &mut transmit,
+        )
+        .expect("matching ACK should release outgoing Set");
+        assert!(retry_state.expected_ack.is_none());
+        assert_eq!(
+            decode(transmitted.borrow().last().unwrap()).payload(),
+            &FramePayload::Ping
+        );
+    }
+
+    #[test]
+    fn master_expires_unacked_outgoing_set_after_finite_retries() {
+        let queue = Rc::new(RefCell::new(VecDeque::from([
+            Frame::new(
+                Address::Unicast(0x02),
+                0x01,
+                FramePayload::Set([0x01].into()),
+            ),
+            Frame::new(Address::Unicast(0x02), 0x01, FramePayload::Ping),
+        ])));
+        let sender = super::FrameQueueSender(Rc::clone(&queue));
+        let receiver = super::FrameQueueReceiver(Rc::clone(&queue));
+        let mut imcp = Imcp::new_master(
+            receiver,
+            sender,
+            Box::leak(Box::new([0u8; 128])),
+            Box::leak(Box::new([0u8; 128])),
+        );
+        let mut retry_state = MasterRetryState::default();
+        let transmitted = RefCell::new(Vec::new());
+        let mut transmit = |bytes: &[u8]| {
+            transmitted.borrow_mut().push(bytes.to_vec());
+            Ok(())
+        };
+        let now = Instant::now();
+        flush_master_tx(&mut imcp, &queue, &mut retry_state, now, &mut transmit)
+            .expect("outgoing Set should be sent");
+        assert!(
+            retry_state.next_retry_at.is_some(),
+            "Set needs a retry deadline"
+        );
+
+        for _ in 1..super::MASTER_MAX_RETRIES {
+            retry_state.next_retry_at = Some(now);
+            retry_master_frame(&mut imcp, &mut retry_state, now, &mut transmit)
+                .expect("Set should retry within the limit");
+        }
+        retry_state.next_retry_at = Some(now);
+        let can_flush = retry_master_frame(&mut imcp, &mut retry_state, now, &mut transmit)
+            .expect("Set should expire at the retry limit");
+        assert!(can_flush);
+        assert_eq!(
+            transmitted.borrow().len(),
+            usize::from(super::MASTER_MAX_RETRIES)
+        );
+        assert!(retry_state.expected_ack.is_none());
+
+        flush_master_tx(&mut imcp, &queue, &mut retry_state, now, &mut transmit)
+            .expect("next frame should proceed after expiration");
+        assert_eq!(
+            decode(transmitted.borrow().last().unwrap()).payload(),
+            &FramePayload::Ping
+        );
     }
 }
