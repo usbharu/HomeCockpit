@@ -81,8 +81,46 @@ Manager などのホストから HCP の `RequestDeviceHello` を受信した場
 この予約枠を消費しないようにしています。Manager 側も取りこぼしに備え、100ms 間隔で
 最大 4 回（初回を含む）`RequestDeviceHello` を送信します。
 
-USB CDC 実装の追加や、全 RAM を対象とした stack watermark の導入は、この runner 移行の
-範囲には含めません。
+## Hardening の再現可能な検証
+
+受信経路には、IMCP の最大フレームを考慮した固定長バッファ、同一 read に含まれる複数
+フレームの drain、受信バッファ溢れ後の SOF 再同期、再接続時の送信キュー破棄を実装して
+います。通常の button event は、ACK と `DeviceHello` 用の 2 スロットを残してキューへ
+追加します。USB write endpoint の異常時は USB に留まり続けず UART へフォールバックします。
+
+ホスト側の IMCP 回帰テストとフォーマットは次で確認できます。
+
+```powershell
+cd C:\Users\haruj\Documents\HomeCockpit\imcp
+cargo test --locked --workspace
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --lib --bins -- -D warnings
+```
+
+ファームウェアの CI と同じ検証は、サブモジュールを初期化したチェックアウトで次を実行
+します。
+
+```powershell
+cd C:\Users\haruj\Documents\HomeCockpit\firmware\upper_panel_ddi
+cargo build --locked --release --target thumbv6m-none-eabi --bin upper_panel_ddi
+cargo fmt --all -- --check
+cargo clippy --locked --target thumbv6m-none-eabi --bin upper_panel_ddi -- -D warnings
+```
+
+stack watermark はまだ導入していないため、実行時の watermark を確認済みとは扱いません。
+代わりに release ELF の linker map を生成して、静的 RAM 使用量と linker が予約する stack
+領域を確認できます。
+
+```powershell
+$env:RUSTC_WRAPPER = ''
+$env:RUSTFLAGS = '-C link-arg=-Map=C:\temp\upper_panel_ddi.map'
+cargo build --locked --release --target thumbv6m-none-eabi --bin upper_panel_ddi
+Select-String -Path C:\temp\upper_panel_ddi.map -Pattern '_stack_start|_stack_end|\.bss|\.data|\.uninit'
+```
+
+map の確認は stack overflow が発生しないことの証明ではありません。実機の長時間確認では、
+`probe-rs run --always-print-stacktrace` の RTT/defmt 出力を採取し、USB CDC の再接続、
+JOIN/SetAddress/ACK、`DeviceHello`、button event の順に観測してください。
 
 ## `probe-run` からの移行
 

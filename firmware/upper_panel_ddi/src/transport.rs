@@ -1,4 +1,3 @@
-use crate::packetization::{needs_zero_length_packet, next_packet_len};
 use defmt::warn;
 use embassy_futures::select::select;
 use embassy_rp::{gpio::Output, peripherals::USB, usb::Driver as UsbDriver};
@@ -8,8 +7,9 @@ use embassy_usb::{
 };
 use embedded_io_async::{Read, Write};
 use imcp_embedded::{ImcpEmbedded, RpUartCarrierSense};
+use upper_panel_ddi::packetization::{needs_zero_length_packet, next_packet_len};
 
-pub use crate::packetization::USB_MAX_PACKET_SIZE;
+pub use upper_panel_ddi::packetization::USB_MAX_PACKET_SIZE;
 
 type UsbDriverType = UsbDriver<'static, USB>;
 type UsbSender = Sender<'static, UsbDriverType>;
@@ -131,7 +131,12 @@ impl ImcpTransport {
             }
             EndpointError::BufferOverflow => {
                 warn!("usb write buffer overflow");
-                WriteEvent::UsbError
+                // A write-side endpoint failure can leave the CDC endpoint
+                // unusable while it still reports as connected. Fall back to
+                // UART so the IMCP task can restart instead of spinning on
+                // repeated USB errors.
+                self.usb_active = false;
+                WriteEvent::UsbDisconnected
             }
         }
     }

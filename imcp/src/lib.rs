@@ -446,6 +446,15 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         };
         Ok(Some(frame))
     }
+
+    /// Returns whether a complete frame is already buffered for processing.
+    ///
+    /// A transport read may contain multiple frames. Callers should use this
+    /// after `read_tick` to drain all complete frames, including frames that
+    /// arrived without a subsequent transport read.
+    pub fn has_complete_frame(&self) -> bool {
+        self.frame_parser.has_complete_frame()
+    }
 }
 
 #[cfg(feature = "test-utils")]
@@ -731,6 +740,58 @@ mod tests {
 
     // --- (FrameParser テスト) ---
     #[test]
+    fn test_parser_lookahead_drains_multiple_frames_without_new_input() {
+        let frame1 = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ping);
+        let frame2 = Frame::new(Address::Broadcast, 0x03, FramePayload::Pong);
+        let mut encoded = std::vec::Vec::new();
+        encoded.extend_from_slice(&encode_frame(&frame1));
+        encoded.extend_from_slice(&encode_frame(&frame2));
+
+        let mut rx_buf = [0u8; 64];
+        let mut frame_buf = [0u8; 64];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+        parser.write_data(&encoded).unwrap();
+
+        assert!(parser.has_complete_frame());
+        assert_eq!(parser.next_frame(), Some(Ok(frame1)));
+        assert!(parser.has_complete_frame());
+        assert_eq!(parser.next_frame(), Some(Ok(frame2)));
+        assert!(!parser.has_complete_frame());
+        assert!(parser.next_frame().is_none());
+    }
+
+    #[test]
+    fn test_parser_lookahead_does_not_treat_escaped_eof_as_frame_end() {
+        let mut rx_buf = [0u8; 16];
+        let mut frame_buf = [0u8; 16];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+
+        parser.write_data(&[SOF, 0x01, ESC, EOF ^ ESC_XOR]).unwrap();
+        assert!(!parser.has_complete_frame());
+
+        parser.write_data(&[EOF]).unwrap();
+        assert!(parser.has_complete_frame());
+    }
+
+    #[test]
+    fn test_parser_recovers_after_receive_buffer_overflow() {
+        let frame = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ping);
+        let encoded = encode_frame(&frame);
+        let mut rx_buf = [0u8; 16];
+        let mut frame_buf = [0u8; 32];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+
+        parser.write_data(&[SOF; 16]).unwrap();
+        assert_eq!(
+            parser.write_data(&[0x00]),
+            Err(DecodeError::FrameBufferTooSmall)
+        );
+
+        parser.write_data(&encoded).unwrap();
+        assert_eq!(parser.next_frame(), Some(Ok(frame)));
+    }
+
+    #[test]
     fn test_parser_stuffed_frame() {
         let mut rx_buf = [0u8; 64];
         let mut frame_buf = [0u8; 64];
@@ -930,6 +991,25 @@ mod tests {
 
         assert!(encoded_len <= MAX_ENCODED_FRAME_SIZE);
         assert!(encoded_len > MAX_PAYLOAD_SIZE);
+    }
+
+    #[test]
+    fn test_parser_accepts_maximum_stuffed_frame() {
+        let payload = [SOF; MAX_PAYLOAD_SIZE];
+        let frame = Frame::new(
+            Address::Broadcast,
+            0x42,
+            FramePayload::Data(Vec::from_slice(&payload).unwrap()),
+        );
+        let mut encoded = [0u8; MAX_ENCODED_FRAME_SIZE];
+        let encoded_len = frame.encode(&mut encoded).unwrap();
+        let mut rx_buf = [0u8; MAX_ENCODED_FRAME_SIZE];
+        let mut frame_buf = [0u8; MAX_FRAME_SIZE];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+
+        parser.write_data(&encoded[..encoded_len]).unwrap();
+
+        assert_eq!(parser.next_frame(), Some(Ok(frame)));
     }
 
     #[test]
