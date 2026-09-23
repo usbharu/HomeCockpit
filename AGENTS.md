@@ -6,6 +6,7 @@
 
 - 不具合調査の範囲・必要環境・ユーザー操作: [`docs/debugging-scope.md`](docs/debugging-scope.md)
 - CI と検証コマンド: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+- KiCad の開発環境・移行手順: [`docs/kicad.md`](docs/kicad.md)
 - Firmware のbuild・書き込み・実機検証: [`firmware/AGENTS.md`](firmware/AGENTS.md)
 - IMCP の作業規約: [`imcp/AGENTS.md`](imcp/AGENTS.md)
 - Manager の作業規約: [`manager/AGENTS.md`](manager/AGENTS.md)
@@ -29,7 +30,7 @@
 | DCS-BIOS library | [`dcs-bios-rs/src/lib.rs`](dcs-bios-rs/src/lib.rs)、[`dcs-bios-rs/src/import.rs`](dcs-bios-rs/src/import.rs) |
 | IMCP CLI | [`utils/imcp-cli/src/main.rs`](utils/imcp-cli/src/main.rs) |
 | Manager | [`manager/AGENTS.md`](manager/AGENTS.md) |
-| KiCad hardware | [`upper_panel_ddi/`](upper_panel_ddi/)、[`upper_panel_ddi_button_panel/`](upper_panel_ddi_button_panel/)、共有ライブラリ [`HomeCockpit.kicad_sym`](HomeCockpit.kicad_sym) / [`Library.pretty/`](Library.pretty/) |
+| KiCad hardware | 現行 Upper Panel DDI 基板 [`upper_panel_ddi/pcb/button_panel/`](upper_panel_ddi/pcb/button_panel/)、機械部品 [`upper_panel_ddi/mechanical/`](upper_panel_ddi/mechanical/)、共有ライブラリ [`HomeCockpit.kicad_sym`](HomeCockpit.kicad_sym) / [`Library.pretty/`](Library.pretty/) |
 
 ## 文書化されていない重要事項
 

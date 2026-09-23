@@ -1,7 +1,8 @@
 **/target
-*/production/**
-*/fp-info-cache
-*/fp-lib-table
-*/**-backups/*.zip
+**/production/**
+**/fp-info-cache
+**/fp-lib-table
+!upper_panel_ddi/pcb/button_panel/fp-lib-table
+**/*-backups/*.zip
 
 .pnpm-store

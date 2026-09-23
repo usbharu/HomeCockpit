@@ -291,9 +291,6 @@ async fn imcp_task(
             embassy_futures::select::Either::First(ReadEvent::UartError) => {
                 warn!("UART transport read error")
             }
-            embassy_futures::select::Either::First(ReadEvent::UsbError) => {
-                warn!("USB transport read error")
-            }
             embassy_futures::select::Either::Second(Ok(v)) => {
                 match imcp_transport.write_frame(&v).await {
                     WriteEvent::Sent => info!("write {:?}", v),
