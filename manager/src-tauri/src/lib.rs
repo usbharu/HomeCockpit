@@ -550,6 +550,7 @@ struct KnownRuntimeDevice {
     control_count: u16,
     gateway_id: Option<String>,
     gateway_display_name: Option<String>,
+    is_root: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -785,6 +786,7 @@ fn known_runtime_devices_for_endpoint(
                     control_count: device.controls?,
                     gateway_id: device.gateway_id.clone(),
                     gateway_display_name: device.gateway_display_name.clone(),
+                    is_root: device.connection_kind != "hub-child",
                 },
             ))
         })
@@ -841,6 +843,7 @@ fn reconcile_known_runtime_device(
     source_address: u8,
     probed: &ProbedImcpDevice,
     gateway: Option<&(String, String)>,
+    is_root: bool,
 ) {
     let stale_addresses = known_devices
         .iter()
@@ -862,6 +865,7 @@ fn reconcile_known_runtime_device(
             control_count: probed.controls,
             gateway_id: gateway.map(|(id, _)| id.clone()),
             gateway_display_name: gateway.map(|(_, display_name)| display_name.clone()),
+            is_root,
         },
     );
 }
@@ -1020,6 +1024,9 @@ impl RuntimeState {
             });
 
             if let Some(index) = existing_index {
+                if devices[index] == summary {
+                    return;
+                }
                 devices[index] = summary;
             } else {
                 devices.push(summary);
@@ -2259,6 +2266,7 @@ struct ProbedImcpDevice {
 struct DeviceHelloRetryState {
     attempts_sent: usize,
     next_attempt_at: Instant,
+    completed: bool,
 }
 
 impl DeviceHelloRetryState {
@@ -2266,16 +2274,58 @@ impl DeviceHelloRetryState {
         Self {
             attempts_sent: 0,
             next_attempt_at: now,
+            completed: false,
         }
     }
 
     fn should_send(&self, now: Instant) -> bool {
-        self.attempts_sent < IMCP_DEVICE_HELLO_MAX_ATTEMPTS && now >= self.next_attempt_at
+        !self.completed
+            && self.attempts_sent < IMCP_DEVICE_HELLO_MAX_ATTEMPTS
+            && now >= self.next_attempt_at
     }
 
     fn record_sent(&mut self, sent_at: Instant) {
         self.attempts_sent += 1;
         self.next_attempt_at = sent_at + IMCP_DEVICE_HELLO_RETRY_INTERVAL;
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+struct ObservedRuntimeDevice {
+    is_root: bool,
+    is_duplicate: bool,
+}
+
+fn observe_runtime_device_hello(
+    known_devices: &HashMap<u8, KnownRuntimeDevice>,
+    root_retry: &mut DeviceHelloRetryState,
+    source_address: u8,
+    probed: &ProbedImcpDevice,
+    is_hub_child: bool,
+) -> ObservedRuntimeDevice {
+    let existing = known_devices.get(&source_address);
+    let known_identity = known_devices
+        .values()
+        .find(|device| device.device_id == probed.device_id);
+    let is_root = if is_hub_child {
+        false
+    } else if let Some(device) = known_identity {
+        device.is_root
+    } else if probed.device_kind == DeviceKind::ImcpHub {
+        true
+    } else {
+        !known_devices.values().any(|device| device.is_root)
+    };
+    let is_duplicate = existing.is_some_and(|device| device.device_id == probed.device_id);
+    if is_root {
+        root_retry.complete();
+    }
+    ObservedRuntimeDevice {
+        is_root,
+        is_duplicate,
     }
 }
 
@@ -3627,6 +3677,13 @@ fn run_endpoint_listener_session(
                                         frame_received_at,
                                     )
                                 };
+                                let observed = observe_runtime_device_hello(
+                                    known_devices,
+                                    &mut root_hello_retry,
+                                    source_address,
+                                    &probed,
+                                    pending_gateway.is_some(),
+                                );
                                 let connection_kind = if probed.device_kind == DeviceKind::ImcpHub {
                                     "hub"
                                 } else if pending_gateway.is_some() {
@@ -3649,13 +3706,16 @@ fn run_endpoint_listener_session(
                                     source_address,
                                     &probed,
                                     pending_gateway.as_ref(),
+                                    observed.is_root,
                                 );
-                                state.register_display_sender(
-                                    probed.device_id.clone(),
-                                    channels.display_sender.clone(),
-                                );
+                                if !observed.is_duplicate {
+                                    state.register_display_sender(
+                                        probed.device_id.clone(),
+                                        channels.display_sender.clone(),
+                                    );
+                                }
 
-                                if probed.device_kind == DeviceKind::ImcpHub {
+                                if observed.is_root && probed.device_kind == DeviceKind::ImcpHub {
                                     let retry =
                                         child_hello_retries.entry(source_address).or_insert_with(
                                             || DeviceHelloRetryState::new(Instant::now()),
@@ -4071,6 +4131,7 @@ mod tests {
                 control_count: 20,
                 gateway_id: Some(gateway.0.clone()),
                 gateway_display_name: Some(gateway.1.clone()),
+                is_root: false,
             },
         )]);
         let mut allocator = RuntimeAddressAllocator::from_known_devices(&known_devices);
@@ -4080,7 +4141,14 @@ mod tests {
             known_gateway_for_device(&known_devices, &probed.device_id),
             Some(gateway)
         );
-        reconcile_known_runtime_device(&mut known_devices, &mut allocator, 0x04, &probed, None);
+        reconcile_known_runtime_device(
+            &mut known_devices,
+            &mut allocator,
+            0x04,
+            &probed,
+            None,
+            true,
+        );
         assert_eq!(
             known_gateway_for_device(&known_devices, &probed.device_id),
             None
@@ -4097,6 +4165,7 @@ mod tests {
                     control_count: 20,
                     gateway_id: None,
                     gateway_display_name: None,
+                    is_root: true,
                 },
             ),
             (
@@ -4106,6 +4175,7 @@ mod tests {
                     control_count: 10,
                     gateway_id: None,
                     gateway_display_name: None,
+                    is_root: false,
                 },
             ),
         ]);
@@ -4126,6 +4196,7 @@ mod tests {
                     control_count: 20,
                     gateway_id: None,
                     gateway_display_name: None,
+                    is_root: true,
                 },
             ),
             (
@@ -4135,6 +4206,7 @@ mod tests {
                     control_count: 10,
                     gateway_id: None,
                     gateway_display_name: None,
+                    is_root: false,
                 },
             ),
             (
@@ -4144,6 +4216,7 @@ mod tests {
                     control_count: 20,
                     gateway_id: None,
                     gateway_display_name: None,
+                    is_root: true,
                 },
             ),
         ]);
@@ -4161,7 +4234,7 @@ mod tests {
         };
 
         assert_eq!(allocator.allocate_for_join(0xCAFE_BABE), Ok(3));
-        reconcile_known_runtime_device(&mut known_devices, &mut allocator, 3, &probed, None);
+        reconcile_known_runtime_device(&mut known_devices, &mut allocator, 3, &probed, None, true);
 
         assert_eq!(known_devices.len(), 2);
         assert!(!known_devices.contains_key(&2));
@@ -4181,6 +4254,7 @@ mod tests {
                 control_count: 20,
                 gateway_id: None,
                 gateway_display_name: None,
+                is_root: true,
             },
         )]);
         let mut allocator = RuntimeAddressAllocator::from_known_devices(&known_devices);
@@ -4207,6 +4281,7 @@ mod tests {
                 source_address,
                 &probed,
                 None,
+                true,
             );
 
             assert_eq!(known_devices.len(), 1);
@@ -4231,6 +4306,7 @@ mod tests {
                         control_count: 1,
                         gateway_id: None,
                         gateway_display_name: None,
+                        is_root: false,
                     },
                 )
             })
@@ -4279,6 +4355,118 @@ mod tests {
 
         assert!(!retry.should_send(started_at + Duration::from_millis(400)));
         assert_eq!(retry.attempts_sent, IMCP_DEVICE_HELLO_MAX_ATTEMPTS);
+    }
+
+    fn runtime_device(id: &str, kind: DeviceKind) -> ProbedImcpDevice {
+        ProbedImcpDevice {
+            display_name: format_device_kind(kind).to_string(),
+            firmware_version: "0.1.0".to_string(),
+            assigned_address: Some(2),
+            device_kind: kind,
+            protocol_version: 1,
+            device_id: id.to_string(),
+            displays: 0,
+            controls: 40,
+            features: String::new(),
+        }
+    }
+
+    #[test]
+    fn root_device_hello_stops_retry_after_success() {
+        let started_at = Instant::now();
+        let mut retry = DeviceHelloRetryState::new(started_at);
+        let mut known = HashMap::new();
+        let mut allocator = RuntimeAddressAllocator::from_known_devices(&known);
+        let root = runtime_device("ROOT", DeviceKind::UpperPanelDdi);
+
+        retry.record_sent(started_at);
+        assert!(retry.should_send(started_at + IMCP_DEVICE_HELLO_RETRY_INTERVAL));
+        let observed = observe_runtime_device_hello(&known, &mut retry, 2, &root, false);
+        assert!(observed.is_root);
+        assert!(!observed.is_duplicate);
+        reconcile_known_runtime_device(
+            &mut known,
+            &mut allocator,
+            2,
+            &root,
+            None,
+            observed.is_root,
+        );
+        assert!(!retry.should_send(started_at + Duration::from_secs(1)));
+        assert_eq!(retry.attempts_sent, 1);
+
+        let duplicate = observe_runtime_device_hello(&known, &mut retry, 2, &root, false);
+        assert!(duplicate.is_duplicate);
+        assert_eq!(known.len(), 1);
+        assert!(!retry.should_send(started_at + Duration::from_secs(1)));
+
+        let moved = observe_runtime_device_hello(&known, &mut retry, 5, &root, false);
+        assert!(moved.is_root);
+        assert!(!moved.is_duplicate);
+        reconcile_known_runtime_device(&mut known, &mut allocator, 5, &root, None, moved.is_root);
+        assert!(!known.contains_key(&2));
+        assert_eq!(known[&5].device_id, "ROOT");
+    }
+
+    #[test]
+    fn hub_child_hello_does_not_stop_root_or_other_child_discovery() {
+        let started_at = Instant::now();
+        let mut root_retry = DeviceHelloRetryState::new(started_at);
+        root_retry.record_sent(started_at);
+        let mut child_retry = DeviceHelloRetryState::new(started_at);
+        child_retry.record_sent(started_at);
+        let mut known = HashMap::from([(
+            2,
+            KnownRuntimeDevice {
+                device_id: "HUB".to_string(),
+                control_count: 0,
+                gateway_id: None,
+                gateway_display_name: None,
+                is_root: true,
+            },
+        )]);
+        let mut allocator = RuntimeAddressAllocator::from_known_devices(&known);
+        let gateway = ("hub:serial-hub:HUB".to_string(), "IMCP Hub".to_string());
+        let child_a = runtime_device("CHILD_A", DeviceKind::ButtonPanel);
+        let child_b = runtime_device("CHILD_B", DeviceKind::ButtonPanel);
+
+        let first = observe_runtime_device_hello(&known, &mut root_retry, 3, &child_a, true);
+        assert!(!first.is_root);
+        reconcile_known_runtime_device(
+            &mut known,
+            &mut allocator,
+            3,
+            &child_a,
+            Some(&gateway),
+            first.is_root,
+        );
+        assert!(root_retry.should_send(started_at + IMCP_DEVICE_HELLO_RETRY_INTERVAL));
+        // A hub request may discover several children. One reply cannot finish that search.
+        assert!(child_retry.should_send(started_at + IMCP_DEVICE_HELLO_RETRY_INTERVAL));
+
+        let duplicate = observe_runtime_device_hello(&known, &mut root_retry, 3, &child_a, true);
+        assert!(duplicate.is_duplicate);
+        let second = observe_runtime_device_hello(&known, &mut root_retry, 4, &child_b, true);
+        assert!(!second.is_duplicate);
+        reconcile_known_runtime_device(
+            &mut known,
+            &mut allocator,
+            4,
+            &child_b,
+            Some(&gateway),
+            second.is_root,
+        );
+        assert_eq!(known.len(), 3);
+
+        let hub = runtime_device("HUB", DeviceKind::ImcpHub);
+        let root = observe_runtime_device_hello(&known, &mut root_retry, 2, &hub, false);
+        assert!(root.is_root);
+        assert!(root.is_duplicate);
+        assert!(!root_retry.should_send(started_at + Duration::from_secs(1)));
+
+        // A newly opened listener session can search the same hub again.
+        let fresh_child_retry = DeviceHelloRetryState::new(started_at + Duration::from_secs(2));
+        assert!(fresh_child_retry.should_send(started_at + Duration::from_secs(2)));
     }
 
     #[cfg(unix)]
