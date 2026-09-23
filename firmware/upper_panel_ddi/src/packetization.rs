@@ -7,8 +7,8 @@ pub const USB_MAX_PACKET_SIZE: usize = 64;
 pub const IMCP_RX_BUFFER_SIZE: usize = MAX_ENCODED_FRAME_SIZE + USB_MAX_PACKET_SIZE;
 pub const IMCP_FRAME_BUFFER_SIZE: usize = MAX_FRAME_SIZE;
 
-/// Two slots are reserved for protocol responses generated while processing a
-/// single incoming frame (ACK and DeviceHello).
+/// Keep two application queue slots available for DeviceHello responses.
+/// IMCP ACK/Pong responses use a separate priority channel.
 pub const FRAME_CHANNEL_CAPACITY: usize = 7;
 pub const RESERVED_PROTOCOL_FRAME_SLOTS: usize = 2;
 
