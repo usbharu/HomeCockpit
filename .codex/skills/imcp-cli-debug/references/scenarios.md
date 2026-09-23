@@ -93,6 +93,8 @@ $ping = 'FE020100000003FF'
 @() | & $cli master --stdin --format json --send $ping --send $ping
 ```
 
+masterからSetを送った場合は250ms間隔で最大3回送信する。ACKがなければ保留を破棄し、後続の送信へ進む。ACK待ち中にclientからSetが届いても、そのSetへのACKは待たずに送る。
+
 実機接続中の発信は次の形で行う。ポート名は`watch --list --format json`の結果から選び、ユーザーの依頼なしに送信しない。
 
 ```powershell

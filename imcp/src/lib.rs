@@ -257,6 +257,22 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         Ok(buf)
     }
 
+    /// Abandon an unacknowledged Set after the transport's retry limit.
+    /// SetAddress is deliberately excluded because address assignment has
+    /// separate state that must be resolved by the normal retry path.
+    pub fn abandon_pending_set(&mut self) -> bool {
+        if self
+            .pending_frame
+            .as_ref()
+            .is_some_and(|frame| matches!(frame.payload(), FramePayload::Set(_)))
+        {
+            self.pending_frame = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub async fn read_tick<'b>(
         &'b mut self,
         new_data: &[u8],
