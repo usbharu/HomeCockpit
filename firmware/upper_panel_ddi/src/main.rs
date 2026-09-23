@@ -56,9 +56,6 @@ const USB_VENDOR_ID: u16 = 0xc0de;
 const USB_PRODUCT_ID: u16 = 0xcafe;
 const CONTROL_MATRIX_COLUMNS: u8 = 5;
 const CONTROL_MATRIX_ROWS: u8 = 8;
-// A RequestDeviceHello frame produces an ACK and a DeviceHello response.
-const FRAME_CHANNEL_CAPACITY: usize = 7;
-const RESERVED_PROTOCOL_FRAME_SLOTS: usize = 2;
 #[cfg(feature = "rp2040")]
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 
