@@ -45,7 +45,7 @@ use imcp_embedded::{ImcpEmbedded, RpUartCarrierSense};
 use static_cell::StaticCell;
 use transport::{ImcpTransport, ReadEvent, USB_MAX_PACKET_SIZE, WriteEvent};
 use upper_panel_ddi::packetization::{
-    FRAME_CHANNEL_CAPACITY, IMCP_FRAME_BUFFER_SIZE, IMCP_RX_BUFFER_SIZE,
+    FRAME_CHANNEL_CAPACITY, IMCP_FRAME_BUFFER_SIZE, IMCP_RX_BUFFER_SIZE, PendingRead,
     RESERVED_PROTOCOL_FRAME_SLOTS, can_enqueue_control_event,
 };
 use {defmt_rtt as _, panic_probe as _};
@@ -258,6 +258,7 @@ async fn imcp_task(
     device_identity: DeviceIdentity,
 ) {
     let mut read_buffer = [0u8; USB_MAX_PACKET_SIZE];
+    let mut pending_read = PendingRead::<USB_MAX_PACKET_SIZE>::new();
     let tx_sender = FRAME_CHANNEL.sender();
 
     reset_device_runtime_state().await;
@@ -266,24 +267,54 @@ async fn imcp_task(
         .unwrap_or_else(|e| warn!("client restart error {:?}", e));
 
     loop {
+        // Do not ask the transport for another read until the previous read
+        // has been handed to the parser. In particular, a full response queue
+        // must not cause the freshly received bytes (possibly an ACK) to be
+        // discarded before read_tick sees them.
+        if pending_read.is_pending() && tx_sender.free_capacity() >= RESERVED_PROTOCOL_FRAME_SLOTS {
+            process_received_frames(
+                &mut imcp,
+                &tx_sender,
+                pending_read.bytes(),
+                device_identity.device_id,
+            )
+            .await;
+            pending_read.clear();
+            continue;
+        }
+
         if imcp.has_complete_frame() && tx_sender.free_capacity() >= RESERVED_PROTOCOL_FRAME_SLOTS {
             process_received_frames(&mut imcp, &tx_sender, &[], device_identity.device_id).await;
             continue;
         }
 
-        match select(imcp_transport.read(&mut read_buffer), imcp.write_tick()).await {
+        let read = async {
+            if pending_read.is_pending() {
+                core::future::pending::<ReadEvent>().await
+            } else {
+                imcp_transport.read(&mut read_buffer).await
+            }
+        };
+        match select(read, imcp.write_tick()).await {
             embassy_futures::select::Either::First(ReadEvent::Data(s)) => {
                 debug!("imcp rx {} bytes: {:?}", s, &read_buffer[..s]);
-                process_received_frames(
-                    &mut imcp,
-                    &tx_sender,
-                    &read_buffer[..s],
-                    device_identity.device_id,
-                )
-                .await;
+                if tx_sender.free_capacity() < RESERVED_PROTOCOL_FRAME_SLOTS {
+                    if !pending_read.store(&read_buffer[..s]) {
+                        warn!("failed stage transport read");
+                    }
+                } else {
+                    process_received_frames(
+                        &mut imcp,
+                        &tx_sender,
+                        &read_buffer[..s],
+                        device_identity.device_id,
+                    )
+                    .await;
+                }
             }
             embassy_futures::select::Either::First(ReadEvent::UsbConnected) => {
                 info!("usb cdc connected; switching IMCP transport");
+                pending_read.clear();
                 reset_device_runtime_state().await;
                 imcp.restart_client(device_identity.join_id)
                     .await
@@ -291,6 +322,7 @@ async fn imcp_task(
             }
             embassy_futures::select::Either::First(ReadEvent::UsbDisconnected) => {
                 info!("usb cdc disconnected; falling back to UART");
+                pending_read.clear();
                 reset_device_runtime_state().await;
                 imcp.restart_client(device_identity.join_id)
                     .await
@@ -304,6 +336,7 @@ async fn imcp_task(
                     WriteEvent::Sent => info!("write {:?}", v),
                     WriteEvent::UsbDisconnected => {
                         info!("usb cdc disconnected during write; falling back to UART");
+                        pending_read.clear();
                         reset_device_runtime_state().await;
                         imcp.restart_client(device_identity.join_id)
                             .await
