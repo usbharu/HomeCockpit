@@ -685,6 +685,28 @@ fn gateway_for_device_hello(
         .or_else(|| known_child_gateways.get(device_id).cloned())
 }
 
+fn is_hub_discovery_traffic(payload: &FramePayload) -> bool {
+    match payload {
+        FramePayload::Join(_) => true,
+        FramePayload::Set(payload) => matches!(
+            decode_set_packet(payload.as_slice()),
+            Ok(AppPacketKind::DeviceHello(_))
+        ),
+        _ => false,
+    }
+}
+
+fn hub_requires_child_discovery(
+    observed_hub_addresses: &mut HashMap<String, u8>,
+    device_id: &str,
+    source_address: u8,
+) -> bool {
+    observed_hub_addresses.retain(|existing_id, existing_address| {
+        *existing_address != source_address || existing_id == device_id
+    });
+    observed_hub_addresses.insert(device_id.to_string(), source_address) != Some(source_address)
+}
+
 fn defer_hub_discovery_during_quiet_period(
     pending: &HashMap<u8, PendingHubDiscovery>,
     quiet_until: &mut Option<Instant>,
@@ -3416,7 +3438,7 @@ fn run_endpoint_listener_session(
     let mut frame_buffer = [0u8; 256];
     let mut parser = FrameParser::new(&mut rx_buffer, &mut frame_buffer);
     let mut address_allocator = RuntimeAddressAllocator::from_known_devices(known_devices);
-    let mut requested_children = HashSet::new();
+    let mut observed_hub_addresses: HashMap<String, u8> = HashMap::new();
     let mut pending_hub_discoveries: HashMap<u8, PendingHubDiscovery> = HashMap::new();
     let mut queued_hub_discoveries: VecDeque<QueuedHubDiscovery> = VecDeque::new();
     let mut hub_discovery_quiet_until = None;
@@ -3463,11 +3485,13 @@ fn run_endpoint_listener_session(
                         hub_discovery_quiet_until =
                             Some(frame_received_at + IMCP_CHILD_ENUMERATION_TIMEOUT);
                     }
-                    defer_hub_discovery_during_quiet_period(
-                        &pending_hub_discoveries,
-                        &mut hub_discovery_quiet_until,
-                        frame_received_at,
-                    );
+                    if is_hub_discovery_traffic(frame.payload()) {
+                        defer_hub_discovery_during_quiet_period(
+                            &pending_hub_discoveries,
+                            &mut hub_discovery_quiet_until,
+                            frame_received_at,
+                        );
+                    }
 
                     match frame.payload() {
                         FramePayload::Join(join_id) => {
@@ -3491,7 +3515,7 @@ fn run_endpoint_listener_session(
                                 frame.from_address(),
                                 *join_id,
                                 address,
-                                Instant::now(),
+                                frame_received_at,
                             );
                         }
                         FramePayload::Set(payload) => {
@@ -3518,7 +3542,7 @@ fn run_endpoint_listener_session(
                                         &known_child_gateways,
                                         source_address,
                                         &probed.device_id,
-                                        Instant::now(),
+                                        frame_received_at,
                                     )
                                 };
                                 if let Some(gateway) = pending_gateway.as_ref() {
@@ -3553,7 +3577,11 @@ fn run_endpoint_listener_session(
                                 );
 
                                 if probed.device_kind == DeviceKind::ImcpHub
-                                    && requested_children.insert(source_address)
+                                    && hub_requires_child_discovery(
+                                        &mut observed_hub_addresses,
+                                        &probed.device_id,
+                                        source_address,
+                                    )
                                 {
                                     queued_hub_discoveries.push_back(QueuedHubDiscovery::new(
                                         source_address,
@@ -4270,6 +4298,51 @@ mod tests {
             &mut quiet_until,
             delayed_frame_at + IMCP_CHILD_ENUMERATION_TIMEOUT
         ));
+    }
+
+    #[test]
+    fn only_join_and_device_hello_extend_hub_discovery_quiet_period() {
+        let hello = encode_set_packet(&AppPacketKind::DeviceHello(hcp::DeviceHello {
+            device_id: 1,
+            device_kind: DeviceKind::ImcpHub,
+            protocol_version: 1,
+            firmware_version: hcp::Version {
+                major: 0,
+                minor: 1,
+                patch: 0,
+            },
+            capabilities: hcp::Capabilities {
+                displays: 0,
+                controls: 0,
+                features: 0,
+            },
+        }))
+        .expect("encode hello");
+        let control = encode_set_packet(&AppPacketKind::ControlEvent(ControlEvent {
+            seq: 1,
+            control_id: 2,
+            event: ControlValue::Button { pressed: true },
+        }))
+        .expect("encode control");
+
+        assert!(is_hub_discovery_traffic(&FramePayload::Join(1)));
+        assert!(is_hub_discovery_traffic(&FramePayload::Set(hello)));
+        assert!(!is_hub_discovery_traffic(&FramePayload::Set(control)));
+        assert!(!is_hub_discovery_traffic(&FramePayload::Ack(0)));
+        assert!(!is_hub_discovery_traffic(&FramePayload::Ping));
+    }
+
+    #[test]
+    fn hub_child_discovery_restarts_after_address_reuse() {
+        let mut observed = HashMap::new();
+        let hub_a = "0000000000000001";
+        let hub_b = "0000000000000002";
+
+        assert!(hub_requires_child_discovery(&mut observed, hub_a, 0x02));
+        assert!(!hub_requires_child_discovery(&mut observed, hub_a, 0x02));
+        assert!(hub_requires_child_discovery(&mut observed, hub_a, 0x03));
+        assert!(hub_requires_child_discovery(&mut observed, hub_b, 0x02));
+        assert!(hub_requires_child_discovery(&mut observed, hub_a, 0x02));
     }
 
     #[test]
