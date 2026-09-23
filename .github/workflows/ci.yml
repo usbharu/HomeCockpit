@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  push:
+    branches:
+      - master
   pull_request:
     branches:
       - master
@@ -35,7 +38,6 @@ jobs:
       firmware_upper: ${{ steps.filter.outputs.firmware_upper }}
       manager_frontend: ${{ steps.filter.outputs.manager_frontend }}
       manager_backend: ${{ steps.filter.outputs.manager_backend }}
-      kicad_upper: ${{ steps.filter.outputs.kicad_upper }}
       kicad_button: ${{ steps.filter.outputs.kicad_button }}
     steps:
       - name: Checkout history
@@ -112,8 +114,7 @@ jobs:
             echo "firmware_upper=$(changed 'firmware/upper_panel_ddi/*' 'firmware/lib/*' 'firmware/hcp/*' 'firmware/homecockpit_firmware_base/*' 'imcp/*' '.gitmodules')"
             echo "manager_frontend=$(changed 'manager/src/*' 'manager/public/*' 'manager/package.json' 'manager/package-lock.json' 'manager/pnpm-lock.yaml' 'manager/pnpm-workspace.yaml' 'manager/next.config.mjs' 'manager/postcss.config.mjs' 'manager/components.json' 'manager/tsconfig*')"
             echo "manager_backend=$(changed 'manager/src-tauri/*' 'dcs-bios-rs/*' 'firmware/hcp/*' 'imcp/*')"
-            echo "kicad_upper=$(changed 'upper_panel_ddi/*' 'HomeCockpit.kicad_sym' 'Library.pretty/*')"
-            echo "kicad_button=$(changed 'upper_panel_ddi_button_panel/*' 'HomeCockpit.kicad_sym' 'Library.pretty/*')"
+            echo "kicad_button=$(changed 'upper_panel_ddi/pcb/button_panel/*' 'HomeCockpit.kicad_sym' 'Library.pretty/*')"
           } >> "$GITHUB_OUTPUT"
 
   imcp-test:
@@ -443,168 +444,6 @@ jobs:
         working-directory: manager/src-tauri
         run: cargo clippy --locked --lib --bins -- -D warnings
 
-  kicad-upper:
-    name: KiCad upper panel ${{ matrix.check }}
-    needs: changes
-    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.kicad_upper == 'true' }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: upper-panel-erc
-            tool: sch
-            check: erc
-            input: upper_panel_ddi/upper_panel_ddi.kicad_sch
-          - name: upper-panel-drc
-            tool: pcb
-            check: drc
-            input: upper_panel_ddi/upper_panel_ddi.kicad_pcb
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run KiCad checks
-        shell: bash
-        env:
-          TOOL: ${{ matrix.tool }}
-          CHECK: ${{ matrix.check }}
-          INPUT: ${{ matrix.input }}
-          REPORT_NAME: ${{ matrix.name }}
-        run: |
-          set +e
-          report_dir="$RUNNER_TEMP/kicad"
-          mkdir -p "$report_dir"
-          chmod 777 "$report_dir"
-
-          docker run --rm \
-            -e HOME=/tmp/kicad-home \
-            -v "$GITHUB_WORKSPACE:/workspace:ro" \
-            -v "$report_dir:/reports" \
-            -w /workspace \
-            ghcr.io/kicad/kicad:9.0.9 \
-            kicad-cli "$TOOL" "$CHECK" \
-              --severity-all \
-              --output "/reports/${REPORT_NAME}.all.rpt" \
-              "/workspace/$INPUT"
-          full_status=$?
-
-          docker run --rm \
-            -e HOME=/tmp/kicad-home \
-            -v "$GITHUB_WORKSPACE:/workspace:ro" \
-            -v "$report_dir:/reports" \
-            -w /workspace \
-            ghcr.io/kicad/kicad:9.0.9 \
-            kicad-cli "$TOOL" "$CHECK" \
-              --format json \
-              --severity-error \
-              --exit-code-violations \
-              --output "/reports/${REPORT_NAME}.error.json" \
-              "/workspace/$INPUT"
-          error_status=$?
-
-          visualization_status=0
-          if [[ "$TOOL" == "pcb" ]]; then
-            docker run --rm \
-              -e HOME=/tmp/kicad-home \
-              -v "$GITHUB_WORKSPACE:/workspace:ro" \
-              -v "$report_dir:/reports" \
-              -w /workspace \
-              ghcr.io/kicad/kicad:9.0.9 \
-              kicad-cli pcb export svg \
-                --page-size-mode 1 \
-                --exclude-drawing-sheet \
-                --mode-single \
-                --layers "F.Cu,B.Cu,F.Silkscreen,B.Silkscreen,Edge.Cuts" \
-                --output "/reports/${REPORT_NAME}.base.svg" \
-                "/workspace/$INPUT"
-            svg_status=$?
-
-            if [[ "$svg_status" -eq 0 && -s "$report_dir/${REPORT_NAME}.base.svg" ]]; then
-              python3 "$GITHUB_WORKSPACE/.github/scripts/render-kicad-violations.py" \
-                --kind pcb \
-                --svg "$report_dir/${REPORT_NAME}.base.svg" \
-                --report "$report_dir/${REPORT_NAME}.error.json" \
-                --text-report "$report_dir/${REPORT_NAME}.all.rpt" \
-                --output "$report_dir/${REPORT_NAME}.violations.svg" \
-                --summary "$report_dir/${REPORT_NAME}.summary.md" \
-                --source "$GITHUB_WORKSPACE/$INPUT" \
-                --title "$REPORT_NAME"
-              visualization_status=$?
-            else
-              visualization_status="$svg_status"
-            fi
-          else
-            schematic_dir="$report_dir/${REPORT_NAME}-schematic"
-            mkdir -p "$schematic_dir"
-            chmod 777 "$schematic_dir"
-            docker run --rm \
-              -e HOME=/tmp/kicad-home \
-              -v "$GITHUB_WORKSPACE:/workspace:ro" \
-              -v "$report_dir:/reports" \
-              -w /workspace \
-              ghcr.io/kicad/kicad:9.0.9 \
-              kicad-cli sch export svg \
-                --exclude-drawing-sheet \
-                --output "/reports/${REPORT_NAME}-schematic" \
-                "/workspace/$INPUT"
-            svg_status=$?
-            schematic_svg="$(find "$schematic_dir" -type f -name '*.svg' -print -quit)"
-
-            if [[ "$svg_status" -eq 0 && -n "$schematic_svg" && -s "$report_dir/${REPORT_NAME}.error.json" ]]; then
-              cp "$schematic_svg" "$report_dir/${REPORT_NAME}.base.svg"
-              python3 "$GITHUB_WORKSPACE/.github/scripts/render-kicad-violations.py" \
-                --kind sch \
-                --svg "$report_dir/${REPORT_NAME}.base.svg" \
-                --report "$report_dir/${REPORT_NAME}.error.json" \
-                --text-report "$report_dir/${REPORT_NAME}.all.rpt" \
-                --output "$report_dir/${REPORT_NAME}.violations.svg" \
-                --summary "$report_dir/${REPORT_NAME}.summary.md" \
-                --title "$REPORT_NAME"
-              visualization_status=$?
-            else
-              visualization_status="$svg_status"
-            fi
-          fi
-
-          if [[ ! -f "$report_dir/${REPORT_NAME}.summary.md" ]]; then
-            printf '%s\n\n%s\n' \
-              "## KiCad visualization: ${REPORT_NAME}" \
-              "The annotated SVG could not be generated (status ${visualization_status})." \
-              > "$report_dir/${REPORT_NAME}.summary.md"
-          fi
-
-          printf 'full_status=%s\nerror_status=%s\n' "$full_status" "$error_status" \
-            > "$report_dir/${REPORT_NAME}.status"
-
-          failure=0
-          if [[ "$full_status" -ne 0 && "$full_status" -ne 5 ]]; then
-            failure="$full_status"
-          fi
-          if [[ "$error_status" -ne 0 ]]; then
-            failure="$error_status"
-          fi
-          exit "$failure"
-      - name: Upload KiCad reports
-        if: always()
-        id: upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.name }}-reports
-          path: ${{ runner.temp }}/kicad/${{ matrix.name }}.*
-          if-no-files-found: warn
-      - name: Publish KiCad summary
-        if: always()
-        env:
-          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
-        run: |
-          if [[ -f "${{ runner.temp }}/kicad/${{ matrix.name }}.summary.md" ]]; then
-            cat "${{ runner.temp }}/kicad/${{ matrix.name }}.summary.md" >> "$GITHUB_STEP_SUMMARY"
-          else
-            printf '%s\n' "KiCad visualization summary was not generated." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [[ -n "${ARTIFACT_URL:-}" ]]; then
-            printf '\n[Download the KiCad reports and annotated image](%s)\n' "$ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
   kicad-button:
     name: KiCad button panel ${{ matrix.check }}
     needs: changes
@@ -617,11 +456,11 @@ jobs:
           - name: button-panel-erc
             tool: sch
             check: erc
-            input: upper_panel_ddi_button_panel/upper_panel_ddi_button_panel.kicad_sch
+            input: upper_panel_ddi/pcb/button_panel/upper_panel_ddi_button_panel.kicad_sch
           - name: button-panel-drc
             tool: pcb
             check: drc
-            input: upper_panel_ddi_button_panel/upper_panel_ddi_button_panel.kicad_pcb
+            input: upper_panel_ddi/pcb/button_panel/upper_panel_ddi_button_panel.kicad_pcb
     steps:
       - uses: actions/checkout@v4
       - name: Run KiCad checks
@@ -642,7 +481,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace:ro" \
             -v "$report_dir:/reports" \
             -w /workspace \
-            ghcr.io/kicad/kicad:9.0.9 \
+            ghcr.io/kicad/kicad:10.0.5 \
             kicad-cli "$TOOL" "$CHECK" \
               --severity-all \
               --output "/reports/${REPORT_NAME}.all.rpt" \
@@ -654,7 +493,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace:ro" \
             -v "$report_dir:/reports" \
             -w /workspace \
-            ghcr.io/kicad/kicad:9.0.9 \
+            ghcr.io/kicad/kicad:10.0.5 \
             kicad-cli "$TOOL" "$CHECK" \
               --format json \
               --severity-error \
@@ -670,7 +509,7 @@ jobs:
               -v "$GITHUB_WORKSPACE:/workspace:ro" \
               -v "$report_dir:/reports" \
               -w /workspace \
-              ghcr.io/kicad/kicad:9.0.9 \
+              ghcr.io/kicad/kicad:10.0.5 \
               kicad-cli pcb export svg \
                 --page-size-mode 1 \
                 --exclude-drawing-sheet \
@@ -703,7 +542,7 @@ jobs:
               -v "$GITHUB_WORKSPACE:/workspace:ro" \
               -v "$report_dir:/reports" \
               -w /workspace \
-              ghcr.io/kicad/kicad:9.0.9 \
+              ghcr.io/kicad/kicad:10.0.5 \
               kicad-cli sch export svg \
                 --exclude-drawing-sheet \
                 --output "/reports/${REPORT_NAME}-schematic" \
@@ -743,6 +582,9 @@ jobs:
           fi
           if [[ "$error_status" -ne 0 ]]; then
             failure="$error_status"
+          fi
+          if [[ "$visualization_status" -ne 0 && "$failure" -eq 0 ]]; then
+            failure="$visualization_status"
           fi
           exit "$failure"
       - name: Upload KiCad reports
@@ -770,13 +612,13 @@ jobs:
   kicad-pr-comment:
     name: Comment KiCad violations on PR
     needs:
-      - kicad-upper
       - kicad-button
     if: >-
       ${{
         always() &&
+        github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
-        (needs.kicad-upper.result == 'failure' || needs.kicad-button.result == 'failure')
+        needs.kicad-button.result == 'failure'
       }}
     runs-on: ubuntu-latest
     permissions:
@@ -1022,7 +864,6 @@ jobs:
       - manager-backend-test
       - manager-backend-fmt
       - manager-backend-clippy
-      - kicad-upper
       - kicad-button
     runs-on: ubuntu-latest
     steps:

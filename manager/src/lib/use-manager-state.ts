@@ -2,7 +2,7 @@
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { isTauri } from "@/lib/is-tauri";
 import {
@@ -28,6 +28,7 @@ export function useManagerState() {
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [serialPorts, setSerialPorts] = useState<string[]>([]);
+  const learnStateEventVersion = useRef(0);
 
   const replaceSnapshot = useCallback((next: AppSnapshot) => {
     setSnapshot(next);
@@ -54,6 +55,7 @@ export function useManagerState() {
   }, []);
 
   const mergeDeviceRoleAssignments = useCallback((deviceRoleAssignments: DeviceRoleAssignment[]) => {
+    learnStateEventVersion.current += 1;
     setSnapshot((current) => ({ ...current, deviceRoleAssignments }));
   }, []);
 
@@ -62,8 +64,23 @@ export function useManagerState() {
   }, []);
 
   const mergeLearnSession = useCallback((learnSession: LearnSessionStatus) => {
+    learnStateEventVersion.current += 1;
     setSnapshot((current) => ({ ...current, learnSession }));
   }, []);
+
+  const replaceSnapshotAfterLearnAction = useCallback(
+    (next: AppSnapshot, eventVersionBeforeInvoke: number) => {
+      if (learnStateEventVersion.current === eventVersionBeforeInvoke) {
+        replaceSnapshot(next);
+      } else {
+        // A learn-related event already delivered a newer partial snapshot.
+        // Do not overwrite it with the command response, which may have been
+        // captured before the event was emitted.
+        setRuntimeError(null);
+      }
+    },
+    [replaceSnapshot],
+  );
 
   const refreshSnapshot = useCallback(async () => {
     if (!isTauri()) {
@@ -281,15 +298,17 @@ export function useManagerState() {
       }
 
       try {
+        const eventVersionBeforeInvoke = learnStateEventVersion.current;
         const next = await runAction("start-learn", () =>
           invoke<AppSnapshot>("start_learn", { request }),
         );
-        replaceSnapshot(next);
+        replaceSnapshotAfterLearnAction(next, eventVersionBeforeInvoke);
       } catch (error) {
         setRuntimeError(String(error));
+        throw error;
       }
     },
-    [replaceSnapshot, runAction],
+    [replaceSnapshotAfterLearnAction, runAction],
   );
 
   const cancelLearn = useCallback(async () => {
@@ -302,14 +321,16 @@ export function useManagerState() {
     }
 
     try {
+      const eventVersionBeforeInvoke = learnStateEventVersion.current;
       const next = await runAction("cancel-learn", () =>
         invoke<AppSnapshot>("cancel_learn"),
       );
-      replaceSnapshot(next);
+      replaceSnapshotAfterLearnAction(next, eventVersionBeforeInvoke);
     } catch (error) {
       setRuntimeError(String(error));
+      throw error;
     }
-  }, [replaceSnapshot, runAction]);
+  }, [replaceSnapshotAfterLearnAction, runAction]);
 
   const sendCommand = useCallback(
     async (request: DcsBiosCommandRequest) => {

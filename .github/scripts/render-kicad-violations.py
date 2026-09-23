@@ -286,8 +286,8 @@ def collect_json_violations(report: dict[str, Any], kind: str) -> list[dict[str,
 def collect_text_violations(text: str, kind: str) -> list[dict[str, Any]]:
     """Read error positions from KiCad's human-readable report.
 
-    KiCad 9.0.9 writes ERC JSON coordinates with a different scale from its
-    text report.  The text report is also useful as a version-independent
+    KiCad versions may write ERC JSON coordinates with a different scale from
+    their text report.  The text report is also useful as a version-independent
     fallback because it is the same report a developer sees in the CLI.
     """
 
