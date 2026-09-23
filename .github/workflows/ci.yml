@@ -638,7 +638,7 @@ jobs:
 
       - name: Create or update KiCad PR comment
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           REPORT_DIR: ${{ runner.temp }}/kicad-reports
         with:
