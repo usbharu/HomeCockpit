@@ -85,8 +85,10 @@ Manager などのホストから HCP の `RequestDeviceHello` を受信した場
 
 受信経路には、IMCP の最大フレームを考慮した固定長バッファ、同一 read に含まれる複数
 フレームの drain、受信バッファ溢れ後の SOF 再同期、再接続時の送信キュー破棄を実装して
-います。通常の button event は、ACK と `DeviceHello` 用の 2 スロットを残してキューへ
-追加します。USB write endpoint の異常時は USB に留まり続けず UART へフォールバックします。
+います。ACK/Pong は専用の 2 スロットの送信キューから優先送信します。通常の button
+event は、`DeviceHello` 用の 2 スロットをアプリケーション送信キューに残して追加します。
+USB write endpoint の異常時は UART へフォールバックし、実際の USB 切断を確認してから
+USB への再接続を試みます。
 
 ホスト側の IMCP 回帰テストとフォーマットは次で確認できます。
 
