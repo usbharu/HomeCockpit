@@ -42,6 +42,14 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
         // 2. 空き容量を計算
         let free_space = self.rx_buffer.len() - self.rx_len;
         if new_data.len() > free_space {
+            // A malformed or indefinitely incomplete frame must not pin the
+            // parser forever. Discard the partial frame and retain the newest
+            // input so a later SOF can resynchronize the stream.
+            self.reset();
+            let kept_len = new_data.len().min(self.rx_buffer.len());
+            let kept_start = new_data.len() - kept_len;
+            self.rx_buffer[..kept_len].copy_from_slice(&new_data[kept_start..]);
+            self.rx_len = kept_len;
             return Err(DecodeError::FrameBufferTooSmall);
         }
 
@@ -132,6 +140,42 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
 
         // データ不足 (ループを抜けた)
         None
+    }
+
+    /// Returns whether the buffered input contains a complete frame.
+    ///
+    /// This is intentionally a read-only lookahead. It lets a transport
+    /// consumer drain frames that arrived in the same read without confusing
+    /// an incomplete frame with an empty parser.
+    pub fn has_complete_frame(&self) -> bool {
+        let mut state = self.state;
+        let mut is_escaping = self.is_escaping;
+
+        for &byte in &self.rx_buffer[self.rx_scan_pos..self.rx_len] {
+            match state {
+                ParserState::WaitingForSof => {
+                    if byte == SOF {
+                        state = ParserState::Receiving;
+                        is_escaping = false;
+                    }
+                }
+                ParserState::Receiving => {
+                    if is_escaping {
+                        is_escaping = false;
+                        continue;
+                    }
+
+                    match byte {
+                        SOF => {}
+                        EOF => return true,
+                        ESC => is_escaping = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     fn push_frame_byte(&mut self, byte: u8) -> Result<(), DecodeError> {

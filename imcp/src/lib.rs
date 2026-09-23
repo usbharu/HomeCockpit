@@ -198,31 +198,39 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
     pub async fn write_tick(
         &mut self,
     ) -> Result<Vec<u8, MAX_ENCODED_FRAME_SIZE>, ImcpError<R::Error, S::Error>> {
-        let next_frame = loop {
-            let frame = if let Some(frame) = self.pending_frame.take() {
-                trace!("rewrite pending_frame: {:?}", frame);
-                frame
-            } else {
-                trace!("wait for write new frame");
-                self.tx_receiver
-                    .receive()
-                    .await
-                    .map_err(ImcpError::ReceiveError)?
-            };
+        let urgent = self
+            .tx_receiver
+            .try_receive_urgent()
+            .map_err(ImcpError::ReceiveError)?;
+        let next_frame = if let Some(frame) = urgent {
+            frame
+        } else {
+            loop {
+                let frame = if let Some(frame) = self.pending_frame.take() {
+                    trace!("rewrite pending_frame: {:?}", frame);
+                    frame
+                } else {
+                    trace!("wait for write new frame");
+                    self.tx_receiver
+                        .receive()
+                        .await
+                        .map_err(ImcpError::ReceiveError)?
+                };
 
-            if matches!(frame.payload(), FramePayload::SetAddress { .. })
-                && let NodeType::Master(state) = &mut self.node_type
-            {
-                if state.pending_assignment_retries >= MAX_SET_ADDRESS_RETRIES {
-                    state.pending_assignment = None;
-                    state.pending_assignment_retries = 0;
-                    continue;
+                if matches!(frame.payload(), FramePayload::SetAddress { .. })
+                    && let NodeType::Master(state) = &mut self.node_type
+                {
+                    if state.pending_assignment_retries >= MAX_SET_ADDRESS_RETRIES {
+                        state.pending_assignment = None;
+                        state.pending_assignment_retries = 0;
+                        continue;
+                    }
+                    state.pending_assignment_retries =
+                        state.pending_assignment_retries.saturating_add(1);
                 }
-                state.pending_assignment_retries =
-                    state.pending_assignment_retries.saturating_add(1);
-            }
 
-            break frame;
+                break frame;
+            }
         };
         let mut raw = [0u8; MAX_ENCODED_FRAME_SIZE];
         let size = next_frame
@@ -446,6 +454,15 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
         };
         Ok(Some(frame))
     }
+
+    /// Returns whether a complete frame is already buffered for processing.
+    ///
+    /// A transport read may contain multiple frames. Callers should use this
+    /// after `read_tick` to drain all complete frames, including frames that
+    /// arrived without a subsequent transport read.
+    pub fn has_complete_frame(&self) -> bool {
+        self.frame_parser.has_complete_frame()
+    }
 }
 
 #[cfg(feature = "test-utils")]
@@ -622,6 +639,27 @@ mod tests {
         }
     }
 
+    struct PriorityTestReceiver {
+        urgent: VecDeque<Frame>,
+        application: VecDeque<Frame>,
+    }
+
+    impl Receiver for PriorityTestReceiver {
+        type Error = Infallible;
+
+        async fn receive(&mut self) -> Result<Frame, Self::Error> {
+            Ok(self
+                .urgent
+                .pop_front()
+                .or_else(|| self.application.pop_front())
+                .expect("priority receiver should have a frame"))
+        }
+
+        fn try_receive_urgent(&mut self) -> Result<Option<Frame>, Self::Error> {
+            Ok(self.urgent.pop_front())
+        }
+    }
+
     fn encode_frame(frame: &Frame) -> std::vec::Vec<u8> {
         let mut raw = [0u8; MAX_ENCODED_FRAME_SIZE];
         let len = frame.encode(&mut raw).unwrap();
@@ -730,6 +768,58 @@ mod tests {
     }
 
     // --- (FrameParser テスト) ---
+    #[test]
+    fn test_parser_lookahead_drains_multiple_frames_without_new_input() {
+        let frame1 = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ping);
+        let frame2 = Frame::new(Address::Broadcast, 0x03, FramePayload::Pong);
+        let mut encoded = std::vec::Vec::new();
+        encoded.extend_from_slice(&encode_frame(&frame1));
+        encoded.extend_from_slice(&encode_frame(&frame2));
+
+        let mut rx_buf = [0u8; 64];
+        let mut frame_buf = [0u8; 64];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+        parser.write_data(&encoded).unwrap();
+
+        assert!(parser.has_complete_frame());
+        assert_eq!(parser.next_frame(), Some(Ok(frame1)));
+        assert!(parser.has_complete_frame());
+        assert_eq!(parser.next_frame(), Some(Ok(frame2)));
+        assert!(!parser.has_complete_frame());
+        assert!(parser.next_frame().is_none());
+    }
+
+    #[test]
+    fn test_parser_lookahead_does_not_treat_escaped_eof_as_frame_end() {
+        let mut rx_buf = [0u8; 16];
+        let mut frame_buf = [0u8; 16];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+
+        parser.write_data(&[SOF, 0x01, ESC, EOF ^ ESC_XOR]).unwrap();
+        assert!(!parser.has_complete_frame());
+
+        parser.write_data(&[EOF]).unwrap();
+        assert!(parser.has_complete_frame());
+    }
+
+    #[test]
+    fn test_parser_recovers_after_receive_buffer_overflow() {
+        let frame = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ping);
+        let encoded = encode_frame(&frame);
+        let mut rx_buf = [0u8; 16];
+        let mut frame_buf = [0u8; 32];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+
+        parser.write_data(&[SOF; 16]).unwrap();
+        assert_eq!(
+            parser.write_data(&[0x00]),
+            Err(DecodeError::FrameBufferTooSmall)
+        );
+
+        parser.write_data(&encoded).unwrap();
+        assert_eq!(parser.next_frame(), Some(Ok(frame)));
+    }
+
     #[test]
     fn test_parser_stuffed_frame() {
         let mut rx_buf = [0u8; 64];
@@ -930,6 +1020,25 @@ mod tests {
 
         assert!(encoded_len <= MAX_ENCODED_FRAME_SIZE);
         assert!(encoded_len > MAX_PAYLOAD_SIZE);
+    }
+
+    #[test]
+    fn test_parser_accepts_maximum_stuffed_frame() {
+        let payload = [SOF; MAX_PAYLOAD_SIZE];
+        let frame = Frame::new(
+            Address::Broadcast,
+            0x42,
+            FramePayload::Data(Vec::from_slice(&payload).unwrap()),
+        );
+        let mut encoded = [0u8; MAX_ENCODED_FRAME_SIZE];
+        let encoded_len = frame.encode(&mut encoded).unwrap();
+        let mut rx_buf = [0u8; MAX_ENCODED_FRAME_SIZE];
+        let mut frame_buf = [0u8; MAX_FRAME_SIZE];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+
+        parser.write_data(&encoded[..encoded_len]).unwrap();
+
+        assert_eq!(parser.next_frame(), Some(Ok(frame)));
     }
 
     #[test]
@@ -1139,6 +1248,61 @@ mod tests {
                 Some(set.payload())
             );
             assert_eq!(imcp.tx_receiver.frames.lock().unwrap().len(), 0);
+        });
+    }
+
+    #[test]
+    fn test_urgent_ack_transmits_before_pending_set_retry() {
+        futures::executor::block_on(async {
+            let pending_set = Frame::new(
+                Address::Unicast(0x01),
+                0x02,
+                FramePayload::Set(Vec::from_slice(&[0x10]).unwrap()),
+            );
+            let urgent_ack = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ack(0x02));
+            let queued_data =
+                Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Data(Vec::new()));
+            let receiver = PriorityTestReceiver {
+                urgent: VecDeque::from([urgent_ack.clone()]),
+                application: VecDeque::from([queued_data.clone()]),
+            };
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let mut imcp = Imcp {
+                tx_receiver: receiver,
+                tx_sender: TestSender::default(),
+                address: 0x02,
+                node_id: Some(0x1234),
+                pending_frame: Some(pending_set.clone()),
+                frame_parser: FrameParser::new(&mut rx_buf, &mut frame_buf),
+                node_type: NodeType::Client(ClientState::Ready(0x1234)),
+            };
+
+            let sent = imcp.write_tick().await.unwrap();
+            let mut parser_rx = [0u8; 64];
+            let mut parser_frame = [0u8; 64];
+            let mut parser = FrameParser::new(&mut parser_rx, &mut parser_frame);
+            parser.write_data(&sent).unwrap();
+            assert_eq!(parser.next_frame(), Some(Ok(urgent_ack)));
+            assert_eq!(imcp.pending_frame, Some(pending_set.clone()));
+
+            let retry = imcp.write_tick().await.unwrap();
+            let mut parser_rx = [0u8; 64];
+            let mut parser_frame = [0u8; 64];
+            let mut parser = FrameParser::new(&mut parser_rx, &mut parser_frame);
+            parser.write_data(&retry).unwrap();
+            assert_eq!(parser.next_frame(), Some(Ok(pending_set)));
+
+            let received_ack = Frame::new(Address::Unicast(0x02), 0x01, FramePayload::Ack(0x01));
+            imcp.read_tick(&encode_frame(&received_ack)).await.unwrap();
+            assert!(imcp.pending_frame.is_none());
+
+            let sent = imcp.write_tick().await.unwrap();
+            let mut parser_rx = [0u8; 64];
+            let mut parser_frame = [0u8; 64];
+            let mut parser = FrameParser::new(&mut parser_rx, &mut parser_frame);
+            parser.write_data(&sent).unwrap();
+            assert_eq!(parser.next_frame(), Some(Ok(queued_data)));
         });
     }
 

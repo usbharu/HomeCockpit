@@ -12,6 +12,12 @@ pub trait Receiver {
     type Error;
 
     async fn receive(&mut self) -> Result<Frame, Self::Error>;
+
+    /// Take a protocol response that must be sent before retrying a pending
+    /// reliable Set. Receivers without a priority channel return None.
+    fn try_receive_urgent(&mut self) -> Result<Option<Frame>, Self::Error> {
+        Ok(None)
+    }
 }
 
 pub trait SyncSender<E> {
