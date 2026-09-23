@@ -41,7 +41,7 @@ jobs:
       kicad_button: ${{ steps.filter.outputs.kicad_button }}
     steps:
       - name: Checkout history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -123,7 +123,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.imcp == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Run IMCP workspace tests
         working-directory: imcp
@@ -135,7 +135,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.imcp == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -149,7 +149,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.imcp == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -163,7 +163,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.utils == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libudev-dev
       - uses: dtolnay/rust-toolchain@stable
@@ -177,7 +177,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.utils == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -191,7 +191,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.utils == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libudev-dev
       - uses: dtolnay/rust-toolchain@stable
@@ -207,7 +207,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.dcs_bios == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Run DCS-BIOS tests
         working-directory: dcs-bios-rs
@@ -219,7 +219,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.dcs_bios == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -233,7 +233,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.dcs_bios == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -247,7 +247,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_hcp == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Run HCP tests
         working-directory: firmware/hcp
@@ -259,7 +259,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_hcp == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -273,7 +273,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_hcp == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -287,7 +287,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_base == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Run firmware base tests
         working-directory: firmware/homecockpit_firmware_base
@@ -299,7 +299,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_base == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -313,7 +313,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_base == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -327,7 +327,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_upper == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -343,7 +343,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_upper == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -359,7 +359,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_upper == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -376,7 +376,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.manager_frontend == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -400,7 +400,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.manager_backend == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Linux dependencies
         run: >-
           sudo apt-get update && sudo apt-get install --no-install-recommends -y
@@ -417,7 +417,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.manager_backend == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -431,7 +431,7 @@ jobs:
     if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.manager_backend == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Linux dependencies
         run: >-
           sudo apt-get update && sudo apt-get install --no-install-recommends -y
@@ -462,7 +462,7 @@ jobs:
             check: drc
             input: upper_panel_ddi/pcb/button_panel/upper_panel_ddi_button_panel.kicad_pcb
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run KiCad checks
         shell: bash
         env:
