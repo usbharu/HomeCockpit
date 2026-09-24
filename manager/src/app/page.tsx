@@ -153,7 +153,7 @@ export default function ManagerTabs() {
                         key={tab.id}
                         value={tab.id}
                         forceMount={tab.id === 'mapping' ? true : undefined}
-                        className="h-full focus:outline-none"
+                        className="h-full data-[state=inactive]:hidden focus:outline-none"
                     >
                         {tab.content}
                     </Tabs.Content>
