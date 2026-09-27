@@ -244,6 +244,9 @@ export function MappingSettings({
           : assignment,
       ),
     );
+    if (continuousLearn?.phase === "completed") {
+      discardContinuousLearn();
+    }
   };
 
   const triggerRoleAction = async (logicalControlId: string, eventKind: EventKind) => {
