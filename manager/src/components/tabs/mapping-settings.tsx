@@ -571,8 +571,19 @@ export function MappingSettings({
                   <button
                     key={definition.roleId}
                     type="button"
-                    onClick={() => setSelectedRoleId(definition.roleId)}
-                    disabled={continuousLearn !== null}
+                    onClick={() => {
+                      if (isSelected) {
+                        return;
+                      }
+                      if (continuousLearn?.phase === "completed") {
+                        discardContinuousLearn();
+                      }
+                      setSelectedRoleId(definition.roleId);
+                      setContinuousLearnDeviceId(
+                        deviceRoleAssignments.find((assignment) => assignment.roleId === definition.roleId)?.deviceId ?? "",
+                      );
+                    }}
+                    disabled={continuousLearn !== null && continuousLearn.phase !== "completed"}
                     className={`w-full rounded-lg border p-4 text-left transition ${
                       isSelected
                         ? "border-blue-200 bg-blue-50"
