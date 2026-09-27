@@ -22,7 +22,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  PNPM_VERSION: 11.6.0
+  PNPM_VERSION: 12.6.0
 
 jobs:
   changes:
@@ -112,7 +112,7 @@ jobs:
             echo "firmware_hcp=$(changed 'firmware/hcp/*')"
             echo "firmware_base=$(changed 'firmware/homecockpit_firmware_base/*' 'firmware/hcp/*' 'imcp/*')"
             echo "firmware_upper=$(changed 'firmware/upper_panel_ddi/*' 'firmware/lib/*' 'firmware/hcp/*' 'firmware/homecockpit_firmware_base/*' 'imcp/*' '.gitmodules')"
-            echo "manager_frontend=$(changed 'manager/src/*' 'manager/public/*' 'manager/package.json' 'manager/package-lock.json' 'manager/pnpm-lock.yaml' 'manager/pnpm-workspace.yaml' 'manager/next.config.mjs' 'manager/postcss.config.mjs' 'manager/components.json' 'manager/tsconfig*')"
+            echo "manager_frontend=$(changed 'manager/src/*' 'manager/public/*' 'manager/package.json' 'manager/pnpm-lock.yaml' 'manager/pnpm-workspace.yaml' 'manager/next.config.mjs' 'manager/postcss.config.mjs' 'manager/components.json' 'manager/tsconfig*')"
             echo "manager_backend=$(changed 'manager/src-tauri/*' 'dcs-bios-rs/*' 'firmware/hcp/*' 'imcp/*')"
             echo "kicad_button=$(changed 'upper_panel_ddi/pcb/button_panel/*' 'HomeCockpit.kicad_sym' 'Library.pretty/*')"
           } >> "$GITHUB_OUTPUT"
@@ -387,6 +387,9 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: manager/pnpm-lock.yaml
+      - name: Reject npm lockfile
+        working-directory: manager
+        run: test ! -f package-lock.json
       - name: Install frontend dependencies
         working-directory: manager
         run: pnpm install --frozen-lockfile
