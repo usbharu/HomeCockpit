@@ -159,6 +159,21 @@ struct DeviceEndpointConfig {
     role_hint: EndpointRoleHint,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct SerialPortCandidate {
+    port_name: String,
+    device_name: String,
+    device_kind: String,
+    device_kind_id: String,
+    firmware_version: String,
+    manufacturer: Option<String>,
+    product: Option<String>,
+    vid: Option<u16>,
+    pid: Option<u16>,
+    serial_number: Option<String>,
+}
+
 impl Default for DeviceEndpointConfig {
     fn default() -> Self {
         Self {
@@ -1924,14 +1939,70 @@ fn save_device_endpoints(
 }
 
 #[tauri::command]
-fn list_serial_ports() -> Result<Vec<String>, String> {
-    let mut ports = serialport::available_ports()
-        .map_err(|error| format!("Failed to list serial ports: {error}"))?
+async fn scan_serial_ports(state: State<'_, AppState>) -> Result<Vec<SerialPortCandidate>, String> {
+    let configured = state
+        .inner
+        .device_endpoints
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|endpoint| endpoint.address.clone())
+        .collect::<HashSet<_>>();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let ports = serialport::available_ports()
+            .map_err(|error| format!("Failed to list serial ports: {error}"))?;
+        Ok(scan_serial_port_candidates(
+            ports,
+            &configured,
+            |port_name| {
+                let endpoint = DeviceEndpointConfig {
+                    address: port_name.to_string(),
+                    ..DeviceEndpointConfig::default()
+                };
+                probe_endpoint_root_device(&endpoint).map(|probe| probe.root)
+            },
+        ))
+    })
+    .await
+    .map_err(|error| format!("Failed to join serial port scan task: {error}"))?
+}
+
+fn scan_serial_port_candidates(
+    mut ports: Vec<serialport::SerialPortInfo>,
+    configured: &HashSet<String>,
+    mut probe: impl FnMut(&str) -> Result<ProbedImcpDevice, String>,
+) -> Vec<SerialPortCandidate> {
+    ports.sort_by(|left, right| left.port_name.cmp(&right.port_name));
+    ports
         .into_iter()
-        .map(|port| port.port_name)
-        .collect::<Vec<_>>();
-    ports.sort();
-    Ok(ports)
+        .filter(|port| !configured.contains(&port.port_name))
+        .filter_map(|port| {
+            let device = probe(&port.port_name).ok()?;
+            let (manufacturer, product, vid, pid, serial_number) = match port.port_type {
+                serialport::SerialPortType::UsbPort(usb) => (
+                    usb.manufacturer,
+                    usb.product,
+                    Some(usb.vid),
+                    Some(usb.pid),
+                    usb.serial_number,
+                ),
+                _ => (None, None, None, None, None),
+            };
+            Some(SerialPortCandidate {
+                port_name: port.port_name,
+                device_name: device.display_name,
+                device_kind: format_device_kind(device.device_kind).to_string(),
+                device_kind_id: format_device_kind_id(device.device_kind).to_string(),
+                firmware_version: device.firmware_version,
+                manufacturer,
+                product,
+                vid,
+                pid,
+                serial_number,
+            })
+        })
+        .collect()
 }
 
 async fn refresh_devices(
@@ -3994,7 +4065,7 @@ pub fn run() {
             save_adapter_profile,
             start_learn,
             cancel_learn,
-            list_serial_ports,
+            scan_serial_ports,
             list_devices
         ])
         .run(tauri::generate_context!())
@@ -4590,6 +4661,47 @@ mod tests {
             baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
             role_hint: EndpointRoleHint::Auto,
         }
+    }
+
+    #[test]
+    fn serial_port_scan_returns_only_unconfigured_responding_ports() {
+        let ports = ["COM4", "COM1", "COM3", "COM2"]
+            .into_iter()
+            .map(|port_name| serialport::SerialPortInfo {
+                port_name: port_name.to_string(),
+                port_type: serialport::SerialPortType::Unknown,
+            })
+            .collect();
+        let configured = HashSet::from(["COM4".to_string()]);
+        let mut probed = Vec::new();
+
+        let candidates = scan_serial_port_candidates(ports, &configured, |port_name| {
+            probed.push(port_name.to_string());
+            match port_name {
+                "COM1" => Ok(ProbedImcpDevice {
+                    display_name: "Upper Panel DDI".to_string(),
+                    firmware_version: "1.2.3".to_string(),
+                    assigned_address: Some(2),
+                    device_kind: DeviceKind::UpperPanelDdi,
+                    protocol_version: 1,
+                    device_id: "1234".to_string(),
+                    displays: 1,
+                    controls: 40,
+                    features: String::new(),
+                }),
+                "COM2" => Err("No IMCP/HCP response".to_string()),
+                "COM3" => Err("Port is already in use".to_string()),
+                _ => panic!("configured port must not be probed"),
+            }
+        });
+
+        assert_eq!(probed, ["COM1", "COM2", "COM3"]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].port_name, "COM1");
+        assert_eq!(candidates[0].device_name, "Upper Panel DDI");
+        assert_eq!(candidates[0].device_kind, "Upper Panel DDI");
+        assert_eq!(candidates[0].device_kind_id, "upper-panel-ddi");
+        assert_eq!(candidates[0].firmware_version, "1.2.3");
     }
 
     fn test_probed_child(device_id: &str, assigned_address: u8) -> ProbedImcpDevice {
