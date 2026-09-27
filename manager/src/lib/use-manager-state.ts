@@ -222,7 +222,7 @@ export function useManagerState() {
     async (deviceRoleAssignments: DeviceRoleAssignment[]) => {
       if (!isTauri()) {
         setSnapshot((current) => ({ ...current, deviceRoleAssignments }));
-        return;
+        return true;
       }
 
       try {
@@ -230,8 +230,10 @@ export function useManagerState() {
           invoke<AppSnapshot>("save_device_role_assignments", { deviceRoleAssignments }),
         );
         replaceSnapshot(next);
+        return true;
       } catch (error) {
         setRuntimeError(String(error));
+        return false;
       }
     },
     [replaceSnapshot, runAction],

@@ -34,7 +34,7 @@ type MappingSettingsProps = {
   deviceRoleAssignments: DeviceRoleAssignment[];
   learnSession: LearnSessionStatus;
   busyAction: string | null;
-  onSaveDeviceRoleAssignments: (assignments: DeviceRoleAssignment[]) => Promise<void>;
+  onSaveDeviceRoleAssignments: (assignments: DeviceRoleAssignment[]) => Promise<boolean>;
   onTriggerRoleInput: (request: RoleInputTriggerRequest) => Promise<number>;
   onStartLearn: (request: LearnRequest) => Promise<void>;
   onCancelLearn: () => Promise<void>;
@@ -79,9 +79,11 @@ export function MappingSettings({
   const [roleActionNotice, setRoleActionNotice] = useState<{ controlId: string; message: string } | null>(null);
   const [continuousLearnDeviceId, setContinuousLearnDeviceId] = useState("");
   const [continuousLearn, setContinuousLearn] = useState<ContinuousLearnState | null>(null);
+  const [resettingContinuousLearn, setResettingContinuousLearn] = useState(false);
   const [learnNotice, setLearnNotice] = useState<string | null>(null);
   const continuousLearnRunId = useRef(0);
   const armingRequestKey = useRef<string | null>(null);
+  const resetInProgress = useRef(false);
 
   const roleDefinition = useMemo(
     () => getRoleDefinition(selectedRoleId, roleDefinitions),
@@ -99,7 +101,11 @@ export function MappingSettings({
   const bulkDeleteDisabled =
     roleBindingCount === 0 ||
     busyAction !== null ||
+    resettingContinuousLearn ||
     learnSession.active ||
+    (continuousLearn !== null && continuousLearn.phase !== "completed");
+  const roleSelectionDisabled =
+    resettingContinuousLearn ||
     (continuousLearn !== null && continuousLearn.phase !== "completed");
   const roleControlCapacity = roleAssignments.reduce((maximum, assignment) => {
     const device = devices.find((entry) => entry.deviceId === assignment.deviceId);
@@ -127,6 +133,10 @@ export function MappingSettings({
       return !boundLogicalControlIds.has(control.logicalControlId);
     });
   }, [continuousLearnAssignment, roleControls]);
+  const allContinuousLearnControlIds = useMemo(
+    () => [...new Set(roleControls.map((control) => control.logicalControlId))],
+    [roleControls],
+  );
 
   const continuousLearnTargetDevice = devices.find(
     (device) => device.deviceId === (continuousLearn?.targetDeviceId ?? continuousLearnDeviceId),
@@ -304,29 +314,81 @@ export function MappingSettings({
     }
   };
 
-  const beginContinuousLearn = () => {
-    if (
-      busyAction !== null ||
-      learnSession.active ||
-      continuousLearn !== null ||
-      !continuousLearnDeviceId ||
-      continuousLearnCandidates.length === 0
-    ) {
-      return;
-    }
-
+  const startContinuousLearnQueue = (targetDeviceId: string, logicalControlIds: string[]) => {
     continuousLearnRunId.current += 1;
     armingRequestKey.current = null;
     setLearnNotice(null);
     setContinuousLearn({
       runId: continuousLearnRunId.current,
       roleId: selectedRoleId,
-      targetDeviceId: continuousLearnDeviceId,
-      logicalControlIds: continuousLearnCandidates.map((control) => control.logicalControlId),
+      targetDeviceId,
+      logicalControlIds,
       currentIndex: 0,
       phase: "arming",
       notice: null,
     });
+  };
+
+  const beginContinuousLearn = () => {
+    if (
+      busyAction !== null ||
+      learnSession.active ||
+      continuousLearn !== null ||
+      resetInProgress.current ||
+      !continuousLearnDeviceId ||
+      continuousLearnCandidates.length === 0
+    ) {
+      return;
+    }
+
+    startContinuousLearnQueue(
+      continuousLearnDeviceId,
+      continuousLearnCandidates.map((control) => control.logicalControlId),
+    );
+  };
+
+  const resetAndBeginContinuousLearn = async () => {
+    const targetDeviceId = continuousLearn?.targetDeviceId ?? continuousLearnDeviceId;
+    const assignment = roleAssignments.find((entry) => entry.deviceId === targetDeviceId);
+    if (
+      busyAction !== null ||
+      learnSession.active ||
+      resetInProgress.current ||
+      (continuousLearn !== null && continuousLearn.phase !== "completed") ||
+      !assignment ||
+      allContinuousLearnControlIds.length === 0
+    ) {
+      return;
+    }
+
+    const deviceName = devices.find((device) => device.deviceId === targetDeviceId)?.displayName ?? targetDeviceId;
+    const roleName = deviceRoleLabels[selectedRoleId] ?? selectedRoleId;
+    if (!window.confirm(`${roleName} / ${deviceName} の既存結線 ${assignment.bindings.length} 件を削除して、全 ${allContinuousLearnControlIds.length} 件の学習を開始しますか？`)) {
+      return;
+    }
+
+    resetInProgress.current = true;
+    setResettingContinuousLearn(true);
+    setLearnNotice(null);
+    try {
+      const saved = await onSaveDeviceRoleAssignments(
+        deviceRoleAssignments.map((entry) =>
+          entry.deviceId === targetDeviceId && entry.roleId === selectedRoleId
+            ? { ...entry, bindings: [] }
+            : entry,
+        ),
+      );
+      if (!saved) {
+        setLearnNotice("既存の学習のクリアに失敗しました。学習は開始していません。");
+        return;
+      }
+      startContinuousLearnQueue(targetDeviceId, allContinuousLearnControlIds);
+    } catch (error) {
+      setLearnNotice(`既存の学習のクリアに失敗しました: ${String(error)}`);
+    } finally {
+      resetInProgress.current = false;
+      setResettingContinuousLearn(false);
+    }
   };
 
   const resumeContinuousLearn = () => {
@@ -583,7 +645,7 @@ export function MappingSettings({
                         deviceRoleAssignments.find((assignment) => assignment.roleId === definition.roleId)?.deviceId ?? "",
                       );
                     }}
-                    disabled={continuousLearn !== null && continuousLearn.phase !== "completed"}
+                    disabled={roleSelectionDisabled}
                     className={`w-full rounded-lg border p-4 text-left transition ${
                       isSelected
                         ? "border-blue-200 bg-blue-50"
@@ -649,9 +711,9 @@ export function MappingSettings({
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div>
                       <p className="text-sm font-medium text-indigo-700">一括登録</p>
-                      <h3 className="mt-1 text-xl font-semibold text-gray-900">未登録を連続学習</h3>
+                      <h3 className="mt-1 text-xl font-semibold text-gray-900">連続学習</h3>
                       <p className="mt-1 text-sm text-gray-600">
-                        対象 Device の未結線 logical control を、画面の定義順に1件ずつ学習します。
+                        対象 Device の未結線項目を学習するか、既存結線をクリアして全項目を学習し直します。
                       </p>
                     </div>
                     <div className="rounded-full border border-indigo-200 bg-white px-4 py-2 text-sm text-indigo-800">
@@ -674,7 +736,7 @@ export function MappingSettings({
                             <select
                               value={continuousLearnDeviceId}
                               onChange={(event) => setContinuousLearnDeviceId(event.target.value)}
-                              disabled={busyAction !== null || learnSession.active}
+                              disabled={busyAction !== null || learnSession.active || resettingContinuousLearn}
                               className="w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-xs disabled:bg-gray-100"
                             >
                               {roleAssignments.map((assignment) => (
@@ -684,19 +746,36 @@ export function MappingSettings({
                               ))}
                             </select>
                           </label>
-                          <button
-                            type="button"
-                            onClick={beginContinuousLearn}
-                            disabled={
-                              busyAction !== null ||
-                              learnSession.active ||
-                              !continuousLearnDeviceId ||
-                              continuousLearnCandidates.length === 0
-                            }
-                            className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-indigo-600 px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            <Radio size={14} /> 連続学習開始
-                          </button>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={beginContinuousLearn}
+                              disabled={
+                                busyAction !== null ||
+                                learnSession.active ||
+                                resettingContinuousLearn ||
+                                !continuousLearnDeviceId ||
+                                continuousLearnCandidates.length === 0
+                              }
+                              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-indigo-600 px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <Radio size={14} /> 未登録を学習
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void resetAndBeginContinuousLearn()}
+                              disabled={
+                                busyAction !== null ||
+                                learnSession.active ||
+                                resettingContinuousLearn ||
+                                !continuousLearnDeviceId ||
+                                allContinuousLearnControlIds.length === 0
+                              }
+                              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md border border-red-200 bg-white px-3 text-xs font-medium text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <RotateCcw size={14} /> {resettingContinuousLearn ? "クリア中…" : "既存の学習をクリアして開始"}
+                            </button>
+                          </div>
                         </div>
 
                         {continuousLearnCandidates.length === 0 ? (
@@ -829,14 +908,24 @@ export function MappingSettings({
                           </>
                         )}
                         {continuousLearn.phase === "completed" && (
-                          <button
-                            type="button"
-                            onClick={discardContinuousLearn}
-                            disabled={busyAction !== null}
-                            className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 text-xs font-medium text-gray-700 disabled:opacity-50"
-                          >
-                            <RotateCcw size={14} /> 新しいキューを作る
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => void resetAndBeginContinuousLearn()}
+                              disabled={busyAction !== null || learnSession.active || resettingContinuousLearn || allContinuousLearnControlIds.length === 0}
+                              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md border border-red-200 bg-white px-3 text-xs font-medium text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <RotateCcw size={14} /> {resettingContinuousLearn ? "クリア中…" : "既存の学習をクリアして開始"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={discardContinuousLearn}
+                              disabled={busyAction !== null || resettingContinuousLearn}
+                              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 text-xs font-medium text-gray-700 disabled:opacity-50"
+                            >
+                              キューを閉じる
+                            </button>
+                          </>
                         )}
                       </div>
                     </div>
