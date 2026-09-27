@@ -25,7 +25,7 @@ type DeviceSettingsProps = {
   onRefresh: () => Promise<void>;
   onScanSerialPorts: () => Promise<void>;
   onSaveEndpoints: (deviceEndpoints: DeviceEndpointConfig[]) => Promise<void>;
-  onSaveDeviceRoleAssignments: (deviceRoleAssignments: DeviceRoleAssignment[]) => Promise<void>;
+  onSaveDeviceRoleAssignments: (deviceRoleAssignments: DeviceRoleAssignment[]) => Promise<boolean>;
 };
 
 type EndpointDraft = DeviceEndpointConfig;
