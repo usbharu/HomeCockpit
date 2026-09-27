@@ -92,6 +92,15 @@ export function MappingSettings({
     [deviceRoleAssignments, selectedRoleId],
   );
   const hasRoleAssignments = roleAssignments.length > 0;
+  const roleBindingCount = roleAssignments.reduce(
+    (count, assignment) => count + assignment.bindings.length,
+    0,
+  );
+  const bulkDeleteDisabled =
+    roleBindingCount === 0 ||
+    busyAction !== null ||
+    learnSession.active ||
+    (continuousLearn !== null && continuousLearn.phase !== "completed");
   const roleControlCapacity = roleAssignments.reduce((maximum, assignment) => {
     const device = devices.find((entry) => entry.deviceId === assignment.deviceId);
     return Math.max(maximum, device?.controls ?? 0);
@@ -213,6 +222,25 @@ export function MappingSettings({
                   ),
               ),
             }
+          : assignment,
+      ),
+    );
+  };
+
+  const removeAllRoleBindings = async () => {
+    if (bulkDeleteDisabled) {
+      return;
+    }
+
+    const roleLabel = deviceRoleLabels[selectedRoleId] ?? selectedRoleId;
+    if (!window.confirm(`${roleLabel} の物理→論理結線 ${roleBindingCount} 件をすべて削除しますか？`)) {
+      return;
+    }
+
+    await updateAssignments((assignments) =>
+      assignments.map((assignment) =>
+        assignment.roleId === selectedRoleId
+          ? { ...assignment, bindings: [] }
           : assignment,
       ),
     );
@@ -808,15 +836,25 @@ export function MappingSettings({
                 </section>
 
                 <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-                  <div className="flex items-center justify-between gap-4">
+                  <div className="flex flex-wrap items-center justify-between gap-4">
                     <div>
                       <h3 className="text-xl font-semibold text-gray-900">物理 → 論理結線</h3>
                       <p className="mt-1 text-sm text-gray-500">
                         1つの物理入力を複数Role／論理コントロールへ登録できます。重複は警告だけで拒否しません。
                       </p>
                     </div>
-                    <div className="rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
-                      {roleAssignments.reduce((count, assignment) => count + assignment.bindings.length, 0)} binding(s)
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
+                        {roleBindingCount} binding(s)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void removeAllRoleBindings()}
+                        disabled={bulkDeleteDisabled}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Trash2 size={15} /> {roleBindingCount} 件を一括削除
+                      </button>
                     </div>
                   </div>
 
