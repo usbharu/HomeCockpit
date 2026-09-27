@@ -21,13 +21,17 @@ import {
   type ManagerLogEntry,
   type ManagedDeviceSummary,
   type RoleInputTriggerRequest,
+  type SerialPortCandidate,
 } from "@/lib/manager-types";
 
 export function useManagerState() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(defaultSnapshot);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [serialPorts, setSerialPorts] = useState<string[]>([]);
+  const [serialPortCandidates, setSerialPortCandidates] = useState<SerialPortCandidate[]>([]);
+  const [serialPortScanError, setSerialPortScanError] = useState<string | null>(null);
+  const [isScanningSerialPorts, setIsScanningSerialPorts] = useState(false);
+  const serialPortScanInProgress = useRef(false);
   const learnStateEventVersion = useRef(0);
 
   const replaceSnapshot = useCallback((next: AppSnapshot) => {
@@ -190,16 +194,27 @@ export function useManagerState() {
     [replaceSnapshot, runAction],
   );
 
-  const refreshSerialPorts = useCallback(async () => {
+  const scanSerialPorts = useCallback(async () => {
+    if (serialPortScanInProgress.current) {
+      return;
+    }
     if (!isTauri()) {
+      setSerialPortScanError("COM ポートの走査には Tauri アプリが必要です。");
       return;
     }
 
+    serialPortScanInProgress.current = true;
+    setIsScanningSerialPorts(true);
+    setSerialPortScanError(null);
+    setSerialPortCandidates([]);
     try {
-      const ports = await invoke<string[]>("list_serial_ports");
-      setSerialPorts(ports);
+      const candidates = await invoke<SerialPortCandidate[]>("scan_serial_ports");
+      setSerialPortCandidates(candidates);
     } catch (error) {
-      setRuntimeError(String(error));
+      setSerialPortScanError(String(error));
+    } finally {
+      serialPortScanInProgress.current = false;
+      setIsScanningSerialPorts(false);
     }
   }, []);
 
@@ -375,7 +390,6 @@ export function useManagerState() {
     }
 
     void refreshSnapshot();
-    void refreshSerialPorts();
 
     let disposed = false;
     let unlistenFns: UnlistenFn[] = [];
@@ -438,7 +452,6 @@ export function useManagerState() {
     mergeAdapterMappings,
     mergeLearnSession,
     mergeStatus,
-    refreshSerialPorts,
     refreshSnapshot,
   ]);
 
@@ -446,7 +459,9 @@ export function useManagerState() {
     snapshot,
     runtimeError,
     busyAction,
-    serialPorts,
+    serialPortCandidates,
+    serialPortScanError,
+    isScanningSerialPorts,
     saveConfig,
     startDcsBios,
     stopDcsBios,
@@ -458,7 +473,7 @@ export function useManagerState() {
     saveAdapterProfile,
     startLearn,
     cancelLearn,
-    refreshSerialPorts,
+    scanSerialPorts,
     sendCommand,
     triggerRoleInput,
     refreshSnapshot,

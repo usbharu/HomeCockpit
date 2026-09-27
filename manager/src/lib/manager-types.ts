@@ -106,6 +106,19 @@ export type DeviceEndpointConfig = {
   roleHint: EndpointRoleHint;
 };
 
+export type SerialPortCandidate = {
+  portName: string;
+  deviceName: string;
+  deviceKind: string;
+  deviceKindId: string;
+  firmwareVersion: string;
+  manufacturer: string | null;
+  product: string | null;
+  vid: number | null;
+  pid: number | null;
+  serialNumber: string | null;
+};
+
 export type ManagedDeviceSummary = {
   id: string;
   connectionKind: "direct" | "hub" | "hub-child" | string;

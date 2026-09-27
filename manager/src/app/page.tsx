@@ -23,11 +23,14 @@ export default function ManagerTabs() {
         snapshot,
         runtimeError,
         busyAction,
-        serialPorts,
+        serialPortCandidates,
+        serialPortScanError,
+        isScanningSerialPorts,
         saveConfig,
         startDcsBios,
         stopDcsBios,
         refreshDevices,
+        scanSerialPorts,
         saveDeviceEndpoints,
         saveDeviceRoleAssignments,
         saveAdapterMappings,
@@ -65,9 +68,12 @@ export default function ManagerTabs() {
                     deviceEndpoints={snapshot.deviceEndpoints}
                     deviceRoleAssignments={snapshot.deviceRoleAssignments}
                     roleDefinitions={snapshot.roleDefinitions}
-                    serialPorts={serialPorts}
+                    serialPortCandidates={serialPortCandidates}
+                    serialPortScanError={serialPortScanError}
+                    isScanningSerialPorts={isScanningSerialPorts}
                     busyAction={busyAction}
                     onRefresh={refreshDevices}
+                    onScanSerialPorts={scanSerialPorts}
                     onSaveEndpoints={saveDeviceEndpoints}
                     onSaveDeviceRoleAssignments={saveDeviceRoleAssignments}
                 />

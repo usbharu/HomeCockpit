@@ -10,6 +10,7 @@ import type {
   EndpointRoleHint,
   ManagedDeviceSummary,
   RoleDefinition,
+  SerialPortCandidate,
 } from "@/lib/manager-types";
 
 type DeviceSettingsProps = {
@@ -17,9 +18,12 @@ type DeviceSettingsProps = {
   deviceEndpoints: DeviceEndpointConfig[];
   deviceRoleAssignments: DeviceRoleAssignment[];
   roleDefinitions: RoleDefinition[];
-  serialPorts: string[];
+  serialPortCandidates: SerialPortCandidate[];
+  serialPortScanError: string | null;
+  isScanningSerialPorts: boolean;
   busyAction: string | null;
   onRefresh: () => Promise<void>;
+  onScanSerialPorts: () => Promise<void>;
   onSaveEndpoints: (deviceEndpoints: DeviceEndpointConfig[]) => Promise<void>;
   onSaveDeviceRoleAssignments: (deviceRoleAssignments: DeviceRoleAssignment[]) => Promise<void>;
 };
@@ -48,9 +52,12 @@ const DeviceSettings = ({
   devices,
   deviceEndpoints,
   deviceRoleAssignments,
-  serialPorts,
+  serialPortCandidates,
+  serialPortScanError,
+  isScanningSerialPorts,
   busyAction,
   onRefresh,
+  onScanSerialPorts,
   onSaveEndpoints,
   onSaveDeviceRoleAssignments,
   roleDefinitions,
@@ -61,6 +68,10 @@ const DeviceSettings = ({
   useEffect(() => {
     setDraftEndpoints(deviceEndpoints);
   }, [deviceEndpoints]);
+
+  useEffect(() => {
+    void onScanSerialPorts();
+  }, [onScanSerialPorts]);
 
   const hasUnsavedChanges = useMemo(
     () => JSON.stringify(draftEndpoints) !== JSON.stringify(deviceEndpoints),
@@ -134,12 +145,22 @@ const DeviceSettings = ({
     setNewEndpoint(defaultDraft());
   };
 
+  const selectCandidate = (candidate: SerialPortCandidate) => {
+    setNewEndpoint((current) => ({
+      ...current,
+      name: candidate.deviceName,
+      address: candidate.portName,
+      baudRate: 115200,
+      roleHint: candidate.deviceKindId === "imcp-hub" ? "imcp-hub" : "auto",
+    }));
+  };
+
   return (
     <div className="h-full overflow-y-auto p-8">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
         <datalist id="serial-port-options">
-          {serialPorts.map((port) => (
-            <option key={port} value={port} />
+          {serialPortCandidates.map((candidate) => (
+            <option key={candidate.portName} value={candidate.portName} />
           ))}
         </datalist>
         <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
@@ -147,7 +168,7 @@ const DeviceSettings = ({
             <div>
               <h2 className="text-2xl font-semibold text-gray-800">デバイス接続先</h2>
               <p className="mt-1 text-sm text-gray-500">
-                COM ポートを自動走査せず、ここで登録した endpoint だけを IMCP/HCP デバイス探索対象にします。
+                応答した IMCP/HCP デバイスを接続候補に表示します。接続先として登録した endpoint だけを継続的な探索対象にします。
               </p>
               <p className="mt-1 text-xs text-gray-400">変更は自動保存されます。</p>
             </div>
@@ -155,14 +176,57 @@ const DeviceSettings = ({
             <div className="flex flex-wrap gap-3">
               <button
                 type="button"
+                onClick={() => void onScanSerialPorts()}
+                disabled={isScanningSerialPorts}
+                className="inline-flex items-center gap-2 rounded-md border border-blue-300 bg-blue-50 px-5 py-2.5 text-sm font-medium text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <RefreshCw size={16} />
+                {isScanningSerialPorts ? "走査中…" : "COM ポートを再走査"}
+              </button>
+              <button
+                type="button"
                 onClick={() => void onRefresh()}
                 disabled={busyAction !== null}
                 className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <RefreshCw size={16} />
-                再読込
+                登録済みデバイスを再読込
               </button>
             </div>
+          </div>
+
+          <div className="mt-6 border-t border-gray-200 pt-6">
+            <h3 className="text-sm font-semibold text-gray-800">接続候補</h3>
+            <p className="mt-1 text-xs text-gray-500">115200 baud で応答した未登録のポートです。候補を選んでも、追加するまでは登録されません。</p>
+            {serialPortScanError ? (
+              <p role="alert" className="mt-3 text-sm text-red-700">走査できませんでした: {serialPortScanError}</p>
+            ) : isScanningSerialPorts ? (
+              <p role="status" className="mt-3 text-sm text-gray-500">COM ポートを確認しています…</p>
+            ) : serialPortCandidates.length === 0 ? (
+              <p className="mt-3 text-sm text-gray-500">応答する未登録のポートはありません。認識されない場合は下の COM ポート欄へ直接入力できます。</p>
+            ) : (
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                {serialPortCandidates.map((candidate) => (
+                  <button
+                    key={candidate.portName}
+                    type="button"
+                    onClick={() => selectCandidate(candidate)}
+                    className="rounded-md border border-gray-200 bg-gray-50 p-4 text-left text-sm transition hover:border-blue-400 hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-blue-500"
+                    aria-label={`${candidate.deviceName} (${candidate.portName}) を接続先に入力`}
+                  >
+                    <span className="block font-medium text-gray-800">{candidate.deviceName}</span>
+                    <span className="block text-gray-600">{candidate.portName} · {candidate.deviceKind} · firmware {candidate.firmwareVersion}</span>
+                    {(candidate.product || candidate.manufacturer) && (
+                      <span className="block text-gray-500">{[candidate.manufacturer, candidate.product].filter(Boolean).join(" · ")}</span>
+                    )}
+                    {candidate.vid !== null && candidate.pid !== null && (
+                      <span className="block text-gray-500">USB VID:PID {candidate.vid.toString(16).padStart(4, "0")}:{candidate.pid.toString(16).padStart(4, "0")}</span>
+                    )}
+                    {candidate.serialNumber && <span className="block text-gray-500">Serial: {candidate.serialNumber}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="mt-6 grid gap-4 border-t border-gray-200 pt-6 lg:grid-cols-[minmax(0,1fr)_280px_160px_160px_140px_120px]">
