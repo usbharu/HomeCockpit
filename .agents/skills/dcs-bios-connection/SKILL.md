@@ -39,7 +39,7 @@ The agent terminal may not have DCS installed. Distinguish the agent terminal fr
 
 ## Code-change rules
 
-Keep UDP chunking and multicast membership, `SO_REUSEADDR`, the four-byte sync marker, little-endian address/length fields, multiple records per frame, cross-datagram parser state, and malformed-frame recovery. Add a regression test for parser or command changes. For Manager changes, inspect the files listed in `references/homecockpit.md` and run the targeted Rust tests plus `manager/npm run build` when applicable.
+Keep UDP chunking and multicast membership, `SO_REUSEADDR`, the four-byte sync marker, little-endian address/length fields, multiple records per frame, cross-datagram parser state, and malformed-frame recovery. Add a regression test for parser or command changes. For Manager changes, inspect the files listed in `references/homecockpit.md` and run the targeted Rust tests plus `manager/pnpm run build` when applicable.
 
 ## Report
 

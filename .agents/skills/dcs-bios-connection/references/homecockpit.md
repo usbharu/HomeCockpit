@@ -40,7 +40,7 @@ Add or update colocated tests for framing, cross-datagram reassembly, malformed 
 
 ```bash
 cargo test --manifest-path manager/src-tauri/Cargo.toml
-cd manager && npm run build
+cd manager && pnpm run build
 ```
 
 Do not change Manager code to report `receiving` without a real datagram. First prove the network path with the bundled detector.
