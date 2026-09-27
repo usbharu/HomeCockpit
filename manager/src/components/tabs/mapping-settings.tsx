@@ -104,7 +104,9 @@ export function MappingSettings({
     resettingContinuousLearn ||
     learnSession.active ||
     (continuousLearn !== null && continuousLearn.phase !== "completed");
-  const roleSelectionDisabled = resettingContinuousLearn || continuousLearn !== null;
+  const roleSelectionDisabled =
+    resettingContinuousLearn ||
+    (continuousLearn !== null && continuousLearn.phase !== "completed");
   const roleControlCapacity = roleAssignments.reduce((maximum, assignment) => {
     const device = devices.find((entry) => entry.deviceId === assignment.deviceId);
     return Math.max(maximum, device?.controls ?? 0);
@@ -631,7 +633,18 @@ export function MappingSettings({
                   <button
                     key={definition.roleId}
                     type="button"
-                    onClick={() => setSelectedRoleId(definition.roleId)}
+                    onClick={() => {
+                      if (isSelected) {
+                        return;
+                      }
+                      if (continuousLearn?.phase === "completed") {
+                        discardContinuousLearn();
+                      }
+                      setSelectedRoleId(definition.roleId);
+                      setContinuousLearnDeviceId(
+                        deviceRoleAssignments.find((assignment) => assignment.roleId === definition.roleId)?.deviceId ?? "",
+                      );
+                    }}
                     disabled={roleSelectionDisabled}
                     className={`w-full rounded-lg border p-4 text-left transition ${
                       isSelected
