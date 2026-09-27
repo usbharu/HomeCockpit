@@ -77,6 +77,15 @@ const DeviceSettings = ({
     () => JSON.stringify(draftEndpoints) !== JSON.stringify(deviceEndpoints),
     [deviceEndpoints, draftEndpoints],
   );
+  const registeredAddresses = useMemo(
+    () => new Set(draftEndpoints.map((endpoint) => endpoint.address.trim())),
+    [draftEndpoints],
+  );
+  const availableCandidates = useMemo(
+    () => serialPortCandidates.filter((candidate) => !registeredAddresses.has(candidate.portName)),
+    [registeredAddresses, serialPortCandidates],
+  );
+  const isNewEndpointDuplicate = registeredAddresses.has(newEndpoint.address.trim());
 
   useEffect(() => {
     if (!hasUnsavedChanges) {
@@ -129,7 +138,7 @@ const DeviceSettings = ({
   };
 
   const addEndpoint = () => {
-    if (!newEndpoint.name.trim() || !newEndpoint.address.trim()) {
+    if (!newEndpoint.name.trim() || !newEndpoint.address.trim() || isNewEndpointDuplicate) {
       return;
     }
 
@@ -159,7 +168,7 @@ const DeviceSettings = ({
     <div className="h-full overflow-y-auto p-8">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
         <datalist id="serial-port-options">
-          {serialPortCandidates.map((candidate) => (
+          {availableCandidates.map((candidate) => (
             <option key={candidate.portName} value={candidate.portName} />
           ))}
         </datalist>
@@ -202,11 +211,11 @@ const DeviceSettings = ({
               <p role="alert" className="mt-3 text-sm text-red-700">走査できませんでした: {serialPortScanError}</p>
             ) : isScanningSerialPorts ? (
               <p role="status" className="mt-3 text-sm text-gray-500">COM ポートを確認しています…</p>
-            ) : serialPortCandidates.length === 0 ? (
+            ) : availableCandidates.length === 0 ? (
               <p className="mt-3 text-sm text-gray-500">応答する未登録のポートはありません。認識されない場合は下の COM ポート欄へ直接入力できます。</p>
             ) : (
               <div className="mt-3 grid gap-3 md:grid-cols-2">
-                {serialPortCandidates.map((candidate) => (
+                {availableCandidates.map((candidate) => (
                   <button
                     key={candidate.portName}
                     type="button"
@@ -252,6 +261,9 @@ const DeviceSettings = ({
                 placeholder="/dev/ttys001 または COM3"
                 className="rounded-md border border-gray-300 px-3 py-2 outline-none transition focus:border-blue-500"
               />
+              {isNewEndpointDuplicate && (
+                <span className="text-xs text-red-700">この COM ポートは登録済みです。</span>
+              )}
             </label>
             <label className="flex flex-col gap-2 text-sm text-gray-700">
               <span>Baud Rate</span>
@@ -302,7 +314,8 @@ const DeviceSettings = ({
             <button
               type="button"
               onClick={addEndpoint}
-              className="inline-flex h-11 items-center justify-center gap-2 self-end rounded-md border border-dashed border-blue-300 bg-blue-50 px-4 text-sm font-medium text-blue-700 transition hover:bg-blue-100"
+              disabled={isNewEndpointDuplicate}
+              className="inline-flex h-11 items-center justify-center gap-2 self-end rounded-md border border-dashed border-blue-300 bg-blue-50 px-4 text-sm font-medium text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <Plus size={16} />
               追加
