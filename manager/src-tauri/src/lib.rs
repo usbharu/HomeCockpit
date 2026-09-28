@@ -34,7 +34,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 mod adapter_catalog;
 mod mapping;
-mod mcp;
+pub mod mcp;
 
 use adapter_catalog::{
     infer_role_bindings, normalize_aircraft_name, AdapterCatalog, AdapterProfile,
@@ -1007,7 +1007,7 @@ fn known_gateway_for_device(
     })
 }
 
-struct RuntimeState {
+pub struct RuntimeState {
     mcp_config: Mutex<McpConfig>,
     mcp_status: Mutex<McpStatus>,
     mcp_server: Mutex<Option<mcp::McpServerHandle>>,
@@ -1036,7 +1036,7 @@ struct RuntimeState {
 }
 
 impl RuntimeState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             mcp_config: Mutex::new(McpConfig::default()),
             mcp_status: Mutex::new(McpStatus::default()),

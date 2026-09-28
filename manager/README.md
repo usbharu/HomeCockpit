@@ -16,14 +16,14 @@ The server exposes Tools only:
 | --- | --- | --- |
 | `manager_snapshot` | none | Current state, configuration, logs, and devices |
 | `manager_logs` | none | Recent Manager log entries |
-| `manager_devices` | none | Discovered device summaries |
-| `manager_scan_serial_ports` | none | Probed, unconfigured serial port candidates |
+| `manager_devices` | none | Cached device summaries (no rescan) |
+| `manager_scan_serial_ports` | none | Unconfigured serial ports with successful IMCP root probe |
 | `manager_preview_adapter_profile` | `request` | Parsed profile without saving |
 | `manager_start_learn` | `request` | Snapshot with active learning session |
 | `manager_cancel_learn` | none | Snapshot after cancellation |
 | `manager_refresh_devices` | none | Rescanned device summaries |
 | `manager_trigger_role_input` | `roleId`, `logicalControlId`, `eventKind` | Number of dispatched adapter actions |
-| `manager_save_dcsbios_config` | `config` | Updated Manager snapshot |
+| `manager_save_dcsbios_config` | `config` | Persisted config; restarts serial listeners (export UDP: use `dcsbios_stop`/`dcsbios_start`) |
 | `manager_save_endpoints` | `deviceEndpoints` | Updated Manager snapshot |
 | `manager_save_role_assignments` | `deviceRoleAssignments` | Updated Manager snapshot |
 | `manager_save_adapter_mappings` | `adapterMappings` | Updated Manager snapshot |
@@ -50,6 +50,32 @@ IMCP frame fields are `to` and `from` (byte values), `kind` (`ping`, `pong`, `ac
 An endpoint write result confirms bytes were written to the serial transport. It does not prove an IMCP ACK or that the device applied the request. DCS-BIOS import sends likewise do not prove the simulator changed state; check its export value or cockpit state. `dcsbios_memory_read` returns only ranges already received by Manager.
 
 Trace tools return arrays in observation order. `id` is a process-local cursor: pass the last observed `id` as `sinceId` to read later entries. `limit` defaults to 50 and allows 1–128 entries; each trace keeps the latest 128 entries in memory. DCS packet previews contain at most 256 bytes in `hexPreview`; `truncated` marks a longer datagram. Use `dcsbios_packet_read` for its complete hex bytes while the ID remains in the trace. `startsWithSync` only reports whether the datagram starts with a DCS-BIOS sync marker (continuation datagrams can validly omit it). IMCP entries include `direction` (`rx` or `tx`), frame fields, and optional decoded `hcp` or `decodeError`. The TX trace records writes requested through the MCP endpoint queue; automatic Manager protocol writes are not included. A received ACK can be observed in `imcp_recent_frames`, but it is not automatically correlated with a prior send or proof that a command was applied. The trace is cleared when Manager exits.
+
+### MCP tool-description evaluation (headless)
+
+The desktop app and the `manager-mcp-serve` binary use the same `McpHandler` and `tool_catalog()` descriptions. For agent tuning without the UI:
+
+```bash
+cd manager/src-tauri
+cargo run --bin manager-mcp-serve -- 28765
+```
+
+In another terminal:
+
+```bash
+python3 manager/scripts/mcp_tool_selection_eval.py --port 28765
+python3 manager/scripts/mcp_call_all_tools.py 28765
+python3 manager/scripts/mcp_http_client.py --port 28765 --list-tools
+```
+
+Golden tool-choice scenarios for context-free agents live in `manager/scripts/mcp_tool_scenarios.json`.
+
+Context-free tuning loop (no repo access for the agent):
+
+1. `python3 manager/scripts/mcp_eval_bundle.py <port>` — instructions, `tools/list`, and all `tools/call` results as JSON  
+2. Give that JSON plus `manager/scripts/mcp_subagent_tune_prompt.txt` to an agent with **no codebase context**  
+3. Apply returned `description_changes`, restart `manager-mcp-serve`, repeat until `loop_complete` is true  
+4. `python3 manager/scripts/mcp_call_all_tools.py <port>` — verify 29 calls (7 expected failures on an empty environment)
 
 ## Development checks
 

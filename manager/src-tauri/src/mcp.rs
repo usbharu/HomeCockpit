@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 
-pub(super) struct McpServerHandle {
+pub struct McpServerHandle {
     pub(super) cancel: CancellationToken,
     done: std::sync::mpsc::Receiver<()>,
 }
@@ -42,11 +42,23 @@ struct McpHandler {
     state: Arc<RuntimeState>,
 }
 
+const MCP_SERVER_INSTRUCTIONS: &str = "\
+HomeCockpit Manager MCP exposes state, configuration, DCS-BIOS, and serial protocol tools. \
+Operations may change persisted settings, restart serial endpoint listeners, or send commands to DCS and hardware. \
+Serial writes (imcp_send, hcp_send) and DCS import (dcsbios_send_command) only confirm transport delivery, not IMCP ACK, device application, or simulator state. \
+Use manager_snapshot for full AppSnapshot; manager_logs is logs only. \
+manager_devices returns cached discovery results; call manager_refresh_devices to rescan endpoints (restarts listeners). \
+manager_save_* tools replace entire arrays from the snapshot—partial patches are not supported. \
+manager_preview_adapter_profile validates without saving; manager_save_adapter_profile persists. \
+manager_save_dcsbios_config persists export/command settings and restarts serial endpoint listeners; it does not rebind the export UDP listener—after export host/port changes, call dcsbios_stop then dcsbios_start. \
+Trace tools (dcsbios_recent_packets, imcp_recent_frames, hcp_recent_packets) poll in-memory rings (128 entries max) with sinceId; limit defaults to 50. \
+Use dcsbios_packet_read for full UDP payload bytes by trace id.";
+
 impl ServerHandler for McpHandler {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("homecockpit-manager", env!("CARGO_PKG_VERSION")))
-            .with_instructions("Manager operations may affect connected DCS and hardware. A successful send only confirms transport write, not device or simulator state.")
+            .with_instructions(MCP_SERVER_INSTRUCTIONS)
     }
 
     async fn list_tools(
@@ -475,176 +487,204 @@ fn tool_catalog() -> Vec<Tool> {
     let assignment = json!({"type":"object","properties":{"deviceId":text,"roleId":text,"bindings":{"type":"array","items":{"type":"object","properties":{"physicalControlId":{"type":"integer","minimum":0,"maximum":65535},"logicalControlId":text},"required":["physicalControlId","logicalControlId"]}}},"required":["deviceId","roleId","bindings"]});
     add!(
         "manager_snapshot",
-        "Read Manager runtime state and configuration",
+        "Get full AppSnapshot: persisted settings, runtime status, devices, mappings, roles, logs, and learn session",
         json!({}),
         &[]
     );
-    add!("manager_logs", "Read recent Manager logs", json!({}), &[]);
-    add!("manager_devices", "Read discovered devices", json!({}), &[]);
+    add!(
+        "manager_logs",
+        "Get retained log entries only; use manager_snapshot for configuration and device state",
+        json!({}),
+        &[]
+    );
+    add!(
+        "manager_devices",
+        "Get cached device summaries from the last discovery; does not rescan serial endpoints",
+        json!({}),
+        &[]
+    );
     add!(
         "manager_scan_serial_ports",
-        "Probe unconfigured serial ports",
+        "List serial ports not in saved endpoints; opens each and returns only ports with a successful IMCP root probe",
         json!({}),
         &[]
     );
     add!(
         "manager_preview_adapter_profile",
-        "Parse an adapter profile without saving it",
+        "Parse DCS-BIOS adapter profile JSON; fails if no category is supported by built-in Role bindings; validates only, does not persist",
         json!({"request":{"type":"object"}}),
         &["request"]
     );
     add!(
         "manager_start_learn",
-        "Start a device control learning session",
+        "Arm in-memory learn for a Role logical input; returns AppSnapshot; bindings persist after a matching physical event",
         json!({"request":{"type":"object","properties":{"roleId":text,"logicalControlId":text,"targetDeviceId":text,"expectedEventKind":event_kind,"mode":{"type":"string","enum":["append","replace"]},"timeoutMs":{"type":"integer","minimum":1}},"required":["roleId","logicalControlId","mode"]}}),
         &["request"]
     );
     add!(
         "manager_cancel_learn",
-        "Cancel the active learning session",
+        "Cancel the active learn session; returns updated AppSnapshot",
         json!({}),
         &[]
     );
     add!(
         "manager_refresh_devices",
-        "Rescan configured device endpoints",
+        "Rescan saved endpoints, restarting listeners; update cache and return device summaries",
         json!({}),
         &[]
     );
     add!(
         "manager_trigger_role_input",
-        "Trigger a configured logical Role input",
+        "Dispatch Role logical input via adapter mappings; returns integer action count on success; errors if no mapping (DCS-BIOS commands today)",
         json!({"roleId":text,"logicalControlId":text,"eventKind":event_kind}),
         &["roleId", "logicalControlId", "eventKind"]
     );
     add!(
         "manager_save_dcsbios_config",
-        "Save DCS-BIOS connection configuration",
+        "Persist DCS-BIOS export and command settings; restarts serial endpoint listeners; use dcsbios_stop/start to rebind export UDP; returns AppSnapshot",
         json!({"config":dcs_config}),
         &["config"]
     );
     add!(
         "manager_save_endpoints",
-        "Save device endpoint configuration",
+        "Replace all saved device endpoints, persist, and restart endpoint listeners; returns AppSnapshot",
         json!({"deviceEndpoints":{"type":"array","items":endpoint}}),
         &["deviceEndpoints"]
     );
     add!(
         "manager_save_role_assignments",
-        "Save device Role assignments",
+        "Replace all device Role assignments, persist, and restart endpoint listeners; returns AppSnapshot",
         json!({"deviceRoleAssignments":{"type":"array","items":assignment}}),
         &["deviceRoleAssignments"]
     );
     add!(
         "manager_save_adapter_mappings",
-        "Save adapter mappings",
+        "Replace all adapter control mappings, persist, and restart endpoint listeners; returns AppSnapshot",
         json!({"adapterMappings":{"type":"array","items":object}}),
         &["adapterMappings"]
     );
     add!(
         "manager_save_adapter_profile",
-        "Import and save an adapter profile",
+        "Parse adapter profile JSON, upsert to disk, return AppSnapshot; fails if no category is supported by built-in Role bindings",
         json!({"request":{"type":"object","properties":{"adapterId":text,"profileId":text,"label":text,"aircraftNames":{"type":"array","items":text},"source":text},"required":["adapterId","profileId","label","aircraftNames","source"]}}),
         &["request"]
     );
     add!(
         "dcsbios_status",
-        "Read DCS-BIOS connection status and diagnostics",
+        "Get DCS-BIOS connection config and export listener status only; use manager_snapshot for full AppSnapshot",
         json!({}),
         &[]
     );
     add!(
         "dcsbios_memory_read",
-        "Read received DCS-BIOS memory as hex",
+        "Read 1-512 bytes of received export memory as hex; fails if that range was never received",
         json!({"address":{"type":"integer","minimum":0,"maximum":65535},"length":{"type":"integer","minimum":1,"maximum":512}}),
         &["address", "length"]
     );
-    let trace_fields = json!({"sinceId":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":128}});
+    let trace_fields = json!({
+        "sinceId":{
+            "type":"integer",
+            "minimum":0,
+            "description":"Return entries with id greater than this; use 0 on the first poll"
+        },
+        "limit":{
+            "type":"integer",
+            "minimum":1,
+            "maximum":128,
+            "description":"Maximum entries to return (default 50 when omitted)"
+        }
+    });
     add!(
         "dcsbios_recent_packets",
-        "Read bounded raw UDP packet previews from the active DCS-BIOS listener",
+        "Poll retained export UDP previews (hexPreview up to 256 bytes); sinceId cursor, limit default 50; full bytes via dcsbios_packet_read",
         trace_fields.clone(),
         &[]
     );
     add!(
         "dcsbios_packet_read",
-        "Read every byte of a retained DCS-BIOS UDP datagram",
+        "Full hex of one UDP datagram by trace id from dcsbios_recent_packets; fails if id was evicted from the 128-entry ring or never existed",
         json!({"id":{"type":"integer","minimum":1}}),
         &["id"]
     );
     add!(
         "dcsbios_start",
-        "Start DCS-BIOS export listener",
+        "Start the DCS-BIOS export UDP listener using saved config; returns DcsBiosStatus (connectionState, diagnostics, counters)",
         json!({}),
         &[]
     );
     add!(
         "dcsbios_stop",
-        "Stop DCS-BIOS export listener",
+        "Stop the DCS-BIOS export UDP listener; returns DcsBiosStatus (connectionState reset, diagnostics, counters)",
         json!({}),
         &[]
     );
     add!(
         "dcsbios_send_command",
-        "Send a DCS-BIOS import command; a send does not prove DCS applied it",
+        "Send rawCommand, or both controlId and argument, on the command transport; returns {sent, transport, appliedInDcs:null}; sent does not confirm simulator state",
         json!({"rawCommand":text,"controlId":text,"argument":text}),
         &[]
     );
     add!(
         "hcp_encode",
-        "Encode HCP packet to hex",
+        "Encode DisplayData (data) or DeviceHello/ControlEvent (set) as HCP payload hex without sending",
         json!({"kind":{"type":"string","enum":["data","set"]},"packet":object}),
         &["kind", "packet"]
     );
     add!(
         "hcp_decode",
-        "Decode HCP packet from hex",
+        "Decode HCP payload hex to a packet object without reading a device",
         json!({"hex":hex}),
         &["hex"]
     );
     add!(
         "hcp_send",
-        "Send HCP packet to a connected device",
+        "Send HCP packet to a discovered device; ok means transport write only; fails if device id is not in the current discovery cache",
         json!({"deviceId":text,"kind":{"type":"string","enum":["data","set"]},"packet":object}),
         &["deviceId", "kind", "packet"]
     );
     let frame_fields = json!({"to":byte,"from":byte,"kind":{"type":"string","enum":["ping","pong","ack","join","setAddress","data","set"]},"address":byte,"id":{"type":"integer","minimum":0,"maximum":4294967295u64},"payloadHex":hex});
     add!(
         "imcp_encode",
-        "Encode an IMCP frame to wire hex",
+        "Validate and encode one IMCP frame as stuffed wire hex without sending",
         frame_fields.clone(),
         &["to", "from", "kind"]
     );
     add!(
         "imcp_decode",
-        "Decode one IMCP wire frame from hex",
+        "Decode exactly one complete IMCP wire frame from hex",
         json!({"hex":hex}),
         &["hex"]
     );
     add!(
         "imcp_send",
-        "Write an IMCP frame to an active endpoint; ACK is not verified",
+        "Send IMCP frame on a saved serial endpoint; ok means bytes written only—not IMCP ACK; fails if endpoint listener is not active",
         json!({"endpointId":text,"frame":{"type":"object","properties":frame_fields,"required":["to","from","kind"]}}),
         &["endpointId", "frame"]
     );
     let mut endpoint_trace_fields = trace_fields.as_object().cloned().unwrap_or_default();
-    endpoint_trace_fields.insert("endpointId".to_string(), text);
+    endpoint_trace_fields.insert(
+        "endpointId".to_string(),
+        json!({
+            "type":"string",
+            "description":"Optional saved endpoint id; omit to include all endpoints"
+        }),
+    );
     add!(
         "imcp_recent_frames",
-        "Read received frames, parse errors, and MCP-originated writes, including ACK frames",
+        "Poll retained IMCP RX, parse errors, and MCP-queued TX by sinceId; includes ACK; excludes automatic Manager TX",
         Value::Object(endpoint_trace_fields.clone()),
         &[]
     );
     add!(
         "hcp_recent_packets",
-        "Read decoded HCP packets from recent IMCP traffic",
+        "Poll successfully decoded HCP packets from retained IMCP traffic by sinceId; optional endpointId filter",
         Value::Object(endpoint_trace_fields),
         &[]
     );
     tools
 }
 
-pub(super) fn start(
+pub fn start(
     app: AppHandle,
     state: Arc<RuntimeState>,
     port: u16,
@@ -710,6 +750,90 @@ mod tests {
     use std::io::{Read, Write};
 
     #[derive(Clone)]
+    struct SmokeHandler {
+        state: Arc<RuntimeState>,
+    }
+
+    impl ServerHandler for SmokeHandler {
+        fn get_info(&self) -> ServerConfig {
+            ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+                .with_server_info(Implementation::new("homecockpit-manager", "smoke-test"))
+                .with_instructions(MCP_SERVER_INSTRUCTIONS)
+        }
+
+        async fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, ErrorData> {
+            Ok(ListToolsResult {
+                tools: tool_catalog(),
+                ..Default::default()
+            })
+        }
+
+        async fn call_tool(
+            &self,
+            request: CallToolRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResponse, ErrorData> {
+            let args = Value::Object(request.arguments.unwrap_or_default());
+            let result = match request.name.as_ref() {
+                "manager_snapshot" => to_value(self.state.snapshot()),
+                "dcsbios_status" => to_value(json!({
+                    "config": self.state.config.lock().unwrap().clone(),
+                    "status": self.state.status.lock().unwrap().clone(),
+                })),
+                "imcp_encode" => {
+                    let frame = parse_frame(&args);
+                    match frame {
+                        Ok(frame) => match encode_frame_hex(&frame) {
+                            Ok(hex) => Ok(json!({"hex": hex})),
+                            Err(error) => Err(error),
+                        },
+                        Err(error) => Err(error),
+                    }
+                }
+                other => Err(format!("smoke test does not implement {other}")),
+            };
+            Ok(match result {
+                Ok(value) => CallToolResult::structured(value).into(),
+                Err(error) => CallToolResult::error(vec![ContentBlock::text(error)]).into(),
+            })
+        }
+    }
+
+    async fn with_smoke_server<F, Fut>(run: F)
+    where
+        F: FnOnce(u16) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let listener = bind_listener(0).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let state = Arc::new(RuntimeState::new());
+        let service = StreamableHttpService::new(
+            move || Ok::<_, io::Error>(SmokeHandler { state: state.clone() }),
+            LocalSessionManager::default().into(),
+            server_config(port, cancel.child_token()),
+        );
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let server_cancel = cancel.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().nest_service("/mcp", service))
+                .with_graceful_shutdown(server_cancel.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        run(port).await;
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[derive(Clone)]
     struct CatalogHandler;
 
     impl ServerHandler for CatalogHandler {
@@ -748,6 +872,65 @@ mod tests {
         let mut response = String::new();
         socket.read_to_string(&mut response).unwrap();
         response
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn http_smoke_server_lists_tuned_tools_and_calls_read_handlers() {
+        with_smoke_server(|port| async move {
+            let host = format!("127.0.0.1:{port}");
+            let origin = format!("http://{host}");
+            let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}"#;
+            let response = tokio::task::spawn_blocking({
+                let host = host.clone();
+                let origin = origin.clone();
+                move || http_post(port, &host, &origin, init)
+            })
+            .await
+            .unwrap();
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert!(
+                response.contains("manager_devices returns cached discovery results"),
+                "{response}"
+            );
+            let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
+            let response = tokio::task::spawn_blocking({
+                let host = host.clone();
+                let origin = origin.clone();
+                move || http_post(port, &host, &origin, list)
+            })
+            .await
+            .unwrap();
+            assert!(
+                response.contains("cached device summaries")
+                    && response.contains("dcsbios_stop"),
+                "{response}"
+            );
+            let snapshot_call = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"manager_snapshot","arguments":{}}}"#;
+            let response = tokio::task::spawn_blocking({
+                let host = host.clone();
+                let origin = origin.clone();
+                move || http_post(port, &host, &origin, snapshot_call)
+            })
+            .await
+            .unwrap();
+            assert!(
+                response.contains("deviceEndpoints") && response.contains("dcsbiosConfig"),
+                "{response}"
+            );
+            let encode_call = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"imcp_encode","arguments":{"to":255,"from":1,"kind":"ping"}}}"#;
+            let response = tokio::task::spawn_blocking({
+                let host = host.clone();
+                let origin = origin.clone();
+                move || http_post(port, &host, &origin, encode_call)
+            })
+            .await
+            .unwrap();
+            assert!(
+                response.contains("\"hex\"") || response.contains("\\\"hex\\\""),
+                "{response}"
+            );
+        })
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -834,6 +1017,74 @@ mod tests {
         assert!(names.contains("dcsbios_memory_read"));
         assert!(names.contains("dcsbios_recent_packets"));
         assert!(names.contains("imcp_recent_frames"));
+    }
+
+    #[test]
+    fn tool_catalog_descriptions_guide_llm_tool_choice() {
+        let tools = tool_catalog();
+        let descriptions: std::collections::HashMap<&str, &str> = tools
+            .iter()
+            .map(|tool| {
+                let description = tool
+                    .description
+                    .as_deref()
+                    .expect("every tool must have a description");
+                assert!(
+                    description.len() >= 40 && description.len() <= 220,
+                    "description length for {}: {}",
+                    tool.name.as_ref(),
+                    description.len()
+                );
+                (tool.name.as_ref(), description)
+            })
+            .collect();
+
+        let must_contain = [
+            (
+                "manager_devices",
+                ["cached", "does not rescan"],
+            ),
+            (
+                "manager_refresh_devices",
+                ["Rescan", "restarting listeners"],
+            ),
+            (
+                "manager_save_dcsbios_config",
+                ["serial endpoint", "dcsbios_stop"],
+            ),
+            (
+                "manager_trigger_role_input",
+                ["action count", "DCS-BIOS"],
+            ),
+            (
+                "dcsbios_send_command",
+                ["rawCommand", "does not confirm"],
+            ),
+            (
+                "imcp_send",
+                ["bytes written", "ACK"],
+            ),
+            (
+                "hcp_send",
+                ["transport write", "discovery cache"],
+            ),
+            (
+                "dcsbios_recent_packets",
+                ["sinceId", "dcsbios_packet_read"],
+            ),
+        ];
+        for (name, needles) in must_contain {
+            let description = descriptions[name];
+            for needle in needles {
+                assert!(
+                    description.contains(needle),
+                    "tool {} description must mention '{}': {}",
+                    name,
+                    needle,
+                    description
+                );
+            }
+        }
     }
 
     #[test]

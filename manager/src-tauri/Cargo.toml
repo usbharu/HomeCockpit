@@ -34,3 +34,7 @@ tokio-util = "0.7"
 dcs-bios = { path = "../../dcs-bios-rs" }
 hcp = { path = "../../firmware/hcp" }
 imcp = { path = "../../imcp" }
+
+[[bin]]
+name = "manager-mcp-serve"
+path = "src/bin/manager_mcp_serve.rs"
