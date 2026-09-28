@@ -12,7 +12,7 @@ IMCPのフレーム、JOIN割り当て、ACK、PING、SET、チェックサム�
 ## 最初に確認する
 
 - リポジトリの`AGENTS.md`と`utils/imcp-cli`の`Cargo.toml`を読む。
-- CLIが未ビルドなら`cargo build --manifest-path utils/Cargo.toml`を実行する。ビルド時にsccacheが失敗する環境では、PowerShellで`$env:RUSTC_WRAPPER=''`を設定して再実行する。
+- CLIの動作を検証する前に`cargo build --locked --manifest-path utils/Cargo.toml -p imcp-cli`を実行し、現行ソースから生成した実行ファイルを使う。ビルド時にsccacheが失敗する環境では、PowerShellで`$env:RUSTC_WRAPPER=''`を設定して再実行する。
 - 実機のポートを推測せず、`imcp-cli watch --list --format json`で確認する。`COM3`などを固定値としてスキルの手順に埋め込まない。
 - 送信は機器状態を変える可能性がある。実機への`master --port`または`--control-stdin`による送信は、ユーザーが実機テストを依頼した場合だけ行い、まず`pack`と`unpack`でフレームを確認する。
 
