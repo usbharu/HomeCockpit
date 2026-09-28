@@ -42,9 +42,8 @@
 
 ## Package / generated files
 
-- CI と `packageManager` は pnpm 11.6.0 を正とします。dependency 変更は pnpm を使い、lockfile を手編集しません。
-- `package-lock.json` も現在 tracked です。依頼なしに削除・再生成しないでください。
-- [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json) の Tauri hook は現状 npm を呼びます。package manager を統一する場合は、この設定・CI・lockfile 方針を一括で変更してください。
+- CI と `packageManager` は pnpm 12.6.0 を正とします。dependency 変更は pnpm を使い、`pnpm-lock.yaml` のみを lockfile として扱い、手編集しません。
+- `package-lock.json` は使いません（`preinstall` の `only-allow` で npm / yarn の install を拒否します）。Tauri hook は `pnpm run` を呼びます。
 - `.next/`、`out/`、`node_modules/`、`target/` は生成物です。`next-env.d.ts` と生成済み Tauri icon も通常は直接編集しません。
 
 ## 実装とテスト

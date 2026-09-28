@@ -139,6 +139,7 @@ Button / switch
 - DCS-BIOS 接続runbook: [`../.agents/skills/dcs-bios-connection/references/connection-debug.md`](../.agents/skills/dcs-bios-connection/references/connection-debug.md)
 - Manager integration: [`../.agents/skills/dcs-bios-connection/references/homecockpit.md`](../.agents/skills/dcs-bios-connection/references/homecockpit.md)
 - IMCP wire / address / retry / state: [`../.agents/skills/imcp-protocol/SKILL.md`](../.agents/skills/imcp-protocol/SKILL.md)
+- IMCP CLI での frame 生成・解析・master simulation: [`../.agents/skills/imcp-cli-debug/SKILL.md`](../.agents/skills/imcp-cli-debug/SKILL.md)
 - Pico / Pico 2 build・SWD・flash・reset: [`../.agents/skills/pico-rust-probe-rs/SKILL.md`](../.agents/skills/pico-rust-probe-rs/SKILL.md)
 - Upper Panel DDI firmware 実行手順: [`../firmware/upper_panel_ddi/README.md`](../firmware/upper_panel_ddi/README.md)
 - HCP packet model: [`../firmware/hcp/README.md`](../firmware/hcp/README.md)

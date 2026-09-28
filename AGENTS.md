@@ -11,6 +11,7 @@
 - IMCP の作業規約: [`imcp/AGENTS.md`](imcp/AGENTS.md)
 - Manager の作業規約: [`manager/AGENTS.md`](manager/AGENTS.md)
 - IMCP ワイヤ仕様: [`.agents/skills/imcp-protocol/SKILL.md`](.agents/skills/imcp-protocol/SKILL.md)
+- IMCP CLI デバッグ: [`.agents/skills/imcp-cli-debug/SKILL.md`](.agents/skills/imcp-cli-debug/SKILL.md)
 - DCS-BIOS 接続診断: [`.agents/skills/dcs-bios-connection/SKILL.md`](.agents/skills/dcs-bios-connection/SKILL.md)
 - Pico/Pico 2 の SWD 手順: [`.agents/skills/pico-rust-probe-rs/SKILL.md`](.agents/skills/pico-rust-probe-rs/SKILL.md)
 

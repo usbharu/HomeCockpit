@@ -1,11 +1,11 @@
 # IMCP-CLI再現シナリオ
 
-以下は、リポジトリルートで`imcp-cli`を実行する例である。実行ファイルを使う場合は`$cli = '.\\utils\\target\\debug\\imcp-cli.exe'`、Cargo経由なら各コマンドを`cargo run --manifest-path utils/Cargo.toml --`に置き換える。
+以下は、リポジトリルートでPowerShellから`imcp-cli`を実行する例である。先に`cargo build --locked --manifest-path utils/Cargo.toml -p imcp-cli`を実行し、現行ソースから生成した実行ファイルを使う。Cargo経由で個別に実行する場合は`cargo run --locked --manifest-path utils/Cargo.toml -p imcp-cli -- <subcommand> ...`を使う。
 
 ## 既知のフレームを作る
 
 ```powershell
-$cli = '.\\utils\\target\\debug\\imcp-cli.exe'
+$cli = if ($env:OS -eq 'Windows_NT') { '.\utils\target\debug\imcp-cli.exe' } else { './utils/target/debug/imcp-cli' }
 
 # client(0x00)からmaster(0x01)へのJOIN
 & $cli pack --from 0x00 --to 0x01 --packet-type join --id 0xCAFEBABE
