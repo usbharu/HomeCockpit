@@ -17,11 +17,7 @@ use embassy_rp::{
     usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler},
 };
 #[cfg(feature = "rp2040")]
-use embassy_rp::{
-    clocks::RoscRng,
-    flash::{Blocking, Flash},
-    peripherals::FLASH,
-};
+use embassy_rp::{clocks::RoscRng, flash::Flash, mode::Blocking, peripherals::FLASH};
 #[cfg(feature = "rp235x")]
 use embassy_rp::{
     otp,
@@ -76,6 +72,8 @@ static USB_CONFIG_DESCRIPTOR_CELL: StaticCell<[u8; 256]> = StaticCell::new();
 static USB_BOS_DESCRIPTOR_CELL: StaticCell<[u8; 256]> = StaticCell::new();
 static USB_CONTROL_BUFFER_CELL: StaticCell<[u8; 64]> = StaticCell::new();
 static CDC_STATE_CELL: StaticCell<CdcState> = StaticCell::new();
+static UART_TX_BUF: StaticCell<[u8; 64]> = StaticCell::new();
+static UART_RX_BUF: StaticCell<[u8; 64]> = StaticCell::new();
 
 bind_interrupts!(struct Irqs {
     UART0_IRQ => embassy_rp::uart::BufferedInterruptHandler<UART0>;
@@ -92,8 +90,8 @@ struct DeviceIdentity {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let mut tx_buffer: [u8; 64] = [0; 64];
-    let mut rx_buffer: [u8; 64] = [0; 64];
+    let tx_buf = &mut UART_TX_BUF.init([0; 64])[..];
+    let rx_buf = &mut UART_RX_BUF.init([0; 64])[..];
 
     let p = embassy_rp::init(Default::default());
     #[cfg(feature = "rp2040")]
@@ -159,13 +157,8 @@ async fn main(spawner: Spawner) {
     config.baudrate = BAUD_RATE;
 
     let uart = BufferedUart::new(
-        p.UART0,
-        p.PIN_0,
-        p.PIN_1, // TX, RX ピン
-        Irqs,
-        &mut tx_buffer,
-        &mut rx_buffer, // DMAチャンネル
-        config,
+        p.UART0, p.PIN_0, p.PIN_1, // TX, RX ピン
+        Irqs, tx_buf, rx_buf, config,
     );
 
     let imcp_embedded = ImcpEmbedded::new(
@@ -282,7 +275,7 @@ async fn scan_matrix(inputs: [Input<'static>; 5], mut outputs: [Output<'static>;
 
             for (index2, ele) in inputs.iter().enumerate() {
                 if let Ok(mut g) = RESULT.try_lock() {
-                    g[index][index2] = ele.get_level();
+                    g[index][index2] = ele.level();
                 }
             }
 
@@ -597,7 +590,7 @@ fn initialize_device_identity(_flash: FLASH, trng: TRNG) -> DeviceIdentity {
 
 #[cfg(feature = "rp2040")]
 fn read_rp2040_device_id(flash: Peri<'static, FLASH>) -> u64 {
-    let mut flash = Flash::<_, Blocking, FLASH_SIZE>::new_blocking(flash);
+    let mut flash = Flash::<Blocking, FLASH_SIZE>::new_blocking(flash);
     let mut unique_id = [0u8; 8];
     match flash.blocking_unique_id(&mut unique_id) {
         Ok(()) => u64::from_be_bytes(unique_id),
