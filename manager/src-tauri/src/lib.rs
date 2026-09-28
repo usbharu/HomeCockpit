@@ -505,12 +505,69 @@ struct DisplayCommand {
 struct EndpointCommand {
     frame: Frame,
     reply: SyncSender<Result<(), String>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DcsBiosMemoryUpdate {
     address: u16,
     data: Vec<u8>,
+}
+
+const DCS_BIOS_ADDRESS_SPACE_BYTES: usize = 1 << 16;
+const DCS_BIOS_RECEIVED_WORDS: usize = DCS_BIOS_ADDRESS_SPACE_BYTES / 64;
+
+struct DcsBiosMemoryStore {
+    map: VecMemoryMap,
+    received: Box<[u64; DCS_BIOS_RECEIVED_WORDS]>,
+}
+
+impl Default for DcsBiosMemoryStore {
+    fn default() -> Self {
+        Self {
+            map: VecMemoryMap::default(),
+            received: Box::new([0; DCS_BIOS_RECEIVED_WORDS]),
+        }
+    }
+}
+
+impl DcsBiosMemoryStore {
+    fn write_update(&mut self, update: &DcsBiosMemoryUpdate) -> Result<(), String> {
+        let range = self
+            .map
+            .write(update.address, &update.data)
+            .map_err(|error| format!("Failed to update DCS-BIOS memory map: {error:?}"))?;
+        self.mark_received(range);
+        Ok(())
+    }
+
+    fn mark_received(&mut self, range: std::ops::RangeInclusive<u16>) {
+        for address in range {
+            let index = address as usize;
+            let word = index / 64;
+            let bit = index % 64;
+            self.received[word] |= 1u64 << bit;
+        }
+    }
+
+    fn range_fully_received(&self, range: std::ops::RangeInclusive<u16>) -> bool {
+        for address in range {
+            let index = address as usize;
+            let word = index / 64;
+            let bit = index % 64;
+            if self.received[word] & (1u64 << bit) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn read_received(&self, range: std::ops::RangeInclusive<u16>) -> Option<&[u8]> {
+        if !self.range_fully_received(range.clone()) {
+            return None;
+        }
+        self.map.read(range)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1032,7 +1089,7 @@ pub struct RuntimeState {
     display_senders: Mutex<HashMap<String, SyncSender<DisplayCommand>>>,
     endpoint_senders: Mutex<HashMap<String, SyncSender<EndpointCommand>>>,
     display_sequences: Mutex<HashMap<String, u16>>,
-    dcsbios_memory: Arc<Mutex<VecMemoryMap>>,
+    dcsbios_memory: Arc<Mutex<DcsBiosMemoryStore>>,
 }
 
 impl RuntimeState {
@@ -1062,7 +1119,7 @@ impl RuntimeState {
             display_senders: Mutex::new(HashMap::new()),
             endpoint_senders: Mutex::new(HashMap::new()),
             display_sequences: Mutex::new(HashMap::new()),
-            dcsbios_memory: Arc::new(Mutex::new(VecMemoryMap::default())),
+            dcsbios_memory: Arc::new(Mutex::new(DcsBiosMemoryStore::default())),
         }
     }
 
@@ -1448,12 +1505,21 @@ impl RuntimeState {
             .cloned()
             .ok_or_else(|| format!("Endpoint '{endpoint_id}' is not listening."))?;
         let (reply, receiver) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
         sender
-            .try_send(EndpointCommand { frame, reply })
+            .try_send(EndpointCommand {
+                frame,
+                reply,
+                cancelled: cancelled.clone(),
+            })
             .map_err(|error| format!("Endpoint command queue failed: {error}"))?;
-        receiver
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|error| format!("Endpoint write confirmation timed out: {error}"))?
+        match receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(result) => result,
+            Err(error) => {
+                cancelled.store(true, Ordering::Relaxed);
+                Err(format!("Endpoint write confirmation timed out: {error}"))
+            }
+        }
     }
 
     fn next_display_sequence(&self, device_id: &str) -> u16 {
@@ -1791,6 +1857,7 @@ impl RuntimeState {
         self.stop_endpoint_listeners(&app);
 
         let endpoints = sanitize_device_endpoints(self.device_endpoints.lock().unwrap().clone());
+        validate_device_endpoints(&endpoints)?;
         let (dispatch_sender, dispatch_receiver) = mpsc::sync_channel(256);
         let dispatch_stop = Arc::new(AtomicBool::new(false));
         let dispatch_stop_for_thread = dispatch_stop.clone();
@@ -2268,6 +2335,7 @@ fn save_device_endpoints_inner(
     device_endpoints: Vec<DeviceEndpointConfig>,
 ) -> Result<(), String> {
     let device_endpoints = sanitize_device_endpoints(device_endpoints);
+    validate_device_endpoints(&device_endpoints)?;
     let mut persisted = state.persisted_state();
     persisted.device_endpoints = device_endpoints.clone();
     persist_manager_state(app, &persisted)?;
@@ -2546,6 +2614,20 @@ fn sanitize_device_endpoints(
             endpoint
         })
         .collect()
+}
+
+fn validate_device_endpoints(device_endpoints: &[DeviceEndpointConfig]) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for endpoint in device_endpoints {
+        let id = endpoint.id.trim();
+        if id.is_empty() {
+            return Err("Device endpoint id must not be empty.".into());
+        }
+        if !seen.insert(endpoint.id.clone()) {
+            return Err(format!("Duplicate device endpoint id '{}'.", endpoint.id));
+        }
+    }
+    Ok(())
 }
 
 trait DeviceEndpointProvider {
@@ -3613,16 +3695,14 @@ fn resolve_dcsbios_argument(
 }
 
 fn apply_dcsbios_memory_updates(
-    memory_map: Arc<Mutex<VecMemoryMap>>,
+    memory_map: Arc<Mutex<DcsBiosMemoryStore>>,
     updates: &[DcsBiosMemoryUpdate],
 ) -> Result<(), String> {
     let mut memory_map = memory_map
         .lock()
         .map_err(|_| "DCS-BIOS memory map lock is poisoned.".to_string())?;
     for update in updates {
-        memory_map
-            .write(update.address, &update.data)
-            .map_err(|error| format!("Failed to update DCS-BIOS memory map: {error:?}"))?;
+        memory_map.write_update(update)?;
     }
     Ok(())
 }
@@ -4006,6 +4086,12 @@ fn run_endpoint_listener_session(
 
     while !stop.load(Ordering::Relaxed) {
         while let Ok(command) = channels.command_receiver.try_recv() {
+            if command.cancelled.load(Ordering::Relaxed) {
+                let _ = command
+                    .reply
+                    .send(Err("Endpoint write was cancelled after timeout.".into()));
+                continue;
+            }
             let result = write_frame(&mut *port, &command.frame);
             if result.is_ok() {
                 state.record_imcp_frame(&endpoint.id, "tx", &command.frame);
@@ -4338,7 +4424,7 @@ fn update_overlaps_aircraft_name(update: &DcsBiosMemoryUpdate) -> bool {
 }
 
 fn extract_aircraft_name_from_memory(
-    memory_map: &Arc<Mutex<VecMemoryMap>>,
+    memory_map: &Arc<Mutex<DcsBiosMemoryStore>>,
 ) -> Result<Option<String>, String> {
     let memory_map = memory_map
         .lock()
@@ -4347,7 +4433,7 @@ fn extract_aircraft_name_from_memory(
         .saturating_add(DCS_BIOS_AIRCRAFT_NAME_LENGTH as u16)
         .saturating_sub(1);
     let bytes = memory_map
-        .read(DCS_BIOS_AIRCRAFT_NAME_ADDRESS..=end_address)
+        .read_received(DCS_BIOS_AIRCRAFT_NAME_ADDRESS..=end_address)
         .ok_or_else(|| "DCS-BIOS aircraft name is incomplete.".to_string())?
         .iter()
         .copied()
@@ -5882,7 +5968,7 @@ mod tests {
 
     #[test]
     fn dcsbios_memory_updates_write_memory_map() {
-        let memory = Arc::new(Mutex::new(VecMemoryMap::default()));
+        let memory = Arc::new(Mutex::new(DcsBiosMemoryStore::default()));
         let packet = vec![0x55, 0x55, 0x55, 0x55, 0x00, 0x10, 0x02, 0x00, 0x34, 0x12];
         let mut decoder = DcsBiosStreamDecoder::default();
         let updates = decoder
@@ -5897,13 +5983,66 @@ mod tests {
         apply_dcsbios_memory_updates(memory.clone(), &updates).expect("packet must decode");
 
         let binding = memory.lock().unwrap();
-        let bytes = binding.read(0x1000..=0x1001).expect("bytes must exist");
+        let bytes = binding
+            .read_received(0x1000..=0x1001)
+            .expect("bytes must exist");
         assert_eq!(bytes, &[0x34, 0x12]);
     }
 
     #[test]
+    fn dcsbios_memory_read_rejects_unreceived_gap_bytes() {
+        let memory = Arc::new(Mutex::new(DcsBiosMemoryStore::default()));
+        apply_dcsbios_memory_updates(
+            memory.clone(),
+            &[DcsBiosMemoryUpdate {
+                address: 0x2000,
+                data: vec![0x01],
+            }],
+        )
+        .expect("write");
+        apply_dcsbios_memory_updates(
+            memory.clone(),
+            &[DcsBiosMemoryUpdate {
+                address: 0x2002,
+                data: vec![0x03],
+            }],
+        )
+        .expect("write");
+
+        let binding = memory.lock().unwrap();
+        assert!(binding.read_received(0x2000..=0x2000).is_some());
+        assert!(binding.read_received(0x2000..=0x2002).is_none());
+    }
+
+    #[test]
+    fn validate_device_endpoints_rejects_duplicate_ids() {
+        let endpoints = vec![
+            DeviceEndpointConfig {
+                id: "serial-a".to_string(),
+                name: "A".to_string(),
+                transport: DeviceEndpointTransport::Serial,
+                address: "COM1".to_string(),
+                enabled: true,
+                baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
+                role_hint: EndpointRoleHint::Auto,
+            },
+            DeviceEndpointConfig {
+                id: "serial-a".to_string(),
+                name: "B".to_string(),
+                transport: DeviceEndpointTransport::Serial,
+                address: "COM2".to_string(),
+                enabled: true,
+                baud_rate: DEFAULT_DEVICE_ENDPOINT_BAUD_RATE,
+                role_hint: EndpointRoleHint::Auto,
+            },
+        ];
+
+        assert!(validate_device_endpoints(&endpoints).is_err());
+    }
+
+    #[test]
     fn aircraft_name_is_reassembled_from_split_memory_updates() {
-        let memory = Arc::new(Mutex::new(VecMemoryMap::default()));
+        let memory = Arc::new(Mutex::new(DcsBiosMemoryStore::default()));
         let fa18_updates = [
             DcsBiosMemoryUpdate {
                 address: DCS_BIOS_AIRCRAFT_NAME_ADDRESS,

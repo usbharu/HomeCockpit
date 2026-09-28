@@ -57,7 +57,10 @@ Use dcsbios_packet_read for full UDP payload bytes by trace id.";
 impl ServerHandler for McpHandler {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("homecockpit-manager", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(
+                "homecockpit-manager",
+                env!("CARGO_PKG_VERSION"),
+            ))
             .with_instructions(MCP_SERVER_INSTRUCTIONS)
     }
 
@@ -150,7 +153,7 @@ impl McpHandler {
                     .lock()
                     .map_err(|_| "DCS-BIOS memory lock failed")?;
                 let bytes = memory
-                    .read(address..=end)
+                    .read_received(address..=end)
                     .ok_or("memory range has not been received")?;
                 Ok(json!({"address":address,"length":length,"hex":hex_encode(bytes)}))
             }
@@ -813,7 +816,11 @@ mod tests {
         let cancel = CancellationToken::new();
         let state = Arc::new(RuntimeState::new());
         let service = StreamableHttpService::new(
-            move || Ok::<_, io::Error>(SmokeHandler { state: state.clone() }),
+            move || {
+                Ok::<_, io::Error>(SmokeHandler {
+                    state: state.clone(),
+                })
+            },
             LocalSessionManager::default().into(),
             server_config(port, cancel.child_token()),
         );
@@ -1040,10 +1047,7 @@ mod tests {
             .collect();
 
         let must_contain = [
-            (
-                "manager_devices",
-                ["cached", "does not rescan"],
-            ),
+            ("manager_devices", ["cached", "does not rescan"]),
             (
                 "manager_refresh_devices",
                 ["Rescan", "restarting listeners"],
@@ -1052,26 +1056,11 @@ mod tests {
                 "manager_save_dcsbios_config",
                 ["serial endpoint", "dcsbios_stop"],
             ),
-            (
-                "manager_trigger_role_input",
-                ["action count", "DCS-BIOS"],
-            ),
-            (
-                "dcsbios_send_command",
-                ["rawCommand", "does not confirm"],
-            ),
-            (
-                "imcp_send",
-                ["bytes written", "ACK"],
-            ),
-            (
-                "hcp_send",
-                ["transport write", "discovery cache"],
-            ),
-            (
-                "dcsbios_recent_packets",
-                ["sinceId", "dcsbios_packet_read"],
-            ),
+            ("manager_trigger_role_input", ["action count", "DCS-BIOS"]),
+            ("dcsbios_send_command", ["rawCommand", "does not confirm"]),
+            ("imcp_send", ["bytes written", "ACK"]),
+            ("hcp_send", ["transport write", "discovery cache"]),
+            ("dcsbios_recent_packets", ["sinceId", "dcsbios_packet_read"]),
         ];
         for (name, needles) in must_contain {
             let description = descriptions[name];
