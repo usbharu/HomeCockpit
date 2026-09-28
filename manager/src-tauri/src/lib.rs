@@ -28,11 +28,13 @@ use imcp::{
     parser::FrameParser,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use socket2::{Domain, Protocol, Socket, Type};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod adapter_catalog;
 mod mapping;
+mod mcp;
 
 use adapter_catalog::{
     infer_role_bindings, normalize_aircraft_name, AdapterCatalog, AdapterProfile,
@@ -52,6 +54,8 @@ const DEFAULT_EXPORT_PORT: u16 = 5010;
 const DEFAULT_COMMAND_HOST: &str = "127.0.0.1";
 const DEFAULT_COMMAND_PORT: u16 = 7778;
 const MAX_LOG_ENTRIES: usize = 250;
+const MAX_PROTOCOL_TRACE_ENTRIES: usize = 128;
+const MAX_DCS_PACKET_PREVIEW_BYTES: usize = 256;
 const DEFAULT_DEVICE_ENDPOINT_BAUD_RATE: u32 = 115200;
 const DCS_BIOS_AIRCRAFT_NAME_ADDRESS: u16 = 0;
 const DCS_BIOS_AIRCRAFT_NAME_LENGTH: usize = 24;
@@ -65,6 +69,97 @@ const IMCP_ENDPOINT_RECONNECT_DELAY: Duration = Duration::from_millis(500);
 const IMCP_FIRST_DEVICE_ADDRESS: u8 = 0x02;
 const IMCP_LAST_DEVICE_ADDRESS: u8 = 0xFE;
 const SETTINGS_FILE_NAME: &str = "manager-state.json";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DcsPacketTrace {
+    id: u64,
+    received_at: String,
+    source: String,
+    size: usize,
+    hex_preview: String,
+    truncated: bool,
+    starts_with_sync: bool,
+    #[serde(skip)]
+    bytes: Arc<[u8]>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImcpFrameTrace {
+    id: u64,
+    observed_at: String,
+    endpoint_id: String,
+    direction: String,
+    frame: Option<serde_json::Value>,
+    hcp: Option<serde_json::Value>,
+    decode_error: Option<String>,
+}
+
+fn push_bounded<T>(entries: &mut VecDeque<T>, entry: T) {
+    if entries.len() == MAX_PROTOCOL_TRACE_ENTRIES {
+        entries.pop_front();
+    }
+    entries.push_back(entry);
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+}
+
+fn frame_json(frame: &Frame) -> Value {
+    let (kind, extra) = match frame.payload() {
+        FramePayload::Ping => ("ping", json!({})),
+        FramePayload::Pong => ("pong", json!({})),
+        FramePayload::Ack(address) => ("ack", json!({"address":address})),
+        FramePayload::Join(id) => ("join", json!({"id":id})),
+        FramePayload::SetAddress { address, id } => {
+            ("setAddress", json!({"address":address,"id":id}))
+        }
+        FramePayload::Data(data) => ("data", json!({"payloadHex":hex_encode(data.as_slice())})),
+        FramePayload::Set(data) => ("set", json!({"payloadHex":hex_encode(data.as_slice())})),
+    };
+    let mut result =
+        json!({"to":frame.to_address().as_byte(),"from":frame.from_address(),"kind":kind});
+    if let (Some(result), Some(extra)) = (result.as_object_mut(), extra.as_object()) {
+        result.extend(extra.clone());
+    }
+    result
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct McpConfig {
+    enabled: bool,
+    port: u16,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 8765,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpStatus {
+    state: String,
+    url: Option<String>,
+    error: Option<String>,
+}
+
+impl Default for McpStatus {
+    fn default() -> Self {
+        Self {
+            state: "stopped".to_string(),
+            url: None,
+            error: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -224,6 +319,8 @@ struct DcsBiosFrameEvent {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppSnapshot {
+    mcp_config: McpConfig,
+    mcp_status: McpStatus,
     dcsbios_config: DcsBiosConnectionConfig,
     dcsbios_status: DcsBiosStatus,
     adapter_catalog: AdapterCatalog,
@@ -300,6 +397,8 @@ struct PersistedManagerState {
     #[serde(default)]
     dcsbios_config: DcsBiosConnectionConfig,
     #[serde(default)]
+    mcp_config: McpConfig,
+    #[serde(default)]
     device_endpoints: Vec<DeviceEndpointConfig>,
     #[serde(default)]
     device_role_assignments: Vec<DeviceRoleAssignment>,
@@ -314,6 +413,7 @@ impl Default for PersistedManagerState {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
             dcsbios_config: DcsBiosConnectionConfig::default(),
+            mcp_config: McpConfig::default(),
             device_endpoints: Vec::new(),
             device_role_assignments: Vec::new(),
             adapter_mappings: Vec::new(),
@@ -400,6 +500,11 @@ struct PhysicalControlEvent {
 struct DisplayCommand {
     device_id: String,
     data: DisplayData,
+}
+
+struct EndpointCommand {
+    frame: Frame,
+    reply: SyncSender<Result<(), String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -782,6 +887,7 @@ struct EndpointListenerChannels {
     dispatch_sender: SyncSender<PhysicalControlEvent>,
     display_sender: SyncSender<DisplayCommand>,
     display_receiver: Receiver<DisplayCommand>,
+    command_receiver: Receiver<EndpointCommand>,
 }
 
 fn known_runtime_devices_for_endpoint(
@@ -902,10 +1008,16 @@ fn known_gateway_for_device(
 }
 
 struct RuntimeState {
+    mcp_config: Mutex<McpConfig>,
+    mcp_status: Mutex<McpStatus>,
+    mcp_server: Mutex<Option<mcp::McpServerHandle>>,
     config: Mutex<DcsBiosConnectionConfig>,
     status: Mutex<DcsBiosStatus>,
     adapter_catalog: AdapterCatalog,
     logs: Mutex<VecDeque<ManagerLogEntry>>,
+    dcs_packet_trace: Mutex<VecDeque<DcsPacketTrace>>,
+    imcp_frame_trace: Mutex<VecDeque<ImcpFrameTrace>>,
+    trace_counter: AtomicU64,
     devices: Mutex<Vec<ManagedDeviceSummary>>,
     device_endpoints: Mutex<Vec<DeviceEndpointConfig>>,
     device_role_assignments: Mutex<Vec<DeviceRoleAssignment>>,
@@ -918,6 +1030,7 @@ struct RuntimeState {
     endpoint_listeners: Mutex<Vec<ListenerHandle>>,
     dispatch_worker: Mutex<Option<DispatchWorkerHandle>>,
     display_senders: Mutex<HashMap<String, SyncSender<DisplayCommand>>>,
+    endpoint_senders: Mutex<HashMap<String, SyncSender<EndpointCommand>>>,
     display_sequences: Mutex<HashMap<String, u16>>,
     dcsbios_memory: Arc<Mutex<VecMemoryMap>>,
 }
@@ -925,10 +1038,16 @@ struct RuntimeState {
 impl RuntimeState {
     fn new() -> Self {
         Self {
+            mcp_config: Mutex::new(McpConfig::default()),
+            mcp_status: Mutex::new(McpStatus::default()),
+            mcp_server: Mutex::new(None),
             config: Mutex::new(DcsBiosConnectionConfig::default()),
             status: Mutex::new(DcsBiosStatus::default()),
             adapter_catalog: AdapterCatalog::builtin(),
             logs: Mutex::new(VecDeque::new()),
+            dcs_packet_trace: Mutex::new(VecDeque::new()),
+            imcp_frame_trace: Mutex::new(VecDeque::new()),
+            trace_counter: AtomicU64::new(0),
             devices: Mutex::new(Vec::new()),
             device_endpoints: Mutex::new(Vec::new()),
             device_role_assignments: Mutex::new(Vec::new()),
@@ -941,14 +1060,76 @@ impl RuntimeState {
             endpoint_listeners: Mutex::new(Vec::new()),
             dispatch_worker: Mutex::new(None),
             display_senders: Mutex::new(HashMap::new()),
+            endpoint_senders: Mutex::new(HashMap::new()),
             display_sequences: Mutex::new(HashMap::new()),
             dcsbios_memory: Arc::new(Mutex::new(VecMemoryMap::default())),
         }
     }
 
+    fn record_dcs_packet(&self, source: SocketAddr, bytes: &[u8]) {
+        let id = self.trace_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let preview = &bytes[..bytes.len().min(MAX_DCS_PACKET_PREVIEW_BYTES)];
+        push_bounded(
+            &mut self.dcs_packet_trace.lock().unwrap(),
+            DcsPacketTrace {
+                id,
+                received_at: now_iso8601(),
+                source: source.to_string(),
+                size: bytes.len(),
+                hex_preview: hex_encode(preview),
+                truncated: preview.len() != bytes.len(),
+                starts_with_sync: bytes.starts_with(&[0x55; 4]),
+                bytes: Arc::from(bytes),
+            },
+        );
+    }
+
+    fn record_imcp_frame(&self, endpoint_id: &str, direction: &str, frame: &Frame) {
+        let id = self.trace_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let (hcp, decode_error) = match frame.payload() {
+            FramePayload::Data(bytes) | FramePayload::Set(bytes) => {
+                match hcp::decode_app_packet(bytes.as_slice()) {
+                    Ok(packet) => (serde_json::to_value(packet).ok(), None),
+                    Err(error) => (None, Some(format!("HCP decode failed: {error:?}"))),
+                }
+            }
+            _ => (None, None),
+        };
+        push_bounded(
+            &mut self.imcp_frame_trace.lock().unwrap(),
+            ImcpFrameTrace {
+                id,
+                observed_at: now_iso8601(),
+                endpoint_id: endpoint_id.to_string(),
+                direction: direction.to_string(),
+                frame: Some(frame_json(frame)),
+                hcp,
+                decode_error,
+            },
+        );
+    }
+
+    fn record_imcp_decode_error(&self, endpoint_id: &str, error: String) {
+        let id = self.trace_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        push_bounded(
+            &mut self.imcp_frame_trace.lock().unwrap(),
+            ImcpFrameTrace {
+                id,
+                observed_at: now_iso8601(),
+                endpoint_id: endpoint_id.to_string(),
+                direction: "rx".to_string(),
+                frame: None,
+                hcp: None,
+                decode_error: Some(error),
+            },
+        );
+    }
+
     fn snapshot(&self) -> AppSnapshot {
         let adapter_profiles = self.adapter_profiles.lock().unwrap().clone();
         AppSnapshot {
+            mcp_config: self.mcp_config.lock().unwrap().clone(),
+            mcp_status: self.mcp_status.lock().unwrap().clone(),
             dcsbios_config: self.config.lock().unwrap().clone(),
             dcsbios_status: self.status.lock().unwrap().clone(),
             adapter_catalog: self.adapter_catalog.with_custom_profiles(&adapter_profiles),
@@ -966,6 +1147,112 @@ impl RuntimeState {
                 .map(|session| session.status.clone())
                 .unwrap_or_default(),
         }
+    }
+
+    fn persisted_state(&self) -> PersistedManagerState {
+        PersistedManagerState {
+            schema_version: STATE_SCHEMA_VERSION,
+            dcsbios_config: self.config.lock().unwrap().clone(),
+            mcp_config: self.mcp_config.lock().unwrap().clone(),
+            device_endpoints: self.device_endpoints.lock().unwrap().clone(),
+            device_role_assignments: self.device_role_assignments.lock().unwrap().clone(),
+            adapter_mappings: self.adapter_mappings.lock().unwrap().clone(),
+            adapter_profiles: self.adapter_profiles.lock().unwrap().clone(),
+        }
+    }
+
+    fn set_mcp_status(&self, app: &AppHandle, status: McpStatus) {
+        *self.mcp_status.lock().unwrap() = status.clone();
+        let _ = app.emit("mcp-status-changed", status);
+    }
+
+    fn apply_mcp_config(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        config: McpConfig,
+    ) -> Result<(), String> {
+        if config.port == 0 {
+            return Err("MCP port must be 1..65535.".to_string());
+        }
+        let previous = self.mcp_config.lock().unwrap().clone();
+        if previous == config && self.mcp_server.lock().unwrap().is_some() == config.enabled {
+            if self.mcp_status.lock().unwrap().error.is_some() {
+                self.set_mcp_status(
+                    app,
+                    if config.enabled {
+                        McpStatus {
+                            state: "listening".to_string(),
+                            url: Some(format!("http://127.0.0.1:{}/mcp", config.port)),
+                            error: None,
+                        }
+                    } else {
+                        McpStatus::default()
+                    },
+                );
+            }
+            return Ok(());
+        }
+        let next_server = if config.enabled {
+            match mcp::start(app.clone(), Arc::clone(self), config.port) {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    let current = self.mcp_status.lock().unwrap().clone();
+                    self.set_mcp_status(
+                        app,
+                        McpStatus {
+                            state: if self.mcp_server.lock().unwrap().is_some() {
+                                "listening"
+                            } else {
+                                "error"
+                            }
+                            .to_string(),
+                            url: current.url,
+                            error: Some(error.clone()),
+                        },
+                    );
+                    self.push_log(app, "ERROR", "mcp", &error);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let mut persisted = self.persisted_state();
+        persisted.mcp_config = config.clone();
+        if let Err(error) = persist_manager_state(app, &persisted) {
+            if let Some(server) = next_server {
+                server.cancel.cancel();
+            }
+            return Err(error);
+        }
+        let old = std::mem::replace(&mut *self.mcp_server.lock().unwrap(), next_server);
+        if let Some(old) = old {
+            old.stop();
+        }
+        *self.mcp_config.lock().unwrap() = config.clone();
+        self.set_mcp_status(
+            app,
+            if config.enabled {
+                McpStatus {
+                    state: "listening".to_string(),
+                    url: Some(format!("http://127.0.0.1:{}/mcp", config.port)),
+                    error: None,
+                }
+            } else {
+                McpStatus::default()
+            },
+        );
+        self.push_log(
+            app,
+            "INFO",
+            "mcp",
+            if config.enabled {
+                "MCP server started."
+            } else {
+                "MCP server stopped."
+            },
+        );
+        Ok(())
     }
 
     fn set_status(
@@ -1150,6 +1437,23 @@ impl RuntimeState {
 
     fn clear_display_senders(&self) {
         self.display_senders.lock().unwrap().clear();
+    }
+
+    fn send_endpoint_frame(&self, endpoint_id: &str, frame: Frame) -> Result<(), String> {
+        let sender = self
+            .endpoint_senders
+            .lock()
+            .unwrap()
+            .get(endpoint_id)
+            .cloned()
+            .ok_or_else(|| format!("Endpoint '{endpoint_id}' is not listening."))?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        sender
+            .try_send(EndpointCommand { frame, reply })
+            .map_err(|error| format!("Endpoint command queue failed: {error}"))?;
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| format!("Endpoint write confirmation timed out: {error}"))?
     }
 
     fn next_display_sequence(&self, device_id: &str) -> u16 {
@@ -1404,14 +1708,8 @@ impl RuntimeState {
             &physical_event.device_id,
             physical_event.control_event.control_id,
         );
-        let persisted = PersistedManagerState {
-            schema_version: STATE_SCHEMA_VERSION,
-            dcsbios_config: self.config.lock().unwrap().clone(),
-            device_endpoints: self.device_endpoints.lock().unwrap().clone(),
-            device_role_assignments: assignments.clone(),
-            adapter_mappings: self.adapter_mappings.lock().unwrap().clone(),
-            adapter_profiles: self.adapter_profiles.lock().unwrap().clone(),
-        };
+        let mut persisted = self.persisted_state();
+        persisted.device_role_assignments = assignments.clone();
         if let Err(error) = persist_manager_state(app, &persisted) {
             *self.learn_session.lock().unwrap() = Some(session);
             return Err(error);
@@ -1484,6 +1782,7 @@ impl RuntimeState {
             }
         }
         self.clear_display_senders();
+        self.endpoint_senders.lock().unwrap().clear();
 
         self.push_log(app, "INFO", "devices", "Stopped device endpoint listeners.");
     }
@@ -1519,11 +1818,17 @@ impl RuntimeState {
             let app_for_thread = app.clone();
             let state = Arc::clone(self);
             let (display_sender, display_receiver) = mpsc::sync_channel(64);
+            let (command_sender, command_receiver) = mpsc::sync_channel(32);
             let channels = EndpointListenerChannels {
                 dispatch_sender: dispatch_sender.clone(),
                 display_sender,
                 display_receiver,
+                command_receiver,
             };
+            self.endpoint_senders
+                .lock()
+                .unwrap()
+                .insert(endpoint.id.clone(), command_sender);
             for device in initial_known_devices.values() {
                 self.register_display_sender(
                     device.device_id.clone(),
@@ -1630,8 +1935,9 @@ impl RuntimeState {
             let mut packets_in_window = 0_u32;
 
             while !stop_for_thread.load(Ordering::Relaxed) {
-                match socket.recv(&mut buf) {
-                    Ok(size) => {
+                match socket.recv_from(&mut buf) {
+                    Ok((size, source)) => {
+                        state.record_dcs_packet(source, &buf[..size]);
                         packets_in_window = packets_in_window.saturating_add(1);
                         let events = stream_decoder.feed(&buf[..size]);
                         let mut aircraft_update = None;
@@ -1758,27 +2064,49 @@ fn get_app_state(state: State<'_, AppState>) -> AppSnapshot {
 }
 
 #[tauri::command]
+fn update_mcp_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    config: McpConfig,
+) -> Result<AppSnapshot, String> {
+    state.inner.apply_mcp_config(&app, config)?;
+    Ok(state.inner.snapshot())
+}
+
+#[tauri::command]
 fn update_dcsbios_config(
     app: AppHandle,
     state: State<'_, AppState>,
     config: DcsBiosConnectionConfig,
 ) -> Result<AppSnapshot, String> {
-    persist_manager_state(
-        &app,
-        &PersistedManagerState {
-            schema_version: STATE_SCHEMA_VERSION,
-            dcsbios_config: config.clone(),
-            device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
-            device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
-            adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
-            adapter_profiles: state.inner.adapter_profiles.lock().unwrap().clone(),
-        },
-    )?;
-    *state.inner.config.lock().unwrap() = config.clone();
-    state.inner.restart_endpoint_listeners(&app)?;
-    state.inner.update_status(&app, |_| {});
-    state.inner.push_log(
-        &app,
+    update_dcsbios_config_inner(&app, &state.inner, config)?;
+    Ok(state.inner.snapshot())
+}
+
+fn validate_dcsbios_config(config: &DcsBiosConnectionConfig) -> Result<(), String> {
+    if config.export_host.trim().is_empty() || config.command_host.trim().is_empty() {
+        return Err("DCS-BIOS host must not be empty.".to_string());
+    }
+    if config.export_port == 0 || config.command_port == 0 {
+        return Err("DCS-BIOS port must be 1..65535.".to_string());
+    }
+    Ok(())
+}
+
+fn update_dcsbios_config_inner(
+    app: &AppHandle,
+    state: &Arc<RuntimeState>,
+    config: DcsBiosConnectionConfig,
+) -> Result<(), String> {
+    validate_dcsbios_config(&config)?;
+    let mut persisted = state.persisted_state();
+    persisted.dcsbios_config = config.clone();
+    persist_manager_state(app, &persisted)?;
+    *state.config.lock().unwrap() = config.clone();
+    state.restart_endpoint_listeners(app)?;
+    state.update_status(app, |_| {});
+    state.push_log(
+        app,
         "INFO",
         "settings",
         format!(
@@ -1790,7 +2118,7 @@ fn update_dcsbios_config(
             config.command_transport
         ),
     );
-    Ok(state.inner.snapshot())
+    Ok(())
 }
 
 #[tauri::command]
@@ -1811,11 +2139,19 @@ fn send_dcsbios_command(
     state: State<'_, AppState>,
     request: DcsBiosCommandRequest,
 ) -> Result<(), String> {
-    let config = state.inner.config.lock().unwrap().clone();
+    send_dcsbios_command_inner(&app, &state.inner, request).map(|_| ())
+}
+
+fn send_dcsbios_command_inner(
+    app: &AppHandle,
+    state: &Arc<RuntimeState>,
+    request: DcsBiosCommandRequest,
+) -> Result<CommandTransport, String> {
+    let config = state.config.lock().unwrap().clone();
     let payload = normalize_command_request(request)?;
     send_command_to_dcsbios(&config, &payload)?;
-    state.inner.push_log(
-        &app,
+    state.push_log(
+        app,
         "SUCCESS",
         "dcsbios",
         format!(
@@ -1826,7 +2162,7 @@ fn send_dcsbios_command(
             payload.trim_end()
         ),
     );
-    Ok(())
+    Ok(config.command_transport)
 }
 
 #[tauri::command]
@@ -1835,8 +2171,16 @@ fn trigger_role_input(
     state: State<'_, AppState>,
     request: RoleInputTriggerRequest,
 ) -> Result<usize, String> {
+    trigger_role_input_inner(&app, &state.inner, request)
+}
+
+fn trigger_role_input_inner(
+    app: &AppHandle,
+    state: &Arc<RuntimeState>,
+    request: RoleInputTriggerRequest,
+) -> Result<usize, String> {
     let event = build_role_input_event(request)?;
-    let mappings = state.inner.active_adapter_mappings();
+    let mappings = state.active_adapter_mappings();
     let actions = resolve_adapter_actions(&mappings, &event);
     if actions.is_empty() {
         return Err(format!(
@@ -1845,7 +2189,7 @@ fn trigger_role_input(
         ));
     }
 
-    let config = state.inner.config.lock().unwrap().clone();
+    let config = state.config.lock().unwrap().clone();
     let registry = AdapterRegistry::new();
     for resolved in &actions {
         let adapter = registry
@@ -1853,8 +2197,8 @@ fn trigger_role_input(
             .ok_or_else(|| format!("Adapter '{}' is not registered.", resolved.adapter_id))?;
         adapter.dispatch_input(&config, &resolved.action, &resolved.event)?;
     }
-    state.inner.push_log(
-        &app,
+    state.push_log(
+        app,
         "SUCCESS",
         "mapping",
         format!(
@@ -1914,34 +2258,40 @@ fn save_device_endpoints(
     state: State<'_, AppState>,
     device_endpoints: Vec<DeviceEndpointConfig>,
 ) -> Result<AppSnapshot, String> {
+    save_device_endpoints_inner(&app, &state.inner, device_endpoints)?;
+    Ok(state.inner.snapshot())
+}
+
+fn save_device_endpoints_inner(
+    app: &AppHandle,
+    state: &Arc<RuntimeState>,
+    device_endpoints: Vec<DeviceEndpointConfig>,
+) -> Result<(), String> {
     let device_endpoints = sanitize_device_endpoints(device_endpoints);
-    persist_manager_state(
-        &app,
-        &PersistedManagerState {
-            schema_version: STATE_SCHEMA_VERSION,
-            dcsbios_config: state.inner.config.lock().unwrap().clone(),
-            device_endpoints: device_endpoints.clone(),
-            device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
-            adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
-            adapter_profiles: state.inner.adapter_profiles.lock().unwrap().clone(),
-        },
-    )?;
-    state.inner.stop_endpoint_listeners(&app);
-    state.inner.set_device_endpoints(&app, device_endpoints);
-    state.inner.restart_endpoint_listeners(&app)?;
-    state.inner.push_log(
-        &app,
+    let mut persisted = state.persisted_state();
+    persisted.device_endpoints = device_endpoints.clone();
+    persist_manager_state(app, &persisted)?;
+    state.stop_endpoint_listeners(app);
+    state.set_device_endpoints(app, device_endpoints);
+    state.restart_endpoint_listeners(app)?;
+    state.push_log(
+        app,
         "INFO",
         "devices",
         "Saved device endpoints configuration.",
     );
-    Ok(state.inner.snapshot())
+    Ok(())
 }
 
 #[tauri::command]
 async fn scan_serial_ports(state: State<'_, AppState>) -> Result<Vec<SerialPortCandidate>, String> {
+    scan_serial_ports_inner(state.inner.clone()).await
+}
+
+async fn scan_serial_ports_inner(
+    state: Arc<RuntimeState>,
+) -> Result<Vec<SerialPortCandidate>, String> {
     let configured = state
-        .inner
         .device_endpoints
         .lock()
         .unwrap()
@@ -2039,26 +2389,23 @@ fn save_device_role_assignments(
     state: State<'_, AppState>,
     device_role_assignments: Vec<DeviceRoleAssignment>,
 ) -> Result<AppSnapshot, String> {
-    let device_role_assignments = sanitize_device_role_assignments(device_role_assignments);
-    persist_manager_state(
-        &app,
-        &PersistedManagerState {
-            schema_version: STATE_SCHEMA_VERSION,
-            dcsbios_config: state.inner.config.lock().unwrap().clone(),
-            device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
-            device_role_assignments: device_role_assignments.clone(),
-            adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
-            adapter_profiles: state.inner.adapter_profiles.lock().unwrap().clone(),
-        },
-    )?;
-    state
-        .inner
-        .set_device_role_assignments(&app, device_role_assignments);
-    state.inner.restart_endpoint_listeners(&app)?;
-    state
-        .inner
-        .push_log(&app, "INFO", "devices", "Saved device role assignments.");
+    save_device_role_assignments_inner(&app, &state.inner, device_role_assignments)?;
     Ok(state.inner.snapshot())
+}
+
+fn save_device_role_assignments_inner(
+    app: &AppHandle,
+    state: &Arc<RuntimeState>,
+    device_role_assignments: Vec<DeviceRoleAssignment>,
+) -> Result<(), String> {
+    let device_role_assignments = sanitize_device_role_assignments(device_role_assignments);
+    let mut persisted = state.persisted_state();
+    persisted.device_role_assignments = device_role_assignments.clone();
+    persist_manager_state(app, &persisted)?;
+    state.set_device_role_assignments(app, device_role_assignments);
+    state.restart_endpoint_listeners(app)?;
+    state.push_log(app, "INFO", "devices", "Saved device role assignments.");
+    Ok(())
 }
 
 #[tauri::command]
@@ -2067,24 +2414,23 @@ fn save_adapter_mappings(
     state: State<'_, AppState>,
     adapter_mappings: Vec<AdapterMappingConfig>,
 ) -> Result<AppSnapshot, String> {
-    let adapter_mappings = sanitize_adapter_mappings(adapter_mappings);
-    persist_manager_state(
-        &app,
-        &PersistedManagerState {
-            schema_version: STATE_SCHEMA_VERSION,
-            dcsbios_config: state.inner.config.lock().unwrap().clone(),
-            device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
-            device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
-            adapter_mappings: adapter_mappings.clone(),
-            adapter_profiles: state.inner.adapter_profiles.lock().unwrap().clone(),
-        },
-    )?;
-    state.inner.set_adapter_mappings(&app, adapter_mappings);
-    state.inner.restart_endpoint_listeners(&app)?;
-    state
-        .inner
-        .push_log(&app, "INFO", "mapping", "Saved adapter control mappings.");
+    save_adapter_mappings_inner(&app, &state.inner, adapter_mappings)?;
     Ok(state.inner.snapshot())
+}
+
+fn save_adapter_mappings_inner(
+    app: &AppHandle,
+    state: &Arc<RuntimeState>,
+    adapter_mappings: Vec<AdapterMappingConfig>,
+) -> Result<(), String> {
+    let adapter_mappings = sanitize_adapter_mappings(adapter_mappings);
+    let mut persisted = state.persisted_state();
+    persisted.adapter_mappings = adapter_mappings.clone();
+    persist_manager_state(app, &persisted)?;
+    state.set_adapter_mappings(app, adapter_mappings);
+    state.restart_endpoint_listeners(app)?;
+    state.push_log(app, "INFO", "mapping", "Saved adapter control mappings.");
+    Ok(())
 }
 
 fn parse_adapter_profile_request(
@@ -2136,8 +2482,17 @@ fn save_adapter_profile(
     state: State<'_, AppState>,
     request: AdapterProfileImportRequest,
 ) -> Result<AppSnapshot, String> {
+    save_adapter_profile_inner(&app, &state.inner, request)?;
+    Ok(state.inner.snapshot())
+}
+
+fn save_adapter_profile_inner(
+    app: &AppHandle,
+    state: &Arc<RuntimeState>,
+    request: AdapterProfileImportRequest,
+) -> Result<(), String> {
     let profile = parse_adapter_profile_request(request)?;
-    let mut adapter_profiles = state.inner.adapter_profiles.lock().unwrap().clone();
+    let mut adapter_profiles = state.adapter_profiles.lock().unwrap().clone();
     if let Some(existing) = adapter_profiles.iter_mut().find(|existing| {
         existing.adapter_id == profile.adapter_id
             && existing.profile.profile_id == profile.profile.profile_id
@@ -2147,22 +2502,12 @@ fn save_adapter_profile(
         adapter_profiles.push(profile);
     }
     let adapter_profiles = sanitize_adapter_profiles(adapter_profiles);
-    persist_manager_state(
-        &app,
-        &PersistedManagerState {
-            schema_version: STATE_SCHEMA_VERSION,
-            dcsbios_config: state.inner.config.lock().unwrap().clone(),
-            device_endpoints: state.inner.device_endpoints.lock().unwrap().clone(),
-            device_role_assignments: state.inner.device_role_assignments.lock().unwrap().clone(),
-            adapter_mappings: state.inner.adapter_mappings.lock().unwrap().clone(),
-            adapter_profiles: adapter_profiles.clone(),
-        },
-    )?;
-    state.inner.set_adapter_profiles(&app, adapter_profiles);
-    state
-        .inner
-        .push_log(&app, "INFO", "adapter", "Saved adapter aircraft profile.");
-    Ok(state.inner.snapshot())
+    let mut persisted = state.persisted_state();
+    persisted.adapter_profiles = adapter_profiles.clone();
+    persist_manager_state(app, &persisted)?;
+    state.set_adapter_profiles(app, adapter_profiles);
+    state.push_log(app, "INFO", "adapter", "Saved adapter aircraft profile.");
+    Ok(())
 }
 
 #[tauri::command]
@@ -2844,6 +3189,7 @@ fn migrate_legacy_state(legacy: LegacyPersistedManagerState) -> PersistedManager
     normalize_persisted_state(PersistedManagerState {
         schema_version: STATE_SCHEMA_VERSION,
         dcsbios_config: DcsBiosConnectionConfig::default(),
+        mcp_config: McpConfig::default(),
         device_endpoints: legacy.device_endpoints,
         device_role_assignments: assignments,
         adapter_mappings: if dcsbios_mappings.is_empty() {
@@ -3659,6 +4005,14 @@ fn run_endpoint_listener_session(
     );
 
     while !stop.load(Ordering::Relaxed) {
+        while let Ok(command) = channels.command_receiver.try_recv() {
+            let result = write_frame(&mut *port, &command.frame);
+            if result.is_ok() {
+                state.record_imcp_frame(&endpoint.id, "tx", &command.frame);
+            }
+            let _ = command.reply.send(result.clone());
+            result?;
+        }
         request_device_hello_if_due(&mut *port, &mut root_hello_retry)?;
         request_due_child_device_hellos(&mut *port, &mut child_hello_retries)?;
         advance_hub_discovery(
@@ -3689,8 +4043,12 @@ fn run_endpoint_listener_session(
                 while let Some(frame) = parser.next_frame() {
                     let frame = match frame {
                         Ok(frame) => frame,
-                        Err(_) => continue,
+                        Err(error) => {
+                            state.record_imcp_decode_error(&endpoint.id, format!("{error:?}"));
+                            continue;
+                        }
                     };
+                    state.record_imcp_frame(&endpoint.id, "rx", &frame);
 
                     let frame_received_at = Instant::now();
                     expire_pending_hub_discoveries(&mut pending_hub_discoveries, frame_received_at);
@@ -4019,6 +4377,7 @@ pub fn run() {
             match load_manager_state(&app_handle) {
                 Ok(manager_state) => {
                     *state.config.lock().unwrap() = manager_state.dcsbios_config.clone();
+                    *state.mcp_config.lock().unwrap() = manager_state.mcp_config.clone();
                     state.set_device_endpoints(&app_handle, manager_state.device_endpoints.clone());
                     state.set_device_role_assignments(
                         &app_handle,
@@ -4041,6 +4400,12 @@ pub fn run() {
                     } else if let Err(error) = state.restart_endpoint_listeners(&app_handle) {
                         state.push_log(&app_handle, "WARN", "devices", error);
                     }
+                    if manager_state.mcp_config.enabled {
+                        let config = manager_state.mcp_config.clone();
+                        if let Err(error) = state.apply_mcp_config(&app_handle, config) {
+                            state.push_log(&app_handle, "ERROR", "mcp", error);
+                        }
+                    }
                 }
                 Err(error) => state.push_log(&app_handle, "WARN", "devices", error),
             }
@@ -4053,6 +4418,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
+            update_mcp_config,
             update_dcsbios_config,
             start_dcsbios,
             stop_dcsbios,
@@ -4068,13 +4434,55 @@ pub fn run() {
             scan_serial_ports,
             list_devices
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(server) = app
+                    .state::<AppState>()
+                    .inner
+                    .mcp_server
+                    .lock()
+                    .unwrap()
+                    .take()
+                {
+                    server.stop();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_manager_state_defaults_to_disabled_mcp() {
+        let mut value = serde_json::to_value(PersistedManagerState::default()).unwrap();
+        value.as_object_mut().unwrap().remove("mcpConfig");
+        let (loaded, migrated) = normalize_manager_state_json(&value.to_string()).unwrap();
+        assert!(!migrated);
+        assert_eq!(loaded.mcp_config, McpConfig::default());
+    }
+
+    #[test]
+    fn shared_persisted_state_round_trips_current_settings() {
+        let state = RuntimeState::new();
+        *state.mcp_config.lock().unwrap() = McpConfig {
+            enabled: true,
+            port: 9876,
+        };
+        *state.device_endpoints.lock().unwrap() = vec![DeviceEndpointConfig {
+            id: "test-endpoint".to_string(),
+            address: "loopback-test".to_string(),
+            ..DeviceEndpointConfig::default()
+        }];
+        let expected = state.persisted_state();
+        let json = serde_json::to_string(&expected).unwrap();
+        let (loaded, migrated) = normalize_manager_state_json(&json).unwrap();
+        assert!(!migrated);
+        assert_eq!(loaded, expected);
+    }
 
     #[test]
     fn normalize_uses_raw_command_when_present() {

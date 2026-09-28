@@ -14,16 +14,21 @@ import {
 import type {
   DcsBiosConnectionConfig,
   DcsBiosStatus,
+  McpConfig,
+  McpStatus,
 } from "@/lib/manager-types";
 
 type SoftwareSettingsProps = {
   config: DcsBiosConnectionConfig;
   status: DcsBiosStatus;
+  mcpConfig: McpConfig;
+  mcpStatus: McpStatus;
   runtimeError: string | null;
   busyAction: string | null;
   onSave: (config: DcsBiosConnectionConfig) => Promise<void>;
   onStart: () => Promise<void>;
   onStop: () => Promise<void>;
+  onSaveMcp: (config: McpConfig) => Promise<void>;
 };
 
 type SoftwareId = "dcs-bios";
@@ -47,13 +52,17 @@ const metricCardClass = "rounded-lg border border-gray-200 bg-white p-5 shadow-s
 export const SoftwareSettings = ({
   config,
   status,
+  mcpConfig,
+  mcpStatus,
   runtimeError,
   busyAction,
   onSave,
   onStart,
   onStop,
+  onSaveMcp,
 }: SoftwareSettingsProps) => {
   const [draft, setDraft] = useState(config);
+  const [mcpDraft, setMcpDraft] = useState(mcpConfig);
   const [isAddMenuOpen, setIsAddMenuOpen] = useState(false);
   const [addedSoftwareIds, setAddedSoftwareIds] = useState<SoftwareId[]>(["dcs-bios"]);
   const [selectedSoftwareId, setSelectedSoftwareId] = useState<SoftwareId>("dcs-bios");
@@ -61,6 +70,10 @@ export const SoftwareSettings = ({
   useEffect(() => {
     setDraft(config);
   }, [config]);
+
+  useEffect(() => {
+    setMcpDraft(mcpConfig);
+  }, [mcpConfig]);
 
   const addedSoftwares = useMemo(
     () => softwareCatalog.filter((software) => addedSoftwareIds.includes(software.id)),
@@ -397,6 +410,46 @@ export const SoftwareSettings = ({
             )}
           </section>
         </div>
+        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+          <h3 className="text-lg font-semibold text-gray-900">MCP サーバー</h3>
+          <p className="mt-1 text-sm text-gray-600">
+            ローカルの MCP クライアントから Manager と接続デバイスを操作します。認証はありません。
+          </p>
+          <div className="mt-4 flex flex-wrap items-end gap-4">
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={mcpDraft.enabled}
+                onChange={(event) => setMcpDraft({ ...mcpDraft, enabled: event.target.checked })}
+              />
+              有効にする
+            </label>
+            <label className="space-y-1 text-sm text-gray-700">
+              <span className="block">ポート</span>
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                value={mcpDraft.port}
+                onChange={(event) => setMcpDraft({ ...mcpDraft, port: Number(event.target.value) })}
+                className="w-32 rounded-md border border-gray-300 px-3 py-2"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => void onSaveMcp(mcpDraft)}
+              disabled={mcpDraft.port < 1 || mcpDraft.port > 65535 || busyAction === "save-mcp-config"}
+              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+            >
+              保存
+            </button>
+          </div>
+          <p className="mt-3 text-sm text-gray-600">状態: {mcpStatus.state}</p>
+          {mcpStatus.url && <p className="mt-1 break-all text-sm text-gray-700">接続先: {mcpStatus.url}</p>}
+          {mcpStatus.error && (
+            <p role="alert" className="mt-2 text-sm text-red-700">{mcpStatus.error}</p>
+          )}
+        </section>
       </div>
     </div>
   );

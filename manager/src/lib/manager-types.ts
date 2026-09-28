@@ -19,6 +19,9 @@ export type DcsBiosStatus = {
   diagnostics: string[];
 };
 
+export type McpConfig = { enabled: boolean; port: number };
+export type McpStatus = { state: string; url: string | null; error: string | null };
+
 export type AdapterCatalogState = "loaded" | "error";
 
 export type AdapterArgumentOption = {
@@ -224,6 +227,8 @@ export type LearnSessionStatus = {
 };
 
 export type AppSnapshot = {
+  mcpConfig: McpConfig;
+  mcpStatus: McpStatus;
   dcsbiosConfig: DcsBiosConnectionConfig;
   dcsbiosStatus: DcsBiosStatus;
   adapterCatalog: AdapterCatalog;
@@ -270,6 +275,8 @@ export function defaultRoleDefinitions(): RoleDefinition[] {
 }
 
 export const defaultSnapshot: AppSnapshot = {
+  mcpConfig: { enabled: false, port: 8765 },
+  mcpStatus: { state: "stopped", url: null, error: null },
   dcsbiosConfig: {
     exportHost: "239.255.50.10",
     exportPort: 5010,
