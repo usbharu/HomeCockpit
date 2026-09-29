@@ -16,7 +16,7 @@ fn main() {
         .setup(move |app| {
             let state = Arc::new(manager_lib::RuntimeState::new());
             let server = manager_lib::mcp::start(app.handle().clone(), state, port)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+                .map_err(std::io::Error::other)?;
             let _keep_alive = Box::leak(Box::new(server));
             Ok(())
         })

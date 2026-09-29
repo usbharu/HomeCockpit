@@ -1092,6 +1092,12 @@ pub struct RuntimeState {
     dcsbios_memory: Arc<Mutex<DcsBiosMemoryStore>>,
 }
 
+impl Default for RuntimeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuntimeState {
     pub fn new() -> Self {
         Self {
