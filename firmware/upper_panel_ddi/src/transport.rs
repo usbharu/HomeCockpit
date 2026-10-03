@@ -14,7 +14,7 @@ pub use upper_panel_ddi::packetization::USB_MAX_PACKET_SIZE;
 type UsbDriverType = UsbDriver<'static, USB>;
 type UsbSender = Sender<'static, UsbDriverType>;
 type UsbReceiver = BufferedReceiver<'static, UsbDriverType>;
-type UartTransport = ImcpEmbedded<RpUartCarrierSense, Output<'static>>;
+type UartTransport = ImcpEmbedded<RpUartCarrierSense<'static>, Output<'static>>;
 
 pub enum ReadEvent {
     Data(usize),

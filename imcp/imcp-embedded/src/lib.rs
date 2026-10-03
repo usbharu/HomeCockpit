@@ -188,32 +188,32 @@ mod tests {
 }
 
 #[cfg(feature = "embassy-rp")]
-pub struct RpUartCarrierSense {
-    uart: BufferedUart,
+pub struct RpUartCarrierSense<'d> {
+    uart: BufferedUart<'d>,
     regs: RpUartRegs,
 }
 
 #[cfg(feature = "embassy-rp")]
-impl RpUartCarrierSense {
-    pub fn new(uart: BufferedUart, regs: RpUartRegs) -> Self {
+impl<'d> RpUartCarrierSense<'d> {
+    pub fn new(uart: BufferedUart<'d>, regs: RpUartRegs) -> Self {
         Self { uart, regs }
     }
 }
 
 #[cfg(feature = "embassy-rp")]
-impl ErrorType for RpUartCarrierSense {
-    type Error = <BufferedUart as ErrorType>::Error;
+impl<'d> ErrorType for RpUartCarrierSense<'d> {
+    type Error = <BufferedUart<'d> as ErrorType>::Error;
 }
 
 #[cfg(feature = "embassy-rp")]
-impl Read for RpUartCarrierSense {
+impl<'d> Read for RpUartCarrierSense<'d> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         Read::read(&mut self.uart, buf).await
     }
 }
 
 #[cfg(feature = "embassy-rp")]
-impl Write for RpUartCarrierSense {
+impl<'d> Write for RpUartCarrierSense<'d> {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         Write::write(&mut self.uart, buf).await
     }
@@ -224,7 +224,7 @@ impl Write for RpUartCarrierSense {
 }
 
 #[cfg(feature = "embassy-rp")]
-impl CarrierSenseUart for RpUartCarrierSense {
+impl<'d> CarrierSenseUart for RpUartCarrierSense<'d> {
     async fn wait_bus_idle(
         &mut self,
         idle_for_us: u64,
