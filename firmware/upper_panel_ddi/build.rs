@@ -14,11 +14,17 @@ use std::io::Write;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rp235x = env::var("CARGO_FEATURE_RP235X").is_ok();
+    let memory_x: &[u8] = if rp235x {
+        include_bytes!("memory-rp235x.x")
+    } else {
+        include_bytes!("memory.x")
+    };
+
     // Put `memory.x` in our output directory and ensure it's
     // on the linker search path.
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);
-    File::create(out.join("memory.x"))
-        .and_then(|mut file| file.write_all(include_bytes!("memory.x")))?;
+    File::create(out.join("memory.x")).and_then(|mut file| file.write_all(memory_x))?;
     println!("cargo:rustc-link-search={}", out.display());
 
     // By default, Cargo will re-run a build script whenever
@@ -26,10 +32,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // here, we ensure the build script is only re-run when
     // `memory.x` is changed.
     println!("cargo:rerun-if-changed=memory.x");
+    println!("cargo:rerun-if-changed=memory-rp235x.x");
+    println!("cargo:rerun-if-changed=build.rs");
 
     println!("cargo:rustc-link-arg-bins=--nmagic");
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
-    println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
+    if !rp235x {
+        println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
+    }
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
 
     Ok(())

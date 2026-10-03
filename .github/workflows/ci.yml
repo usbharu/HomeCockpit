@@ -370,6 +370,28 @@ jobs:
         working-directory: firmware/upper_panel_ddi
         run: cargo clippy --locked --target thumbv6m-none-eabi --bin upper_panel_ddi -- -D warnings
 
+  firmware-upper-rp235x:
+    name: Upper panel firmware (RP235x)
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_upper == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -C target-cpu=cortex-m33
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: thumbv8m.main-none-eabihf
+      - name: Build upper panel firmware for RP235x
+        working-directory: firmware/upper_panel_ddi
+        run: cargo build --locked --release --no-default-features --features rp235x --target thumbv8m.main-none-eabihf --bin upper_panel_ddi
+      - name: Run upper panel firmware Clippy for RP235x
+        working-directory: firmware/upper_panel_ddi
+        run: cargo clippy --locked --no-default-features --features rp235x --target thumbv8m.main-none-eabihf --bin upper_panel_ddi -- -D warnings
+
   manager-frontend-build:
     name: Manager frontend build
     needs: changes
@@ -863,6 +885,7 @@ jobs:
       - firmware-upper-build
       - firmware-upper-fmt
       - firmware-upper-clippy
+      - firmware-upper-rp235x
       - manager-frontend-build
       - manager-backend-test
       - manager-backend-fmt
