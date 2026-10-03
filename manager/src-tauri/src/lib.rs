@@ -143,6 +143,58 @@ impl Default for McpConfig {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct McpCliOverrides {
+    enable: bool,
+    port: Option<u16>,
+}
+
+fn parse_mcp_cli_overrides<I>(args: I) -> McpCliOverrides
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut overrides = McpCliOverrides::default();
+    let mut iter = args.into_iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--mcp" {
+            overrides.enable = true;
+            continue;
+        }
+        if arg == "--mcp-port" {
+            if let Some(port) = next_cli_u16(&mut iter) {
+                overrides.port = Some(port);
+                overrides.enable = true;
+            }
+            continue;
+        }
+        if let Some(port_text) = arg.strip_prefix("--mcp-port=") {
+            if let Ok(port) = port_text.parse::<u16>() {
+                if port != 0 {
+                    overrides.port = Some(port);
+                    overrides.enable = true;
+                }
+            }
+        }
+    }
+    overrides
+}
+
+fn next_cli_u16<I>(iter: &mut std::iter::Peekable<I>) -> Option<u16>
+where
+    I: Iterator<Item = String>,
+{
+    let value = iter.next()?;
+    if value.starts_with('-') {
+        return None;
+    }
+    let port = value.parse::<u16>().ok()?;
+    if port == 0 {
+        None
+    } else {
+        Some(port)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct McpStatus {
@@ -1233,6 +1285,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         app: &AppHandle,
         config: McpConfig,
+        persist: bool,
     ) -> Result<(), String> {
         if config.port == 0 {
             return Err("MCP port must be 1..65535.".to_string());
@@ -1280,13 +1333,15 @@ impl RuntimeState {
         } else {
             None
         };
-        let mut persisted = self.persisted_state();
-        persisted.mcp_config = config.clone();
-        if let Err(error) = persist_manager_state(app, &persisted) {
-            if let Some(server) = next_server {
-                server.cancel.cancel();
+        if persist {
+            let mut persisted = self.persisted_state();
+            persisted.mcp_config = config.clone();
+            if let Err(error) = persist_manager_state(app, &persisted) {
+                if let Some(server) = next_server {
+                    server.cancel.cancel();
+                }
+                return Err(error);
             }
-            return Err(error);
         }
         let old = std::mem::replace(&mut *self.mcp_server.lock().unwrap(), next_server);
         if let Some(old) = old {
@@ -2142,7 +2197,7 @@ fn update_mcp_config(
     state: State<'_, AppState>,
     config: McpConfig,
 ) -> Result<AppSnapshot, String> {
-    state.inner.apply_mcp_config(&app, config)?;
+    state.inner.apply_mcp_config(&app, config, true)?;
     Ok(state.inner.snapshot())
 }
 
@@ -4459,10 +4514,11 @@ fn now_iso8601() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let mcp_cli = parse_mcp_cli_overrides(std::env::args().skip(1));
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::new())
-        .setup(|app| {
+        .setup(move |app| {
             let app_handle = app.handle().clone();
             let state = app.state::<AppState>().inner.clone();
 
@@ -4492,10 +4548,26 @@ pub fn run() {
                     } else if let Err(error) = state.restart_endpoint_listeners(&app_handle) {
                         state.push_log(&app_handle, "WARN", "devices", error);
                     }
-                    if manager_state.mcp_config.enabled {
-                        let config = manager_state.mcp_config.clone();
-                        if let Err(error) = state.apply_mcp_config(&app_handle, config) {
+                    let mcp_start = if mcp_cli.enable {
+                        McpConfig {
+                            enabled: true,
+                            port: mcp_cli.port.unwrap_or(manager_state.mcp_config.port),
+                        }
+                    } else if manager_state.mcp_config.enabled {
+                        manager_state.mcp_config.clone()
+                    } else {
+                        McpConfig::default()
+                    };
+                    if mcp_start.enabled {
+                        if let Err(error) = state.apply_mcp_config(&app_handle, mcp_start, false) {
                             state.push_log(&app_handle, "ERROR", "mcp", error);
+                        } else if mcp_cli.enable {
+                            state.push_log(
+                                &app_handle,
+                                "INFO",
+                                "mcp",
+                                "MCP server enabled for this session via command line (not saved).",
+                            );
                         }
                     }
                 }
@@ -4547,6 +4619,35 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_mcp_cli_overrides_accepts_flags() {
+        assert_eq!(
+            parse_mcp_cli_overrides(["--mcp".to_string()]),
+            McpCliOverrides {
+                enable: true,
+                port: None,
+            }
+        );
+        assert_eq!(
+            parse_mcp_cli_overrides(["--mcp-port".to_string(), "9123".to_string()]),
+            McpCliOverrides {
+                enable: true,
+                port: Some(9123),
+            }
+        );
+        assert_eq!(
+            parse_mcp_cli_overrides(["--mcp-port=8765".to_string()]),
+            McpCliOverrides {
+                enable: true,
+                port: Some(8765),
+            }
+        );
+        assert_eq!(
+            parse_mcp_cli_overrides(Vec::<String>::new()),
+            McpCliOverrides::default()
+        );
+    }
 
     #[test]
     fn old_manager_state_defaults_to_disabled_mcp() {

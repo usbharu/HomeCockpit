@@ -6,6 +6,8 @@ Manager is a Tauri desktop application. Its Next.js frontend is exported as stat
 
 Open **ソフトウェア接続 → MCP サーバー**, enable the server, and save. It is disabled by default. The default endpoint is `http://127.0.0.1:8765/mcp`; the port can be changed from the same screen. Configure an MCP client with this URL and the **Streamable HTTP** transport. The setting is stored in Tauri's `manager-state.json` alongside the other Manager settings.
 
+For a one-off session without changing saved settings, start the desktop app with `--mcp` or `--mcp-port <port>` (also accepts `--mcp-port=<port>`). The listener uses the saved port when `--mcp-port` is omitted. Quitting the app does not write `mcpConfig.enabled` to disk unless you save from the UI.
+
 ![MCP server settings in the Manager web preview](docs/mcp-settings.jpg)
 
 The endpoint listens only on `127.0.0.1` and accepts local `Host` and `Origin` values. It has no authentication. Any local process able to connect can change Manager settings and send commands to DCS or attached hardware. Disabling the setting stops the listener. Bind failures appear in the Manager UI and log.
@@ -50,32 +52,6 @@ IMCP frame fields are `to` and `from` (byte values), `kind` (`ping`, `pong`, `ac
 An endpoint write result confirms bytes were written to the serial transport. It does not prove an IMCP ACK or that the device applied the request. DCS-BIOS import sends likewise do not prove the simulator changed state; check its export value or cockpit state. `dcsbios_memory_read` returns only ranges already received by Manager.
 
 Trace tools return arrays in observation order. `id` is a process-local cursor: pass the last observed `id` as `sinceId` to read later entries. `limit` defaults to 50 and allows 1–128 entries; each trace keeps the latest 128 entries in memory. DCS packet previews contain at most 256 bytes in `hexPreview`; `truncated` marks a longer datagram. Use `dcsbios_packet_read` for its complete hex bytes while the ID remains in the trace. `startsWithSync` only reports whether the datagram starts with a DCS-BIOS sync marker (continuation datagrams can validly omit it). IMCP entries include `direction` (`rx` or `tx`), frame fields, and optional decoded `hcp` or `decodeError`. The TX trace records writes requested through the MCP endpoint queue; automatic Manager protocol writes are not included. A received ACK can be observed in `imcp_recent_frames`, but it is not automatically correlated with a prior send or proof that a command was applied. The trace is cleared when Manager exits.
-
-### MCP tool-description evaluation (headless)
-
-The desktop app and the `manager-mcp-serve` binary use the same `McpHandler` and `tool_catalog()` descriptions. For agent tuning without the UI:
-
-```bash
-cd manager/src-tauri
-cargo run --bin manager-mcp-serve -- 28765
-```
-
-In another terminal:
-
-```bash
-python3 manager/scripts/mcp_tool_selection_eval.py --port 28765
-python3 manager/scripts/mcp_call_all_tools.py 28765
-python3 manager/scripts/mcp_http_client.py --port 28765 --list-tools
-```
-
-Golden tool-choice scenarios for context-free agents live in `manager/scripts/mcp_tool_scenarios.json`.
-
-Context-free tuning loop (no repo access for the agent):
-
-1. `python3 manager/scripts/mcp_eval_bundle.py <port>` — instructions, `tools/list`, and all `tools/call` results as JSON  
-2. Give that JSON plus `manager/scripts/mcp_subagent_tune_prompt.txt` to an agent with **no codebase context**  
-3. Apply returned `description_changes`, restart `manager-mcp-serve`, repeat until `loop_complete` is true  
-4. `python3 manager/scripts/mcp_call_all_tools.py <port>` — verify 29 calls (7 expected failures on an empty environment)
 
 ## Development checks
 
