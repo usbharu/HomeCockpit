@@ -1,6 +1,11 @@
 # KiCad の開発環境と移行手順
 
-このリポジトリで管理するKiCad設計と共有ライブラリは KiCad 10 の形式を正本とします。最低対応バージョンは KiCad 10.0 です。CI は再現性のため `ghcr.io/kicad/kicad:10.0.5` を固定して使用するため、ローカルで編集する場合も KiCad 10.0.5 以降を推奨します。現行のKiCad検証対象は `upper_panel_ddi/pcb/button_panel/` のボタン基板です。
+このリポジトリで管理するKiCad設計と共有ライブラリは KiCad 10 の形式を正本とします。最低対応バージョンは KiCad 10.0 です。CI は再現性のため `ghcr.io/kicad/kicad:10.0.5` を固定して使用するため、ローカルで編集する場合も KiCad 10.0.5 以降を推奨します。現行の KiCad 検証対象は次のとおりです。
+
+| プロジェクト | パス | CI |
+| --- | --- | --- |
+| Upper Panel メイン基板 | `upper_panel_ddi/pcb/main_board/` | 回路図 ERC のみ（`.kicad_pcb` なし） |
+| Upper Panel ボタン基板 | `upper_panel_ddi/pcb/button_panel/` | ERC + DRC + SVG |
 
 ## KiCad 9 からの移行
 
@@ -15,7 +20,7 @@ kicad-cli fp upgrade Library.pretty
 kicad-cli sym upgrade HomeCockpit.kicad_sym
 ```
 
-変換後は KiCad 10 でボタン基板プロジェクトを開いて保存し、ERC/DRC と SVG 出力を確認します。プロジェクト内の `sym-lib-table` / `fp-lib-table` は、標準ライブラリを KiCad 10 の環境変数から、共有ライブラリを `${KIPRJMOD}` から解決するために使用しています。個人環境の絶対パスをテーブルへ追加しないでください。旧 `upper_panel_ddi/upper_panel_ddi.*` のメイン基板プロジェクトは削除済みのため、復活させないでください。
+変換後は KiCad 10 で対象プロジェクトを開いて保存し、ERC/DRC と SVG 出力を確認します。プロジェクト内の `sym-lib-table` / `fp-lib-table` は、標準ライブラリを KiCad 10 の環境変数（例: `KICAD10_SYMBOL_DIR`）から、共有ライブラリを `${KIPRJMOD}` から解決するために使用しています。個人環境の絶対パスをテーブルへ追加しないでください。旧ルートの `upper_panel_ddi/upper_panel_ddi.*` メイン基板は削除済みです。正本は `upper_panel_ddi/pcb/main_board/upper_panel_ddi_main_board.kicad_pro` です。回路図は [`generate_schematic.py`](../upper_panel_ddi/pcb/main_board/generate_schematic.py) から再生成できます。
 
 ## 重複パッドを持つタクトスイッチ
 
@@ -26,13 +31,19 @@ kicad-cli sym upgrade HomeCockpit.kicad_sym
 静的検証は次の形式で実行します。
 
 ```sh
+# メイン基板（schematic-only）
+kicad-cli sch erc --severity-error --exit-code-violations \
+  --output /tmp/main-board-erc.rpt \
+  upper_panel_ddi/pcb/main_board/upper_panel_ddi_main_board.kicad_sch
+
+# ボタン基板
 kicad-cli sch erc --severity-all --output /tmp/button-panel-erc.rpt \
   upper_panel_ddi/pcb/button_panel/upper_panel_ddi_button_panel.kicad_sch
 kicad-cli pcb drc --severity-all --output /tmp/button-panel-drc.rpt \
   upper_panel_ddi/pcb/button_panel/upper_panel_ddi_button_panel.kicad_pcb
 ```
 
-CI の error-level JSON と SVG 可視化を最終判定に使用します。KiCad 10 への変換だけで、設計上の未接続や未配線を除外してはいけません。旧メイン基板に関する課題は、削除済みプロジェクトを復活させず、必要になった場合は別途扱います。
+CI の error-level JSON と SVG 可視化を最終判定に使用します（メイン基板は ERC のみ）。KiCad 10 への変換だけで、設計上の未接続や未配線を除外してはいけません。
 
 製造データは生成物として管理し、コミット前に必要な差分だけを確認します。
 
