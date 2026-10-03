@@ -27,6 +27,7 @@ export default function ManagerTabs() {
         serialPortScanError,
         isScanningSerialPorts,
         saveConfig,
+        saveMcpConfig,
         startDcsBios,
         stopDcsBios,
         refreshDevices,
@@ -49,6 +50,9 @@ export default function ManagerTabs() {
             content: (
                 <SoftwareSettings
                     config={snapshot.dcsbiosConfig}
+                    mcpConfig={snapshot.mcpConfig}
+                    mcpStatus={snapshot.mcpStatus}
+                    onSaveMcp={saveMcpConfig}
                     status={snapshot.dcsbiosStatus}
                     busyAction={busyAction}
                     runtimeError={runtimeError}

@@ -20,6 +20,8 @@ import {
   type LearnSessionStatus,
   type ManagerLogEntry,
   type ManagedDeviceSummary,
+  type McpConfig,
+  type McpStatus,
   type RoleInputTriggerRequest,
   type SerialPortCandidate,
 } from "@/lib/manager-types";
@@ -41,6 +43,10 @@ export function useManagerState() {
 
   const mergeStatus = useCallback((status: DcsBiosStatus) => {
     setSnapshot((current) => ({ ...current, dcsbiosStatus: status }));
+  }, []);
+
+  const mergeMcpStatus = useCallback((status: McpStatus) => {
+    setSnapshot((current) => ({ ...current, mcpStatus: status }));
   }, []);
 
   const mergeLog = useCallback((entry: ManagerLogEntry) => {
@@ -110,6 +116,21 @@ export function useManagerState() {
     },
     [],
   );
+
+  const saveMcpConfig = useCallback(async (config: McpConfig) => {
+    if (!isTauri()) {
+      setSnapshot((current) => ({ ...current, mcpConfig: config }));
+      return;
+    }
+    try {
+      const next = await runAction("save-mcp-config", () =>
+        invoke<AppSnapshot>("update_mcp_config", { config }),
+      );
+      replaceSnapshot(next);
+    } catch (error) {
+      setRuntimeError(String(error));
+    }
+  }, [replaceSnapshot, runAction]);
 
   const saveConfig = useCallback(
     async (config: DcsBiosConnectionConfig) => {
@@ -398,6 +419,9 @@ export function useManagerState() {
 
     const bindListeners = async () => {
       const listeners = await Promise.all([
+        listen<McpStatus>("mcp-status-changed", (event) => {
+          if (!disposed) mergeMcpStatus(event.payload);
+        }),
         listen<DcsBiosStatus>("dcsbios-status-changed", (event) => {
           if (!disposed) {
             mergeStatus(event.payload);
@@ -454,6 +478,7 @@ export function useManagerState() {
     mergeAdapterMappings,
     mergeLearnSession,
     mergeStatus,
+    mergeMcpStatus,
     refreshSnapshot,
   ]);
 
@@ -465,6 +490,7 @@ export function useManagerState() {
     serialPortScanError,
     isScanningSerialPorts,
     saveConfig,
+    saveMcpConfig,
     startDcsBios,
     stopDcsBios,
     refreshDevices,
