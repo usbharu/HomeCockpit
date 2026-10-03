@@ -582,7 +582,10 @@ fn initialize_device_identity(flash: Peri<'static, FLASH>) -> DeviceIdentity {
 }
 
 #[cfg(feature = "rp235x")]
-fn initialize_device_identity(_flash: FLASH, trng: TRNG) -> DeviceIdentity {
+fn initialize_device_identity(
+    _flash: Peri<'static, FLASH>,
+    trng: Peri<'static, TRNG>,
+) -> DeviceIdentity {
     let device_id = read_rp235x_device_id();
     let join_id = generate_rp235x_join_id(trng);
     DeviceIdentity { device_id, join_id }
@@ -619,7 +622,7 @@ fn generate_rp2040_join_id() -> u32 {
 }
 
 #[cfg(feature = "rp235x")]
-fn generate_rp235x_join_id(trng: TRNG) -> u32 {
-    let mut trng = Trng::new(trng, Irqs, TrngConfig::default());
+fn generate_rp235x_join_id(trng: Peri<'static, TRNG>) -> u32 {
+    let mut trng = Trng::new_blocking(trng, TrngConfig::default());
     trng.blocking_next_u32()
 }

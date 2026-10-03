@@ -5,8 +5,8 @@ edition = "2024"
 
 [features]
 default = ["rp2040"]
-rp2040 = []
-rp235x = []
+rp2040 = ["embassy-rp/rp2040"]
+rp235x = ["embassy-rp/rp235xa"]
 
 [dependencies]
 embassy-sync = { version = "0.8.0", path = "../lib/embassy/embassy-sync", features = [
@@ -22,12 +22,11 @@ embassy-time = { version = "0.5.1", path = "../lib/embassy/embassy-time", defaul
     "defmt",
     "defmt-timestamp-uptime",
 ] }
-embassy-rp = { version = "0.10.0", path = "../lib/embassy/embassy-rp", features = [
+embassy-rp = { version = "0.10.0", path = "../lib/embassy/embassy-rp", default-features = false, features = [
     "defmt",
     "unstable-pac",
     "time-driver",
     "critical-section-impl",
-    "rp2040",
 ] }
 embassy-usb = { version = "0.6.0", path = "../lib/embassy/embassy-usb", features = [
     "defmt",

@@ -1,36 +1,54 @@
 # upper_panel_ddi firmware
 
-`upper_panel_ddi` は Raspberry Pi Pico（RP2040）向けのファームウェアです。
-Cargo のデバッグ runner には `probe-rs run` を使用します。
+`upper_panel_ddi` は Upper Panel DDI 向けのファームウェアです。Cargo feature で MCU を選びます。
+
+| Feature（default） | MCU | Rust target |
+| --- | --- | --- |
+| `rp2040`（default） | RP2040（Pico など） | `thumbv6m-none-eabi` |
+| `rp235x` | RP235x（Pico 2 など） | `thumbv8m.main-none-eabihf` |
+
+Cargo のデバッグ runner には `probe-rs run` を使用します。`.cargo/config.toml` で target ごとに chip を切り替えています。
 
 ## 必要なツール
 
 - Rust toolchain
-- `thumbv6m-none-eabi` ターゲット
+- 対象 MCU に応じた Rust target（RP2040: `thumbv6m-none-eabi`、RP235x: `thumbv8m.main-none-eabihf`）
 - `probe-rs`（`probe-rs-tools`）
-- RP2040 に接続した SWD 対応の Debug Probe
+- 対象ボードに接続した SWD 対応の Debug Probe
 
 `probe-rs` は [公式インストール手順](https://probe.rs/docs/getting-started/installation/)
 に従ってインストールし、`probe-rs` コマンドが `PATH` に含まれていることを確認してください。
 
 ```powershell
 rustup target add thumbv6m-none-eabi
+rustup target add thumbv8m.main-none-eabihf
 probe-rs --version
 ```
 
 ## Probe とターゲットの確認
+
+RP2040:
 
 ```powershell
 probe-rs list
 probe-rs info --chip RP2040 --protocol swd
 ```
 
-`probe-rs list` に Debug Probe が表示され、`probe-rs info` が RP2040 に接続できれば、
+RP235x:
+
+```powershell
+probe-rs list
+probe-rs info --chip RP235x --protocol swd
+```
+
+`probe-rs list` に Debug Probe が表示され、`probe-rs info` が対象 chip に接続できれば、
 書き込みの準備は完了です。複数の Probe を接続している場合は、必要に応じて
 `--probe VID:PID[:SERIAL]` をコマンドへ追加してください。runner の設定には特定の
 Probe ID を固定していません。
 
 ## ビルドと実行
+
+### RP2040（default）
 
 ```powershell
 cd C:\Users\haruj\Documents\HomeCockpit\firmware\upper_panel_ddi
@@ -38,11 +56,19 @@ cargo build --locked --bin upper_panel_ddi
 cargo run --locked --bin upper_panel_ddi
 ```
 
-`.cargo/config.toml` の runner は次の設定です。
+`.cargo/config.toml` の `thumbv6m-none-eabi` runner は `probe-rs run --chip RP2040` です。
 
-```toml
-runner = "probe-rs run --chip RP2040"
+### RP235x
+
+default feature を外し、`rp235x` と target を明示します。
+
+```powershell
+cd C:\Users\haruj\Documents\HomeCockpit\firmware\upper_panel_ddi
+cargo build --locked --no-default-features --features rp235x --target thumbv8m.main-none-eabihf --bin upper_panel_ddi
+cargo run --locked --no-default-features --features rp235x --target thumbv8m.main-none-eabihf --bin upper_panel_ddi
 ```
+
+`thumbv8m.main-none-eabihf` の runner は `probe-rs run --chip RP235x`（`--protocol swd --connect-under-reset`）です。
 
 `cargo run` は `probe-rs run` によってファームウェアを書き込み、ターゲットを
 リセットして実行します。`defmt-rtt` の RTT/defmt ログは同じコンソールへ出力されます。
@@ -107,6 +133,14 @@ cd C:\Users\haruj\Documents\HomeCockpit\firmware\upper_panel_ddi
 cargo build --locked --release --target thumbv6m-none-eabi --bin upper_panel_ddi
 cargo fmt --all -- --check
 cargo clippy --locked --target thumbv6m-none-eabi --bin upper_panel_ddi -- -D warnings
+```
+
+RP235x（CI と同じコマンド）:
+
+```powershell
+$env:RUSTFLAGS = '-C target-cpu=cortex-m33'
+cargo build --locked --release --no-default-features --features rp235x --target thumbv8m.main-none-eabihf --bin upper_panel_ddi
+cargo clippy --locked --no-default-features --features rp235x --target thumbv8m.main-none-eabihf --bin upper_panel_ddi -- -D warnings
 ```
 
 stack watermark はまだ導入していないため、実行時の watermark を確認済みとは扱いません。
