@@ -1,0 +1,6 @@
+erc.error.json
+erc.rpt
+*-erc.rpt
+*.net
+__pycache__/
+upper_panel_ddi_main_board.kicad_prl
