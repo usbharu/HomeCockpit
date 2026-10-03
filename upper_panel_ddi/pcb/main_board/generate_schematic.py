@@ -10,6 +10,8 @@ import subprocess
 
 ROOT_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 PROJECT = "upper_panel_ddi_main_board"
+_UID_NS = uuid.UUID(ROOT_UUID)
+_uid_seq = 0
 
 PICO_AT = (191.77, 74.93)
 ALL_PICO_PINS = [str(n) for n in range(1, 41)]
@@ -95,8 +97,10 @@ J2_AT = (168.91, 132.08)
 J3_AT = (254.0, 74.93)
 
 
-def uid() -> str:
-    return str(uuid.uuid4())
+def uid(name: str = "obj") -> str:
+    global _uid_seq
+    _uid_seq += 1
+    return str(uuid.uuid5(_UID_NS, f"{name}-{_uid_seq}"))
 
 
 def pin_end(px: float, py: float, x: float, y: float, angle: int, length: float = 3.81) -> tuple[float, float]:
@@ -378,6 +382,8 @@ def net_label(name: str, x: float, y: float) -> str:
 
 
 def main() -> None:
+    global _uid_seq
+    _uid_seq = 0
     chunks: list[str] = []
 
     chunks.append(

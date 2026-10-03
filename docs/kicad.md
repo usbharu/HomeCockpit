@@ -43,7 +43,7 @@ kicad-cli pcb drc --severity-all --output /tmp/button-panel-drc.rpt \
   upper_panel_ddi/pcb/button_panel/upper_panel_ddi_button_panel.kicad_pcb
 ```
 
-CI の error-level JSON と SVG 可視化を最終判定に使用します（メイン基板は ERC のみ）。KiCad 10 への変換だけで、設計上の未接続や未配線を除外してはいけません。
+CI の error-level JSON と SVG 可視化を最終判定に使用します（メイン基板は ERC のみ）。GitHub Actions では `kicad-main-board` job が `generate_schematic.py` の出力と `.kicad_sch` の一致、`kicad-cli sch erc`（error 0）、回路図 SVG を検証します。`upper_panel_ddi/pcb/main_board/`、`firmware/upper_panel_ddi/`、共有 KiCad ライブラリの変更でこの job が走ります。
 
 製造データは生成物として管理し、コミット前に必要な差分だけを確認します。
 
