@@ -2,7 +2,70 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const MARKER = '<!-- homecockpit-kicad-previews -->';
-const escape = (text) => String(text).replace(/[&<>"|`\r\n]/g, (char) => `&#${char.charCodeAt(0)};`);
+const escape = (text) => String(text).replace(/[&<>"|`\\[\]()*_!#\r\n]/g, (char) => `&#${char.charCodeAt(0)};`);
+const IMAGE_NAME = /^[a-f0-9]{20}-(before|after)-[a-f0-9]{12}\.png$/;
+const PNG_SIGNATURE = Buffer.from('89504e470d0a1a0a', 'hex');
+
+async function prepare({ github, context, core }) {
+  const run = context.payload.workflow_run;
+  const repository = `${context.repo.owner}/${context.repo.repo}`;
+  if (!run || run.event !== 'pull_request' || run.path !== '.github/workflows/kicad-previews.yml'
+      || run.head_repository?.full_name !== repository || !['success', 'failure'].includes(run.conclusion)) {
+    core.info('Skipping an unsupported preview source run');
+    return null;
+  }
+  // Only GitHub's run metadata identifies the PR. Never accept a number from the artifact.
+  const candidate = run.pull_requests?.find((pr) => pr.head.sha === run.head_sha && pr.base.ref === 'master');
+  if (!candidate) {
+    core.info('No matching PR in the source run metadata');
+    return null;
+  }
+  const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: candidate.number });
+  if (pr.state !== 'open' || pr.base.ref !== 'master' || pr.head.repo?.full_name !== repository
+      || pr.head.sha !== run.head_sha) {
+    core.info('Skipping previews for a closed, forked or outdated PR');
+    return null;
+  }
+  const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+    ...context.repo, run_id: run.id, per_page: 100,
+  });
+  const artifact = artifacts.find((item) => item.name === 'kicad-previews' && !item.expired);
+  if (!artifact) {
+    core.info('The source run did not upload preview data');
+    return null;
+  }
+  return { run, pr, artifact };
+}
+
+function readData(file, limit) {
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.size > limit) throw new Error(`Invalid preview file: ${path.basename(file)}`);
+  return fs.readFileSync(file);
+}
+
+function validateManifest(manifest, head) {
+  if (!/^[a-f0-9]{40}$/.test(manifest.base) || manifest.head !== head
+      || !Array.isArray(manifest.entries) || manifest.entries.length > 1000) {
+    throw new Error('Invalid preview manifest or mismatched source revision');
+  }
+  for (const entry of manifest.entries) {
+    if (typeof entry.source !== 'string' || !/\.kicad_(pcb|sch)$/.test(entry.source)
+        || entry.source.length > 1024 || !['added', 'deleted', 'modified', 'related'].includes(entry.status)
+        || !entry.images || !entry.errors || typeof entry.errors !== 'object') {
+      throw new Error('Invalid preview entry');
+    }
+    for (const side of ['before', 'after']) {
+      const views = entry.images[side];
+      if (typeof entry[side] !== 'boolean' || !views || typeof views !== 'object' || Array.isArray(views)
+          || Object.keys(views).length > 100) throw new Error('Invalid preview views');
+      for (const [label, name] of Object.entries(views)) {
+        if (label.length > 1024 || typeof name !== 'string' || !IMAGE_NAME.test(name)) {
+          throw new Error('Invalid preview image name');
+        }
+      }
+    }
+  }
+}
 
 function imageNames(manifest) {
   return [...new Set(manifest.entries.flatMap((entry) =>
@@ -53,15 +116,12 @@ function buildBody(manifest, imageBaseUrl, runUrl, artifactUrl, runNumber) {
 }
 
 module.exports = async function publish({ github, context, core, directory }) {
-  const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
+  const source = await prepare({ github, context, core });
+  if (!source) return;
+  const { run, pr, artifact } = source;
+  const manifest = JSON.parse(readData(path.join(directory, 'manifest.json'), 5 * 1024 * 1024).toString('utf8'));
+  validateManifest(manifest, run.head_sha);
   const repo = context.repo;
-  const pr = context.payload.pull_request;
-  // A rerun of an older commit must not replace the latest preview.
-  const current = await github.rest.pulls.get({ ...repo, pull_number: pr.number });
-  if (current.data.head.sha !== manifest.head) {
-    core.info('Skipping previews for an outdated PR revision');
-    return;
-  }
   const comments = await github.paginate(github.rest.issues.listComments, {
     ...repo, issue_number: pr.number, per_page: 100,
   });
@@ -70,6 +130,17 @@ module.exports = async function publish({ github, context, core, directory }) {
   if (!manifest.entries.length && !existing) return;
 
   const names = imageNames(manifest);
+  if (names.length > 500) throw new Error('Too many preview images');
+  // Validate every image before making any write API calls. Artifact files are data only.
+  let totalBytes = 0;
+  const images = names.map((name) => {
+    const content = readData(path.join(directory, name), 20 * 1024 * 1024);
+    totalBytes += content.length;
+    if (!content.subarray(0, 8).equals(PNG_SIGNATURE) || totalBytes > 50 * 1024 * 1024) {
+      throw new Error('Invalid PNG preview or oversized image payload');
+    }
+    return { name, content };
+  });
   let imageCommit;
   if (names.length) {
     // Use a separate branch from the ERC/DRC images, so either job can run first.
@@ -81,12 +152,9 @@ module.exports = async function publish({ github, context, core, directory }) {
       if (error.status !== 404) throw error;
     }
     const tree = [];
-    for (const name of names) {
-      if (path.basename(name) !== name || !/^[a-f0-9]{20}-(before|after)-[a-f0-9]{12}\.png$/.test(name)) {
-        throw new Error(`Invalid preview image name: ${name}`);
-      }
+    for (const { name, content } of images) {
       const blob = await github.rest.git.createBlob({
-        ...repo, content: fs.readFileSync(path.join(directory, name)).toString('base64'), encoding: 'base64',
+        ...repo, content: content.toString('base64'), encoding: 'base64',
       });
       tree.push({ path: name, mode: '100644', type: 'blob', sha: blob.data.sha });
     }
@@ -103,13 +171,14 @@ module.exports = async function publish({ github, context, core, directory }) {
     }
   }
   const rootUrl = `${context.serverUrl}/${repo.owner}/${repo.repo}`;
-  const runUrl = `${rootUrl}/actions/runs/${context.runId}`;
-  const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
-    ...repo, run_id: context.runId, per_page: 100,
-  });
-  const artifact = artifacts.find((item) => item.name === 'kicad-previews');
+  const runUrl = `${rootUrl}/actions/runs/${run.id}`;
   const body = buildBody(manifest, `${rootUrl}/raw/${imageCommit}`, runUrl,
-    artifact ? `${runUrl}/artifacts/${artifact.id}` : runUrl, context.runNumber);
+    `${runUrl}/artifacts/${artifact.id}`, run.run_number);
+  const latest = await github.rest.pulls.get({ ...repo, pull_number: pr.number });
+  if (latest.data.state !== 'open' || latest.data.head.sha !== run.head_sha) {
+    core.info('Skipping a PR that changed while its images were being uploaded');
+    return;
+  }
   if (existing) {
     await github.rest.issues.updateComment({ ...repo, comment_id: existing.id, body });
   } else {
@@ -119,3 +188,5 @@ module.exports = async function publish({ github, context, core, directory }) {
 
 module.exports.buildBody = buildBody;
 module.exports.imageNames = imageNames;
+module.exports.prepare = prepare;
+module.exports.validateManifest = validateManifest;

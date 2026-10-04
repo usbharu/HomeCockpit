@@ -50,35 +50,3 @@ jobs:
           name: kicad-previews
           path: ${{ runner.temp }}/kicad-previews
           if-no-files-found: error
-
-  comment:
-    name: Comment KiCad previews on PR
-    needs: render
-    if: >-
-      ${{
-        always() && !cancelled() &&
-        github.event.pull_request.head.repo.full_name == github.repository
-      }}
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: write
-      issues: write
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          sparse-checkout: .github/scripts
-      - uses: actions/download-artifact@v8
-        with:
-          name: kicad-previews
-          path: ${{ runner.temp }}/kicad-previews
-      - name: Create or update preview comment
-        uses: actions/github-script@v9
-        env:
-          PREVIEW_DIR: ${{ runner.temp }}/kicad-previews
-        with:
-          script: |
-            const publish = require('./.github/scripts/comment-kicad-previews.cjs');
-            await publish({ github, context, core, directory: process.env.PREVIEW_DIR });
