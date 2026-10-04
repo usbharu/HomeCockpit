@@ -219,6 +219,8 @@ test('privileged workflow executes only default-branch code, separate from artif
   assert.doesNotMatch(render, /:\s*write\b/);
   assert.doesNotMatch(render, /\n  comment:/);
   assert.match(comment, /workflow_run:\s*\n\s*workflows: \[KiCad previews\]/);
+  // PR conversation comments require PR write access even though the REST URL uses /issues/.
+  assert.match(comment, /    permissions:\n(?:      .*\n)*      pull-requests: write\n/);
   assert.match(comment, /ref: \$\{\{ github\.sha \}\}\s*\n\s*path: trusted/);
   assert.match(comment, /require\('\.\/trusted\/\.github\/scripts\/comment-kicad-previews\.cjs'\)/);
   assert.match(comment, /path: \$\{\{ runner\.temp \}\}\/kicad-previews/);
