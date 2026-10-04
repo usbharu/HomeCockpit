@@ -11,6 +11,7 @@ import tempfile
 
 
 KICAD_IMAGE = "ghcr.io/kicad/kicad:10.0.5"
+KICAD10_SYMBOL_DIR = "/usr/share/kicad/symbols"
 DESIGN_SUFFIXES = {".kicad_pcb", ".kicad_sch"}
 PROJECT_SUFFIXES = DESIGN_SUFFIXES | {".kicad_pro", ".kicad_dru"}
 LIBRARY_SUFFIXES = {".kicad_sym", ".kicad_mod"}
@@ -89,14 +90,23 @@ def snapshot(revision, destination):
             contents.extractall(destination, filter="data")
 
 
-def run_kicad(arguments, workspace, output):
+def run_kicad(arguments, workspace, output, project_dir=None):
+    """Run kicad-cli in Docker; project_dir enables sym-lib-table ${KIPRJMOD} resolution."""
+    workdir = "/workspace"
+    env = [
+        "-e", "HOME=/tmp/kicad-home",
+        "-e", f"KICAD10_SYMBOL_DIR={KICAD10_SYMBOL_DIR}",
+    ]
+    if project_dir:
+        env.extend(["-e", f"KIPRJMOD=/workspace/{project_dir}"])
+        workdir = f"/workspace/{project_dir}"
     subprocess.run(
         [
             "docker", "run", "--rm", "--network", "none",
-            "-e", "HOME=/tmp/kicad-home",
+            *env,
             "-v", f"{workspace}:/workspace:ro",
             "-v", f"{output}:/renders",
-            "-w", "/workspace", KICAD_IMAGE, "kicad-cli", *arguments,
+            "-w", workdir, KICAD_IMAGE, "kicad-cli", *arguments,
         ],
         check=True,
         timeout=180,
@@ -105,6 +115,7 @@ def run_kicad(arguments, workspace, output):
 
 def render(entry, side, workspace, output):
     source = entry["source"]
+    project_dir = str(PurePosixPath(source).parent)
     # Full-path hash prevents collisions between identically named project files.
     identifier = hashlib.sha256(source.encode()).hexdigest()[:20]
     target = output / f"{identifier}-{side}"
@@ -124,16 +135,17 @@ def render(entry, side, workspace, output):
                     *(["--mirror"] if view == "back" else []),
                     "--output", f"/renders/{target.name}/{name}", f"/workspace/{source}",
                 ],
-                workspace, output,
+                workspace, output, project_dir=project_dir,
             )
             svg_paths[view] = target / name
     else:
+        sch_name = PurePosixPath(source).name
         run_kicad(
             [
                 "sch", "export", "svg", "--output", f"/renders/{target.name}/",
-                f"/workspace/{source}",
+                sch_name,
             ],
-            workspace, output,
+            workspace, output, project_dir=project_dir,
         )
         # Keep all hierarchical pages, matched by name between revisions.
         svg_paths = {f"sheet: {p.stem}": p for p in sorted(target.glob("*.svg"))}

@@ -27,6 +27,11 @@ class SelectionTests(unittest.TestCase):
         self.assertFalse(entries[0]["before"])
         self.assertTrue(entries[0]["after"])
 
+    def test_upper_panel_main_board_schematic_only_added(self):
+        path = "upper_panel_ddi/pcb/main_board/upper_panel_ddi_main_board.kicad_sch"
+        entries = previews.select_designs({path}, set(), {path})
+        self.assertEqual([(e["source"], e["status"]) for e in entries], [(path, "added")])
+
     def test_project_configuration_renders_both_board_and_schematic(self):
         entries = previews.select_designs({"pcb/button/button.kicad_pro"}, self.files, self.files)
         self.assertEqual({e["source"] for e in entries}, self.files)
@@ -113,7 +118,7 @@ class RenderTests(unittest.TestCase):
         entry = previews.select_designs({"main.kicad_sch"}, set(), {"main.kicad_sch"})[0]
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
-            def export(args, workspace, output):
+            def export(args, workspace, output, **kwargs):
                 target = output / Path(args[args.index("--output") + 1]).name
                 for page in ["main", "main-connectors"]:
                     (target / f"{page}.svg").write_text("<svg/>")
@@ -130,6 +135,20 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(set(entry["images"]["after"]), {"front", "back"})
         self.assertNotIn("--mirror", export.call_args_list[0].args[0])
         self.assertIn("--mirror", export.call_args_list[1].args[0])
+
+    def test_run_kicad_sets_kicad10_and_project_dir_for_schematic(self):
+        with patch.object(previews.subprocess, "run") as run:
+            previews.run_kicad(
+                ["sch", "export", "svg", "--output", "/renders/x/", "board.kicad_sch"],
+                Path("/tmp/w"),
+                Path("/tmp/o"),
+                project_dir="upper_panel_ddi/pcb/main_board",
+            )
+        cmd = run.call_args[0][0]
+        joined = " ".join(cmd)
+        self.assertIn("KICAD10_SYMBOL_DIR=/usr/share/kicad/symbols", joined)
+        self.assertIn("KIPRJMOD=/workspace/upper_panel_ddi/pcb/main_board", joined)
+        self.assertIn("-w /workspace/upper_panel_ddi/pcb/main_board", joined)
 
 
 if __name__ == "__main__":

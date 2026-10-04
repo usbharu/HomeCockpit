@@ -4,6 +4,16 @@ on:
   pull_request:
     branches: [master]
     types: [opened, synchronize, reopened]
+    paths:
+      - 'upper_panel_ddi/pcb/**'
+      - 'firmware/upper_panel_ddi/**'
+      - 'HomeCockpit.kicad_sym'
+      - 'Library.pretty/**'
+      - '.github/workflows/kicad-previews.yml'
+      - '.github/workflows/kicad-preview-comment.yml'
+      - '.github/scripts/render-kicad-previews.py'
+      - '.github/scripts/comment-kicad-previews.cjs'
+      - '.github/scripts/tests/**'
 
 permissions:
   contents: read
