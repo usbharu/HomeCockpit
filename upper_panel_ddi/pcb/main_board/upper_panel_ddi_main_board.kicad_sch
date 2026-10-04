@@ -1784,7 +1784,7 @@
 			(embedded_fonts no)
 		)
 	)
-	(text "Main board JST 1x06 pinout: 1=ROWn, 2..6=COL0..4\nSpecial cable: main 1 -> button 1; main 2..6 -> button 3..7\nButton-side pin2 (LED) and pin8 are not wired to main.\nSWD: wire to Pico module debug pads (SWDIO/SWCLK/GND); not on symbol.\nCrossings without a junction dot are not connected."
+	(text "Main board JST 1x06 pinout: 1=ROWn, 2..6=COL0..4\nSpecial cable: main 1 -> button 2 (ROW); main 2..6 -> button 3..7\nButton-side pin1 (LED supply) and pin8 (LED return) are not wired to main.\nSWD: wire to Pico module debug pads (SWDIO/SWCLK/GND); not on symbol.\nCrossings without a junction dot are not connected."
 		(exclude_from_sim yes)
 		(at 20.32 363.22 0)
 		(effects
@@ -1795,7 +1795,7 @@
 		)
 		(uuid "202fe92b-3f82-5061-8b2c-9a27e2bf32ca")
 	)
-	(text "Upper Panel DDI main board (perfboard) — firmware: upper_panel_ddi\nMatrix: 8x5 (GP2-9 rows out, GP10-14 cols in, pulldown in FW)\nIMCP: USB CDC on Pico Micro-USB (115200 logical); GP0/GP1 UART NC\nPower: USB VBUS; max_power 100 mA in firmware USB descriptor\nEight J1..J8 (1x06 each): Pin1 ROW0-7 -> GP2-9 | Pin2-6 COL0-4 -> GP10-14\nSpecial cable to button_panel 1x08; button-side pins 2 and 8 are not wired"
+	(text "Upper Panel DDI main board (perfboard) — firmware: upper_panel_ddi\nMatrix: 8x5 (GP2-9 rows out, GP10-14 cols in, pulldown in FW)\nIMCP: USB CDC on Pico Micro-USB (115200 logical); GP0/GP1 UART NC\nPower: USB VBUS; max_power 100 mA in firmware USB descriptor\nEight J1..J8 (1x06 each): Pin1 ROW0-7 -> GP2-9 | Pin2-6 COL0-4 -> GP10-14\nSpecial cable to button_panel 1x08; button-side pins 1 and 8 are not wired"
 		(exclude_from_sim yes)
 		(at 20.32 15.24 0)
 		(effects

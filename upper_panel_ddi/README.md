@@ -17,14 +17,14 @@ Upper Panel DDI に関する基板設計、機械設計、ファームウェア�
 
 | 信号 | メイン基板側 1×6 | ボタン基板側 1×8 |
 | --- | --- | --- |
-| ROWn | Pin1 | Pin1 |
+| ROWn | Pin1 | Pin2 |
 | COL0 | Pin2 | Pin3 |
 | COL1 | Pin3 | Pin4 |
 | COL2 | Pin4 | Pin5 |
 | COL3 | Pin5 | Pin6 |
 | COL4 | Pin6 | Pin7 |
 
-ボタン基板側の Pin2（LED）と Pin8 はメイン基板へ接続しません。ボタン基板: [`pcb/button_panel/upper_panel_ddi_button_panel.kicad_pro`](pcb/button_panel/upper_panel_ddi_button_panel.kicad_pro)。
+ボタン基板側の Pin1（LED電源）と Pin8（LEDリターン）はメイン基板へ接続しません。Pin2 はスイッチ用ダイオードのアノード共通端子（ROW）です。ボタン基板: [`pcb/button_panel/upper_panel_ddi_button_panel.kicad_pro`](pcb/button_panel/upper_panel_ddi_button_panel.kicad_pro)。
 
 ## 検証
 
