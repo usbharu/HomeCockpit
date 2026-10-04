@@ -26,6 +26,20 @@ kicad-cli sym upgrade HomeCockpit.kicad_sym
 
 `SW_PUSH-12mm-mini` は同じ電気接点に属するパッド番号 1 と 2 を持つ部品です。KiCad 10 の `duplicate_pad_numbers_are_jumpers yes` と `duplicate_pin_numbers_are_jumpers yes` をライブラリ、基板、回路図の対応箇所に設定しています。これは実部品の内部接続を記述するもので、DRC/ERC の警告を一括無効化する設定ではありません。
 
+## メイン基板の回路図を変更する
+
+メイン基板は A3 縦の1枚に、Pico と8個のパネルコネクタを配置しています。ROW0–7 は各コネクタへ個別に配線し、COL0–4 は5本の共通配線から各コネクタへ分岐します。グローバルラベルは使用していません。各ネットに1個ずつ置いたローカルラベルは、連続した配線の名前を示します。交差する線は接続点のある箇所だけで接続します。
+
+変更時は [`generate_schematic.py`](../upper_panel_ddi/pcb/main_board/generate_schematic.py) の配置・配線を編集し、次のコマンドで回路図を再生成します。
+
+```sh
+python3 upper_panel_ddi/pcb/main_board/generate_schematic.py
+```
+
+スクリプトが読み込む5個の `embedded_*.txt` は、コネクタ・Pico・電源シンボルの入力データです。回路図と併せて管理します。ERCレポート、ネットリスト、描画画像は一時ディレクトリへ出力してください。
+
+再生成後は下記のERCを実行し、SVGまたはPNGで配線の重複、部品・文字との重なり、分岐の接続点を確認します。既存の配線を描き直す場合は、変更前後のネットリストで接続先のピンが一致することも確認してください。
+
 ## CI と製造データの確認
 
 PRで `upper_panel_ddi/pcb/**` など KiCad 関連ファイルを変更すると、`KiCad previews` が対象設計を自動検出し、変更前後の画像を「KiCad 変更プレビュー」コメントに表示します。回路図のみの新規プロジェクト（例: `upper_panel_ddi/pcb/main_board/`）も検出対象です。基板は表面と裏面、回路図は全ページをPNGで表示します。基板の画像は配線・パッド・シルク・外形を確認するための2D表示です。

@@ -6,22 +6,28 @@ from __future__ import annotations
 import re
 import uuid
 from pathlib import Path
-import subprocess
 
 ROOT_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 PROJECT = "upper_panel_ddi_main_board"
 _UID_NS = uuid.UUID(ROOT_UUID)
 _uid_seq = 0
 
-PICO_AT = (203.2, 114.3)
+PICO_AT = (63.5, 111.76)
 ALL_PICO_PINS = [str(n) for n in range(1, 41)]
 
 # Eight button_panel modules, each with JST 1x08 (same pinout as button_panel J1).
 PANEL_COUNT = 8
 COL_COUNT = 5
-PANEL_PITCH = 22.86
-PANEL_ORIGIN = (35.56, 35.56)
+PANEL_PITCH = 35.56
+PANEL_ORIGIN = (254.0, 60.96)
 PANEL_FOOTPRINT = "Connector_JST:JST_ZH_B8B-ZR_1x08_P1.50mm_Vertical"
+
+# GPIOs face the connectors. ROW elbows preserve their order without crossing
+# each other; COL feeds pass below the connectors before reaching the trunks.
+ROW_ELBOW_X = (109.22, 111.76, 129.54, 127.0, 124.46, 121.92, 119.38, 116.84)
+COL_FEED_X = (104.14, 101.6, 99.06, 96.52, 93.98)
+COL_TRUNK_X = (203.2, 208.28, 213.36, 218.44, 223.52)
+COL_FEED_Y = (335.28, 337.82, 340.36, 342.9, 345.44)
 
 # Pin 2 = panel LED anode (local); pin 8 = reserved — leave unconnected on main harness.
 PANEL_NC_PINS = (2, 8)
@@ -74,29 +80,13 @@ def _load_pico_pin_locals() -> dict[int, tuple[float, float, int, float, str]]:
 
 
 PICO_PIN_LOCAL = _load_pico_pin_locals()
-PICO_POWER_PINS = {3, 8, 13, 18, 23, 28, 33, 35, 36, 38, 39, 40}
+
 
 def conn08_socket_pin_tip(at: tuple[float, float], pin_number: int) -> tuple[float, float]:
-    """KiCad ERC wire anchor for Conn_01x08_Socket (same as Conn_01x05_Socket geometry)."""
+    """Wire anchor for the embedded Conn_01x08_Socket symbol."""
     px, py = at
     local_y = 7.62 - (pin_number - 1) * 2.54
     return (snap_mm(px - 5.08), snap_mm(py - local_y))
-
-
-def attach_global_label(name: str, pin_x: float, pin_y: float, *, away: str = "left", stub: float = 5.08) -> list[str]:
-    """Wire stub from pin to a global label so ERC sees a net."""
-    if away == "left":
-        lx, ly = snap_mm(pin_x - stub), pin_y
-        orient = 180
-    else:
-        lx, ly = snap_mm(pin_x + stub), pin_y
-        orient = 0
-    return [
-        junction(pin_x, pin_y),
-        wire(pin_x, pin_y, lx, ly),
-        junction(lx, ly),
-        global_label(name, lx, ly, orient=orient),
-    ]
 
 
 def panel_connector_at(index: int) -> tuple[float, float]:
@@ -110,18 +100,6 @@ def uid(name: str = "obj") -> str:
     return str(uuid.uuid5(_UID_NS, f"{name}-{_uid_seq}"))
 
 
-def pin_end(px: float, py: float, x: float, y: float, angle: int, length: float = 3.81) -> tuple[float, float]:
-    if angle == 0:
-        return (snap_mm(px + x + length), snap_mm(py + y))
-    if angle == 180:
-        return (snap_mm(px + x - length), snap_mm(py + y))
-    if angle == 90:
-        return (snap_mm(px + x), snap_mm(py + y + length))
-    if angle == 270:
-        return (snap_mm(px + x), snap_mm(py + y - length))
-    raise ValueError(angle)
-
-
 def snap_mm(value: float) -> float:
     return round(value / 0.254) * 0.254
 
@@ -129,7 +107,8 @@ def snap_mm(value: float) -> float:
 def pico_pin_world(pin_number: int) -> tuple[float, float]:
     lx, ly, _angle, _length, _ = PICO_PIN_LOCAL[pin_number]
     px, py = PICO_AT
-    return (snap_mm(px + lx), snap_mm(py - ly))
+    # A1 is mirrored about Y so its GPIO0..15 pins face right.
+    return (snap_mm(px - lx), snap_mm(py - ly))
 
 
 def pico_pin_xy(gpio: int) -> tuple[float, float]:
@@ -159,6 +138,11 @@ def wire(x1: float, y1: float, x2: float, y2: float) -> str:
 \t\t)
 \t\t(uuid "{uid()}")
 \t)"""
+
+
+def wire_path(*points: tuple[float, float]) -> list[str]:
+    """Emit separate orthogonal segments; crossings do not imply junctions."""
+    return [wire(*start, *end) for start, end in zip(points, points[1:]) if start != end]
 
 
 def junction(x: float, y: float) -> str:
@@ -204,9 +188,12 @@ def symbol_instance(
     pin_numbers: list[str],
     mirror_y: bool = False,
     angle: int = 0,
+    fields_at: tuple[float, float] | None = None,
+    fields_justify: str = "left",
 ) -> str:
     pin_lines = "\n".join(f'\t\t(pin "{n}"\n\t\t\t(uuid "{uid()}")\n\t\t)' for n in pin_numbers)
     mirror = "\n\t\t(mirror y)" if mirror_y else ""
+    fx, fy = fields_at if fields_at is not None else (at[0] + 5.08, at[1] - 7.62)
     return f"""
 \t(symbol
 \t\t(lib_id "{lib_id}")
@@ -218,21 +205,21 @@ def symbol_instance(
 \t\t(dnp no)
 \t\t(uuid "{uid()}")
 \t\t(property "Reference" "{ref}"
-\t\t\t(at {at[0] - 5} {at[1]} 0)
+\t\t\t(at {fx} {fy} 0)
 \t\t\t(effects
 \t\t\t\t(font
 \t\t\t\t\t(size 1.27 1.27)
 \t\t\t\t)
-\t\t\t\t(justify right)
+\t\t\t\t(justify {fields_justify})
 \t\t\t)
 \t\t)
 \t\t(property "Value" "{value}"
-\t\t\t(at {at[0] - 5} {at[1] + 2.54} 0)
+\t\t\t(at {fx} {fy + 2.54} 0)
 \t\t\t(effects
 \t\t\t\t(font
 \t\t\t\t\t(size 1.27 1.27)
 \t\t\t\t)
-\t\t\t\t(justify right)
+\t\t\t\t(justify {fields_justify})
 \t\t\t)
 \t\t)
 \t\t(property "Footprint" "{footprint}"
@@ -267,6 +254,7 @@ def symbol_instance(
 
 def power_symbol(ref: str, lib_id: str, at: tuple[float, float], angle: int = 0) -> str:
     value = lib_id.split(":")[1]
+    value_y = snap_mm(at[1] + 5.08 if value == "GND" else at[1] - 3.81)
     return f"""
 \t(symbol
 \t\t(lib_id "{lib_id}")
@@ -288,12 +276,11 @@ def power_symbol(ref: str, lib_id: str, at: tuple[float, float], angle: int = 0)
 \t\t\t)
 \t\t)
 \t\t(property "Value" "{value}"
-\t\t\t(at {at[0]} {at[1]} 0)
+\t\t\t(at {at[0]} {value_y} 0)
 \t\t\t(effects
 \t\t\t\t(font
 \t\t\t\t\t(size 1.27 1.27)
 \t\t\t\t)
-\t\t\t\t(hide yes)
 \t\t\t)
 \t\t)
 \t\t(property "Footprint" ""
@@ -319,21 +306,6 @@ def power_symbol(ref: str, lib_id: str, at: tuple[float, float], angle: int = 0)
 \t)"""
 
 
-def extract_embedded_symbol(block: str, name: str) -> str:
-    marker = f'(symbol "{name}"'
-    start = block.index(marker)
-    depth = 0
-    for i in range(start, len(block)):
-        ch = block[i]
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                return block[start : i + 1]
-    raise RuntimeError(f"unterminated symbol {name}")
-
-
 def load_embedded_lib_symbols() -> str:
     board_dir = Path(__file__).resolve().parent
     blocks = [
@@ -345,31 +317,6 @@ def load_embedded_lib_symbols() -> str:
     ]
     body = "".join(f"\t\t{b.strip()}\n" for b in blocks)
     return f"(lib_symbols\n{body}\t)\n"
-
-
-def global_label(name: str, x: float, y: float, orient: int = 180) -> str:
-    return f"""
-\t(global_label "{name}"
-\t\t(at {x} {y} {orient})
-\t\t(fields_autoplaced yes)
-\t\t(effects
-\t\t\t(font
-\t\t\t\t(size 1.27 1.27)
-\t\t\t)
-\t\t\t(justify left)
-\t\t)
-\t\t(uuid "{uid()}")
-\t\t(property "Intersheetref" "{name}"
-\t\t\t(at {x} {y} {orient})
-\t\t\t(effects
-\t\t\t\t(font
-\t\t\t\t\t(size 1.27 1.27)
-\t\t\t\t)
-\t\t\t\t(justify left)
-\t\t\t\t(hide yes)
-\t\t\t)
-\t\t)
-\t)"""
 
 
 def net_label(name: str, x: float, y: float) -> str:
@@ -394,26 +341,27 @@ def main() -> None:
 
     chunks.append(
         text_note(
-            25.4,
-            25.4,
+            20.32,
+            15.24,
             [
                 "Upper Panel DDI main board (perfboard) — firmware: upper_panel_ddi",
                 "Matrix: 8x5 (GP2-9 rows out, GP10-14 cols in, pulldown in FW)",
                 "IMCP: USB CDC on Pico Micro-USB (115200 logical); GP0/GP1 UART NC",
                 "Power: USB VBUS; max_power 100 mA in firmware USB descriptor",
                 "Eight J1..J8 (1x08 each): Pin1 ROW0-7 -> GP2-9 | Pin3-7 COL0-4 -> GP10-14",
-                "Pin2 (panel LED) and Pin8 NC on main | Common GND in harness",
+                "Pin2 (panel LED) and Pin8 NC on main",
             ],
         )
     )
     chunks.append(
         text_note(
-            25.4,
-            248.92,
+            20.32,
+            363.22,
             [
                 "Panel JST 1x08 pinout (same as button_panel J1):",
                 "  1=ROWn (this panel)  2=NC (LED on panel)  3..7=COL0..4 (bus)  8=NC",
                 "SWD: wire to Pico module debug pads (SWDIO/SWCLK/GND); not on symbol.",
+                "Crossings without a junction dot are not connected.",
             ],
         )
     )
@@ -433,22 +381,22 @@ def main() -> None:
             PICO_AT,
             "Module:RaspberryPi_Pico_Common_THT",
             ALL_PICO_PINS,
+            mirror_y=True,
+            fields_at=(PICO_AT[0] - 17.78, 165.1),
         )
     )
 
-    chunks.append(junction(gnd_net[0], gnd_net[1]))
-    chunks.append(wire(gnd_net[0], gnd_net[1], gnd_net[0] + 2.54, gnd_net[1]))
-    chunks.append(power_symbol("#PWR01", "power:GND", (gnd_net[0] + 2.54, gnd_net[1])))
-    chunks.append(junction(vbus_net[0], vbus_net[1]))
-    chunks.append(wire(vbus_net[0], vbus_net[1], vbus_net[0] + 2.54, vbus_net[1]))
-    chunks.append(power_symbol("#PWR02", "power:+5V", (vbus_net[0] + 2.54, vbus_net[1])))
-    chunks.append(wire(vsys_net[0], vsys_net[1], vbus_net[0], vbus_net[1]))
-    chunks.append(junction(mcu_3v3[0], mcu_3v3[1]))
-    chunks.append(wire(mcu_3v3[0], mcu_3v3[1], mcu_3v3[0] + 2.54, mcu_3v3[1]))
-    chunks.append(power_symbol("#PWR03", "power:+3V3", (mcu_3v3[0] + 2.54, mcu_3v3[1])))
-    chunks.append(wire(adc_ref[0], adc_ref[1], mcu_3v3[0], mcu_3v3[1]))
+    chunks.extend(wire_path(gnd_net, (gnd_net[0], 152.4)))
+    chunks.append(power_symbol("#PWR01", "power:GND", (gnd_net[0], 152.4)))
+    chunks.extend(wire_path(vbus_net, (vbus_net[0], 66.04), (vbus_net[0], 63.5)))
+    chunks.extend(wire_path(vsys_net, (vsys_net[0], 66.04), (vbus_net[0], 66.04)))
+    chunks.append(junction(vbus_net[0], 66.04))
+    chunks.append(power_symbol("#PWR02", "power:+5V", (vbus_net[0], 63.5)))
+    # Route ADC_VREF around the outside of A1, away from the unused GPIO pins.
+    chunks.extend(wire_path(mcu_3v3, (mcu_3v3[0], 55.88)))
+    chunks.extend(wire_path((mcu_3v3[0], 55.88), (27.94, 55.88), (27.94, adc_ref[1]), adc_ref))
+    chunks.append(power_symbol("#PWR03", "power:+3V3", (mcu_3v3[0], 55.88)))
     agnd = pico_pin_world(33)
-    chunks.append(junction(agnd[0], agnd[1]))
     chunks.append(no_connect(agnd[0], agnd[1]))
 
     for panel in range(PANEL_COUNT):
@@ -464,27 +412,36 @@ def main() -> None:
             )
         )
         row_tip = conn08_socket_pin_tip(at, 1)
-        chunks.extend(attach_global_label(f"ROW{panel}", row_tip[0], row_tip[1], away="left"))
+        row_gpio = pico_pin_xy(panel + 2)
+        elbow = ROW_ELBOW_X[panel]
+        chunks.extend(wire_path(row_gpio, (elbow, row_gpio[1]), (elbow, row_tip[1]), row_tip))
+        # One local label per net names a physically continuous wire.
+        chunks.append(net_label(f"ROW{panel}", row_tip[0] - 5.08, row_tip[1]))
         for pin in PANEL_NC_PINS:
             nc = conn08_socket_pin_tip(at, pin)
-            chunks.append(junction(nc[0], nc[1]))
             chunks.append(no_connect(nc[0], nc[1]))
         for col in range(COL_COUNT):
             pin_number = PANEL_COL_PIN_START + col
             tip = conn08_socket_pin_tip(at, pin_number)
-            chunks.extend(attach_global_label(f"COL{col}", tip[0], tip[1], away="left"))
-
-    for row in range(PANEL_COUNT):
-        px, py = pico_pin_xy(row + 2)
-        chunks.extend(attach_global_label(f"ROW{row}", px, py, away="right"))
+            chunks.extend(wire_path((COL_TRUNK_X[col], tip[1]), tip))
+            if panel > 0:
+                chunks.append(junction(COL_TRUNK_X[col], tip[1]))
 
     for col in range(COL_COUNT):
-        px, py = pico_pin_xy(col + 10)
-        chunks.extend(attach_global_label(f"COL{col}", px, py, away="right"))
+        gpio = pico_pin_xy(col + 10)
+        feed_x, feed_y, trunk_x = COL_FEED_X[col], COL_FEED_Y[col], COL_TRUNK_X[col]
+        chunks.extend(wire_path(gpio, (feed_x, gpio[1]), (feed_x, feed_y), (trunk_x, feed_y)))
+        chunks.append(net_label(f"COL{col}", feed_x, gpio[1]))
+        # Split the common vertical wire at every tap. Only same-net taps have
+        # junction dots; perpendicular ROW/COL and COL/COL crossings do not.
+        tap_ys = [
+            conn08_socket_pin_tip(panel_connector_at(panel), PANEL_COL_PIN_START + col)[1]
+            for panel in range(PANEL_COUNT)
+        ]
+        chunks.extend(wire_path(*[(trunk_x, y) for y in [*tap_ys, feed_y]]))
 
     for pin in (1, 2, 20, 21, 22, 24, 25, 26, 27, 29, 30, 31, 32, 34, 37):
         x, y = pico_pin_world(pin)
-        chunks.append(junction(x, y))
         chunks.append(no_connect(x, y))
 
     body = "".join(chunks)
@@ -494,7 +451,7 @@ def main() -> None:
 \t(generator "generate_schematic.py")
 \t(generator_version "1.0")
 \t(uuid "{ROOT_UUID}")
-\t(paper "A4")
+\t(paper "A3" portrait)
 {lib_symbols}
 {body}
 \t(sheet_instances
