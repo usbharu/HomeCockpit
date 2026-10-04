@@ -1,7 +1,0 @@
-interface:
-  display_name: "IMCP-CLIデバッグ"
-  short_description: "imcp-cliでIMCP通信を再現・観測・送信"
-  default_prompt: "Use $imcp-cli-debug to investigate IMCP traffic with imcp-cli, including frame generation, JSON decoding, master simulation, ACK/retry behavior, and authorized serial sends."
-
-policy:
-  allow_implicit_invocation: true

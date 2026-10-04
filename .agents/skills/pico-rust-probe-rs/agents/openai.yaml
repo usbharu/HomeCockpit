@@ -1,7 +1,0 @@
-interface:
-  display_name: "Raspberry Pi Pico Rust検証"
-  short_description: "probe-rsでPicoへ書込み・検証"
-  default_prompt: "Use $pico-rust-probe-rs to build, flash, reset, and verify this Rust firmware on a Raspberry Pi Pico."
-
-policy:
-  allow_implicit_invocation: true
