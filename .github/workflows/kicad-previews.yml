@@ -1,0 +1,84 @@
+name: KiCad previews
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kicad-previews-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  render:
+    name: Render changed KiCad designs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test preview detection and comments
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts/tests -p 'test_*.py'
+          node --test .github/scripts/tests/*.test.cjs
+      - name: Detect designs including newly added projects
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OUTPUT_DIR: ${{ runner.temp }}/kicad-previews
+        run: |
+          python3 .github/scripts/render-kicad-previews.py \
+            --base "$BASE_SHA" --head "$HEAD_SHA" --output "$OUTPUT_DIR" --plan-only
+          python3 -c 'import json, os; print("count=" + str(len(json.load(open(os.environ["OUTPUT_DIR"] + "/manifest.json"))["entries"])))' >> "$GITHUB_OUTPUT"
+      - name: Install PNG converter
+        if: steps.plan.outputs.count != '0'
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y librsvg2-bin
+      - name: Render before and after images
+        if: steps.plan.outputs.count != '0'
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/kicad-previews
+        run: python3 .github/scripts/render-kicad-previews.py --output "$OUTPUT_DIR"
+      - name: Upload previews
+        if: always() && steps.plan.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: kicad-previews
+          path: ${{ runner.temp }}/kicad-previews
+          if-no-files-found: error
+
+  comment:
+    name: Comment KiCad previews on PR
+    needs: render
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/download-artifact@v8
+        with:
+          name: kicad-previews
+          path: ${{ runner.temp }}/kicad-previews
+      - name: Create or update preview comment
+        uses: actions/github-script@v9
+        env:
+          PREVIEW_DIR: ${{ runner.temp }}/kicad-previews
+        with:
+          script: |
+            const publish = require('./.github/scripts/comment-kicad-previews.cjs');
+            await publish({ github, context, core, directory: process.env.PREVIEW_DIR });
