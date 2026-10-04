@@ -651,11 +651,6 @@ jobs:
             input: upper_panel_ddi/pcb/main_board/upper_panel_ddi_main_board.kicad_sch
     steps:
       - uses: actions/checkout@v7
-      - name: Verify generate_schematic.py output is committed
-        run: |
-          set -euo pipefail
-          python3 upper_panel_ddi/pcb/main_board/generate_schematic.py
-          git diff --exit-code -- upper_panel_ddi/pcb/main_board/upper_panel_ddi_main_board.kicad_sch
       - name: Run KiCad checks
         shell: bash
         env:

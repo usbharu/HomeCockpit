@@ -20,7 +20,7 @@ kicad-cli fp upgrade Library.pretty
 kicad-cli sym upgrade HomeCockpit.kicad_sym
 ```
 
-変換後は KiCad 10 で対象プロジェクトを開いて保存し、ERC/DRC と SVG 出力を確認します。プロジェクト内の `sym-lib-table` / `fp-lib-table` は、標準ライブラリを KiCad 10 の環境変数（例: `KICAD10_SYMBOL_DIR`）から、共有ライブラリを `${KIPRJMOD}` から解決するために使用しています。個人環境の絶対パスをテーブルへ追加しないでください。旧ルートの `upper_panel_ddi/upper_panel_ddi.*` メイン基板は削除済みです。正本は `upper_panel_ddi/pcb/main_board/upper_panel_ddi_main_board.kicad_pro` です。回路図は [`generate_schematic.py`](../upper_panel_ddi/pcb/main_board/generate_schematic.py) から再生成できます。
+変換後は KiCad 10 で対象プロジェクトを開いて保存し、ERC/DRC と SVG 出力を確認します。プロジェクト内の `sym-lib-table` / `fp-lib-table` は、標準ライブラリを KiCad 10 の環境変数（例: `KICAD10_SYMBOL_DIR`）から、共有ライブラリを `${KIPRJMOD}` から解決するために使用しています。個人環境の絶対パスをテーブルへ追加しないでください。旧ルートの `upper_panel_ddi/upper_panel_ddi.*` メイン基板は削除済みです。正本は `upper_panel_ddi/pcb/main_board/upper_panel_ddi_main_board.kicad_pro` と同ディレクトリの `.kicad_sch` です。
 
 ## 重複パッドを持つタクトスイッチ
 
@@ -30,15 +30,11 @@ kicad-cli sym upgrade HomeCockpit.kicad_sym
 
 メイン基板は A3 縦の1枚に、Pico と8個のパネルコネクタを配置しています。ROW0–7 は各コネクタへ個別に配線し、COL0–4 は5本の共通配線から各コネクタへ分岐します。グローバルラベルは使用していません。各ネットに1個ずつ置いたローカルラベルは、連続した配線の名前を示します。交差する線は接続点のある箇所だけで接続します。
 
-変更時は [`generate_schematic.py`](../upper_panel_ddi/pcb/main_board/generate_schematic.py) の配置・配線を編集し、次のコマンドで回路図を再生成します。
+変更時は KiCad 10.0.5 以降で [`upper_panel_ddi_main_board.kicad_pro`](../upper_panel_ddi/pcb/main_board/upper_panel_ddi_main_board.kicad_pro) を開き、回路図エディターで `.kicad_sch` を編集・保存します。生成スクリプトは使用しません。LLMが編集する場合も `.kicad_sch` を正本として扱います。
 
-```sh
-python3 upper_panel_ddi/pcb/main_board/generate_schematic.py
-```
+Pico・コネクタ・電源記号はKiCad標準ライブラリのシンボルです。シンボル定義は通常のKiCad回路図と同様に `.kicad_sch` 内にも保存されているため、別のシンボル抽出ファイルは不要です。ERCレポート、ネットリスト、描画画像は一時ディレクトリへ出力してください。
 
-スクリプトが読み込む5個の `embedded_*.txt` は、コネクタ・Pico・電源シンボルの入力データです。回路図と併せて管理します。ERCレポート、ネットリスト、描画画像は一時ディレクトリへ出力してください。
-
-再生成後は下記のERCを実行し、SVGまたはPNGで配線の重複、部品・文字との重なり、分岐の接続点を確認します。既存の配線を描き直す場合は、変更前後のネットリストで接続先のピンが一致することも確認してください。
+保存後は下記のERCを実行し、SVGまたはPNGで配線の重複、部品・文字との重なり、分岐の接続点を確認します。既存の配線を描き直す場合は、変更前後のネットリストで接続先のピンが一致することも確認してください。
 
 ## CI と製造データの確認
 
@@ -65,7 +61,7 @@ kicad-cli pcb drc --severity-all --output /tmp/button-panel-drc.rpt \
   upper_panel_ddi/pcb/button_panel/upper_panel_ddi_button_panel.kicad_pcb
 ```
 
-CI の error-level JSON と SVG 可視化を最終判定に使用します（メイン基板は ERC のみ）。GitHub Actions では `kicad-main-board` job が `generate_schematic.py` の出力と `.kicad_sch` の一致、`kicad-cli sch erc`（error 0）、回路図 SVG を検証します。`upper_panel_ddi/pcb/main_board/`、`firmware/upper_panel_ddi/`、共有 KiCad ライブラリの変更でこの job が走ります。
+CI の error-level JSON と SVG 可視化を最終判定に使用します（メイン基板は ERC のみ）。GitHub Actions では `kicad-main-board` job が保存された `.kicad_sch` に対して `kicad-cli sch erc`（error 0）と回路図 SVG を検証します。`upper_panel_ddi/pcb/main_board/`、`firmware/upper_panel_ddi/`、共有 KiCad ライブラリの変更でこの job が走ります。
 
 製造データは生成物として管理し、コミット前に必要な差分だけを確認します。
 
