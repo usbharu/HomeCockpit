@@ -13,8 +13,20 @@ PROJECT = "upper_panel_ddi_main_board"
 _UID_NS = uuid.UUID(ROOT_UUID)
 _uid_seq = 0
 
-PICO_AT = (191.77, 74.93)
+PICO_AT = (203.2, 114.3)
 ALL_PICO_PINS = [str(n) for n in range(1, 41)]
+
+# Eight button_panel modules, each with JST 1x08 (same pinout as button_panel J1).
+PANEL_COUNT = 8
+COL_COUNT = 5
+PANEL_PITCH = 22.86
+PANEL_ORIGIN = (35.56, 35.56)
+PANEL_FOOTPRINT = "Connector_JST:JST_ZH_B8B-ZR_1x08_P1.50mm_Vertical"
+
+# Pin 2 = panel LED anode (local); pin 8 = reserved — leave unconnected on main harness.
+PANEL_NC_PINS = (2, 8)
+# Pins 3..7 = COL0..4 (common column bus across all panel connectors).
+PANEL_COL_PIN_START = 3
 
 GPIO_TO_PIN: dict[int, int] = {
     0: 1,
@@ -64,37 +76,32 @@ def _load_pico_pin_locals() -> dict[int, tuple[float, float, int, float, str]]:
 PICO_PIN_LOCAL = _load_pico_pin_locals()
 PICO_POWER_PINS = {3, 8, 13, 18, 23, 28, 33, 35, 36, 38, 39, 40}
 
-# Conn_01x08_Socket @ J1_AT with mirror Y; Conn_01x05_Socket @ J2_AT (KiCad 10 geometry).
-def j1_pin_xy(row: int) -> tuple[float, float]:
-    px, py = J1_AT
-    local_y = 7.62 - row * 2.54
-    return (snap_mm(px + 5.08), snap_mm(py - local_y))
-
-
-def j2_pin_xy(col: int) -> tuple[float, float]:
-    """Conn_01x05_Socket passive pin anchor at J2_AT (ERC: x=px-5.08)."""
-    px, py = J2_AT
-    pin_number = col + 1
-    return (snap_mm(px - 5.08), snap_mm(py + (pin_number - 3) * 2.54))
-
-
-def j1_symbol_pin_xy(row: int) -> tuple[float, float]:
-    px, py = J1_AT
-    pin_number = row + 1
+def conn08_socket_pin_tip(at: tuple[float, float], pin_number: int) -> tuple[float, float]:
+    """KiCad ERC wire anchor for Conn_01x08_Socket (same as Conn_01x05_Socket geometry)."""
+    px, py = at
     local_y = 7.62 - (pin_number - 1) * 2.54
-    return pin_end(px, py, -5.08, -local_y, 0)
+    return (snap_mm(px - 5.08), snap_mm(py - local_y))
 
 
-def j2_symbol_pin_xy(col: int) -> tuple[float, float]:
-    px, py = J2_AT
-    pin_number = col + 1
-    local_y = 5.08 - (pin_number - 1) * 2.54
-    return pin_end(px, py, -5.08, local_y, 0)
+def attach_global_label(name: str, pin_x: float, pin_y: float, *, away: str = "left", stub: float = 5.08) -> list[str]:
+    """Wire stub from pin to a global label so ERC sees a net."""
+    if away == "left":
+        lx, ly = snap_mm(pin_x - stub), pin_y
+        orient = 180
+    else:
+        lx, ly = snap_mm(pin_x + stub), pin_y
+        orient = 0
+    return [
+        junction(pin_x, pin_y),
+        wire(pin_x, pin_y, lx, ly),
+        junction(lx, ly),
+        global_label(name, lx, ly, orient=orient),
+    ]
 
 
-J1_AT = (54.61, 39.37)
-J2_AT = (168.91, 132.08)
-J3_AT = (254.0, 74.93)
+def panel_connector_at(index: int) -> tuple[float, float]:
+    ox, oy = PANEL_ORIGIN
+    return (ox, snap_mm(oy + index * PANEL_PITCH))
 
 
 def uid(name: str = "obj") -> str:
@@ -330,8 +337,7 @@ def extract_embedded_symbol(block: str, name: str) -> str:
 def load_embedded_lib_symbols() -> str:
     board_dir = Path(__file__).resolve().parent
     blocks = [
-        (board_dir / "embedded_from_button_Conn_01x08_Pin.txt").read_text(encoding="utf-8"),
-        (board_dir / "embedded_kicad10_Conn_01x05_Socket.txt").read_text(encoding="utf-8"),
+        (board_dir / "embedded_Conn_01x08_Socket.txt").read_text(encoding="utf-8"),
         (board_dir / "embedded_kicad10_RaspberryPi_Pico.txt").read_text(encoding="utf-8"),
         (board_dir / "embedded_kicad10_power_GND.txt").read_text(encoding="utf-8"),
         (board_dir / "embedded_kicad10_power_plus5V.txt").read_text(encoding="utf-8"),
@@ -395,17 +401,19 @@ def main() -> None:
                 "Matrix: 8x5 (GP2-9 rows out, GP10-14 cols in, pulldown in FW)",
                 "IMCP: USB CDC on Pico Micro-USB (115200 logical); GP0/GP1 UART NC",
                 "Power: USB VBUS; max_power 100 mA in firmware USB descriptor",
-                "J1 ROW0-7 -> GP2-9 | J2 COL0-4 -> GP10-14 | GND common harness",
+                "Eight J1..J8 (1x08 each): Pin1 ROW0-7 -> GP2-9 | Pin3-7 COL0-4 -> GP10-14",
+                "Pin2 (panel LED) and Pin8 NC on main | Common GND in harness",
             ],
         )
     )
     chunks.append(
         text_note(
             25.4,
-            160.0,
+            248.92,
             [
-                "J3: wire to Pico module debug pads (SWDIO/SWCLK/GND)",
-                "Not represented on RaspberryPi_Pico symbol pins.",
+                "Panel JST 1x08 pinout (same as button_panel J1):",
+                "  1=ROWn (this panel)  2=NC (LED on panel)  3..7=COL0..4 (bus)  8=NC",
+                "SWD: wire to Pico module debug pads (SWDIO/SWCLK/GND); not on symbol.",
             ],
         )
     )
@@ -443,56 +451,36 @@ def main() -> None:
     chunks.append(junction(agnd[0], agnd[1]))
     chunks.append(no_connect(agnd[0], agnd[1]))
 
-    chunks.append(
-        symbol_instance(
-            "Connector:Conn_01x08_Pin",
-            "J1",
-            "ROW0-7",
-            J1_AT,
-            "Connector_JST:JST_ZH_B8B-ZR_1x08_P1.50mm_Vertical",
-            [str(n) for n in range(1, 9)],
-            mirror_y=False,
-            angle=0,
+    for panel in range(PANEL_COUNT):
+        at = panel_connector_at(panel)
+        chunks.append(
+            symbol_instance(
+                "Connector:Conn_01x08_Socket",
+                f"J{panel + 1}",
+                f"ROW{panel}",
+                at,
+                PANEL_FOOTPRINT,
+                [str(n) for n in range(1, 9)],
+            )
         )
-    )
-    chunks.append(
-        symbol_instance(
-            "Connector:Conn_01x05_Socket",
-            "J2",
-            "COL0-4",
-            J2_AT,
-            "Connector_JST:JST_XH_B5B-XH-AM_1x05_P2.50mm_Vertical",
-            [str(n) for n in range(1, 6)],
-        )
-    )
+        row_tip = conn08_socket_pin_tip(at, 1)
+        chunks.extend(attach_global_label(f"ROW{panel}", row_tip[0], row_tip[1], away="left"))
+        for pin in PANEL_NC_PINS:
+            nc = conn08_socket_pin_tip(at, pin)
+            chunks.append(junction(nc[0], nc[1]))
+            chunks.append(no_connect(nc[0], nc[1]))
+        for col in range(COL_COUNT):
+            pin_number = PANEL_COL_PIN_START + col
+            tip = conn08_socket_pin_tip(at, pin_number)
+            chunks.extend(attach_global_label(f"COL{col}", tip[0], tip[1], away="left"))
 
-    for row in range(8):
+    for row in range(PANEL_COUNT):
         px, py = pico_pin_xy(row + 2)
-        jx, jy = j1_pin_xy(row)
-        chunks.append(wire(px, py, jx, py))
-        chunks.append(junction(jx, py))
-        chunks.append(wire(jx, py, jx, jy))
-        chunks.append(junction(jx, jy))
+        chunks.extend(attach_global_label(f"ROW{row}", px, py, away="right"))
 
-    for col in range(5):
+    for col in range(COL_COUNT):
         px, py = pico_pin_xy(col + 10)
-        jx, jy = j2_pin_xy(col)
-        chunks.append(wire(px, py, jx, py))
-        chunks.append(junction(jx, py))
-        chunks.append(wire(jx, py, jx, jy))
-        chunks.append(junction(jx, jy))
-
-    chunks.append(
-        text_note(
-            25.4,
-            175.0,
-            [
-                "J1 (8p JST ZH): ROW0-7 to button panel row harness",
-                "J2 (5p JST XH): COL0-4 to button panel column harness",
-                "Common GND between Pico, J1 shell, and J2 return",
-            ],
-        )
-    )
+        chunks.extend(attach_global_label(f"COL{col}", px, py, away="right"))
 
     for pin in (1, 2, 20, 21, 22, 24, 25, 26, 27, 29, 30, 31, 32, 34, 37):
         x, y = pico_pin_world(pin)
