@@ -11,8 +11,21 @@ Upper Panel DDI に関する基板設計、機械設計、ファームウェア�
 | ケース・機械部品 | [`mechanical/case/`](mechanical/case/) | メイン基板とボタン基板を組み込む筐体。3Dモデルは将来 `mechanical/case/3d/` に配置 |
 | ホスト側モック | [`../utils/upper-panel-ddi-mock/`](../utils/upper-panel-ddi-mock/) | Managerから実機相当のIMCP/HCPデバイスとして利用 |
 
-KiCadプロジェクトのファイル名と内部プロジェクト名は、既存の参照や製造手順との互換性のため維持しています。
+メイン基板 KiCad プロジェクト: [`pcb/main_board/upper_panel_ddi_main_board.kicad_pro`](pcb/main_board/upper_panel_ddi_main_board.kicad_pro)（回路図のみ。配線は [`firmware/upper_panel_ddi`](../firmware/upper_panel_ddi/) に合わせ、KiCad回路図エディターで `.kicad_sch` を直接編集します）。
+
+メイン基板の `J1`..`J8` は JST 1×6 です。特殊ケーブルで8枚のボタン基板の JST 1×8 に接続します。ケーブルのピン対応は次のとおりです。`ROWn` は各パネルの行番号（0–7）を表します。
+
+| 信号 | メイン基板側 1×6 | ボタン基板側 1×8 |
+| --- | --- | --- |
+| ROWn | Pin1 | Pin2 |
+| COL0 | Pin2 | Pin3 |
+| COL1 | Pin3 | Pin4 |
+| COL2 | Pin4 | Pin5 |
+| COL3 | Pin5 | Pin6 |
+| COL4 | Pin6 | Pin7 |
+
+ボタン基板側の Pin1（LED電源）と Pin8（LEDリターン）はメイン基板へ接続しません。Pin2 はスイッチ用ダイオードのアノード共通端子（ROW）です。ボタン基板: [`pcb/button_panel/upper_panel_ddi_button_panel.kicad_pro`](pcb/button_panel/upper_panel_ddi_button_panel.kicad_pro)。
 
 ## 検証
 
-CIではメイン基板とボタン基板それぞれについて、KiCadのERC/DRCを実行します。ファームウェアのビルド・書き込み手順は [`firmware/upper_panel_ddi/README.md`](../firmware/upper_panel_ddi/README.md) を参照してください。
+CI ではメイン基板に `kicad-cli sch erc`（error 0）、ボタン基板に ERC/DRC を実行します。手順の詳細は [`docs/kicad.md`](../docs/kicad.md) を参照してください。ファームウェアのビルド・書き込みは [`firmware/upper_panel_ddi/README.md`](../firmware/upper_panel_ddi/README.md) を参照してください。
