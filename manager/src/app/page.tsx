@@ -2,6 +2,7 @@
 
 import React from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
+import * as Tooltip from '@radix-ui/react-tooltip';
 import {
     Activity,
     Cable,
@@ -16,6 +17,7 @@ import DeviceSettings from "@/components/tabs/device-settings";
 import MappingSettings from "@/components/tabs/mapping-settings";
 import AdapterSettings from "@/components/tabs/adapter-settings";
 import StatusPage from "@/components/tabs/status-page";
+import { ManagerHelpTip } from "@/components/help-tip";
 
 
 export default function ManagerTabs() {
@@ -127,6 +129,7 @@ export default function ManagerTabs() {
     ];
 
     return (
+        <Tooltip.Provider delayDuration={250}>
         <Tabs.Root defaultValue="software" className="flex h-screen flex-col bg-gray-50 text-gray-900">
             <header className="z-10 border-b border-gray-200 bg-white shadow-sm">
                 <div className="flex items-center justify-between px-6 pt-5">
@@ -134,8 +137,9 @@ export default function ManagerTabs() {
                         <p className="text-xs uppercase tracking-[0.35em] text-gray-400">HomeCockpit Manager</p>
                         <h1 className="text-2xl font-semibold text-gray-900">接続管理コンソール</h1>
                     </div>
-                    <div className="rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
-                        {snapshot.dcsbiosStatus.connectionState}
+                    <div className="flex items-center gap-1.5 rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
+                        <span className="capitalize">{snapshot.dcsbiosStatus.connectionState}</span>
+                        <ManagerHelpTip tipKey="headerDcsConnection" side="left" />
                     </div>
                 </div>
                 <Tabs.List className="flex px-6 pt-2 -mb-px">
@@ -170,5 +174,6 @@ export default function ManagerTabs() {
                 ))}
             </main>
         </Tabs.Root>
+        </Tooltip.Provider>
     );
 }

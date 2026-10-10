@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Cable, Cpu, Plus, RefreshCw, Trash2, Waypoints } from "lucide-react";
 
+import { ManagerHelpTip, LabelWithHelp } from "@/components/help-tip";
 import { deviceRoleLabels } from "@/lib/control-catalog";
 import type {
   DeviceRoleAssignment,
@@ -176,10 +177,9 @@ const DeviceSettings = ({
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h2 className="text-2xl font-semibold text-gray-800">デバイス接続先</h2>
-              <p className="mt-1 text-sm text-gray-500">
-                応答した IMCP/HCP デバイスを接続候補に表示します。接続先として登録した endpoint だけを継続的な探索対象にします。
-              </p>
-              <p className="mt-1 text-xs text-gray-400">変更は自動保存されます。</p>
+              <div className="mt-1 text-xs text-gray-400">
+                <LabelWithHelp label="自動保存" tipKey="deviceAutoSave" className="text-xs text-gray-400" />
+              </div>
             </div>
 
             <div className="flex flex-wrap gap-3">
@@ -205,14 +205,16 @@ const DeviceSettings = ({
           </div>
 
           <div className="mt-6 border-t border-gray-200 pt-6">
-            <h3 className="text-sm font-semibold text-gray-800">接続候補</h3>
-            <p className="mt-1 text-xs text-gray-500">115200 baud で応答した未登録のポートです。候補を選んでも、追加するまでは登録されません。</p>
+            <h3 className="inline-flex items-center gap-1.5 text-sm font-semibold text-gray-800">
+              接続候補
+              <ManagerHelpTip tipKey="deviceCandidates" />
+            </h3>
             {serialPortScanError ? (
               <p role="alert" className="mt-3 text-sm text-red-700">走査できませんでした: {serialPortScanError}</p>
             ) : isScanningSerialPorts ? (
               <p role="status" className="mt-3 text-sm text-gray-500">COM ポートを確認しています…</p>
             ) : availableCandidates.length === 0 ? (
-              <p className="mt-3 text-sm text-gray-500">応答する未登録のポートはありません。認識されない場合は下の COM ポート欄へ直接入力できます。</p>
+              <p className="mt-3 text-sm text-gray-500">未登録のポートはありません。</p>
             ) : (
               <div className="mt-3 grid gap-3 md:grid-cols-2">
                 {availableCandidates.map((candidate) => (
@@ -285,7 +287,7 @@ const DeviceSettings = ({
               </select>
             </label>
             <label className="flex flex-col gap-2 text-sm text-gray-700">
-              <span>Role Hint</span>
+              <LabelWithHelp label="Role Hint" tipKey="endpointRoleHint" />
               <select
                 value={newEndpoint.roleHint}
                 onChange={(event) =>
@@ -325,7 +327,7 @@ const DeviceSettings = ({
           <div className="mt-6 space-y-3">
             {draftEndpoints.length === 0 ? (
               <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
-                まだ endpoint がありません。COM ポートを追加してから保存してください。
+                endpoint がありません。
               </div>
             ) : (
               draftEndpoints.map((endpoint) => (
@@ -413,15 +415,92 @@ const DeviceSettings = ({
         </section>
 
         <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+          <div>
+            <h3 className="text-xl font-semibold text-gray-800">Role 割当</h3>
+          </div>
+          <div className="mt-6 space-y-3">
+            {devices.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
+                検出されたデバイスがありません。
+              </div>
+            ) : (
+              devices.map((device) => (
+                <div
+                  key={`role:${device.id}`}
+                  className="rounded-lg border border-gray-200 bg-gray-50 p-4"
+                >
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <p className="font-medium text-gray-900">{device.displayName}</p>
+                      <p className="mt-1 text-sm text-gray-500">
+                        {device.endpointName} · {device.endpointAddress}
+                      </p>
+                      <p className="mt-1 text-xs text-gray-500">
+                        {device.deviceKind ?? "Unknown"} · {device.state}
+                      </p>
+                    </div>
+                    <div className="min-w-[min(100%,20rem)] space-y-3">
+                      <select
+                        value=""
+                        disabled={!device.deviceId || busyAction !== null}
+                        onChange={(event) => void addRole(device.deviceId, event.target.value)}
+                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 disabled:bg-gray-100"
+                      >
+                        <option value="">Role を追加</option>
+                        {roleDefinitions
+                          .filter(
+                            (definition) =>
+                              !deviceRoleAssignments.some(
+                                (entry) =>
+                                  entry.deviceId === device.deviceId &&
+                                  entry.roleId === definition.roleId,
+                              ),
+                          )
+                          .map((definition) => (
+                            <option key={definition.roleId} value={definition.roleId}>
+                              {deviceRoleLabels[definition.roleId] ?? definition.roleId}
+                            </option>
+                          ))}
+                      </select>
+                      <div className="flex flex-wrap gap-2">
+                        {deviceRoleAssignments
+                          .filter((entry) => entry.deviceId === device.deviceId)
+                          .map((entry) => (
+                            <span
+                              key={`${entry.deviceId}:${entry.roleId}`}
+                              className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-800"
+                            >
+                              {deviceRoleLabels[entry.roleId] ?? entry.roleId}
+                              <button
+                                type="button"
+                                onClick={() => void removeRole(entry.deviceId, entry.roleId)}
+                                disabled={busyAction !== null}
+                                className="text-blue-500 hover:text-red-600 disabled:opacity-50"
+                                aria-label={`${entry.roleId} の割当を削除`}
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        {deviceRoleAssignments.every((entry) => entry.deviceId !== device.deviceId) && (
+                          <span className="text-xs text-gray-500">未割当</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
           <div className="flex items-center justify-between gap-4">
             <div>
               <h3 className="text-xl font-semibold text-gray-800">検出されたデバイス</h3>
-              <p className="mt-1 text-sm text-gray-500">
-                保存済み endpoint に対して応答した直結デバイスと IMCP Hub 配下デバイスを表示します。
-              </p>
             </div>
             <div className="rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
-              {devices.length} device(s)
+              {devices.length} デバイス
             </div>
           </div>
 
@@ -452,7 +531,7 @@ const DeviceSettings = ({
                         </p>
                         {device.gatewayDisplayName && (
                           <p className="mt-1 text-xs font-medium text-blue-600">
-                            Via {device.gatewayDisplayName}
+                            経由: {device.gatewayDisplayName}
                           </p>
                         )}
                       </div>
@@ -464,111 +543,65 @@ const DeviceSettings = ({
 
                   <div className="mt-5 grid gap-3 text-sm text-gray-700">
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Connection</span>
+                      <span>接続</span>
                       <span className="capitalize">{device.connectionKind}</span>
                     </div>
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Protocol</span>
+                      <span>プロトコル</span>
                       <span className="inline-flex items-center gap-2">
                         <Cable size={14} />
                         {device.protocol}
                       </span>
                     </div>
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Transport</span>
-                      <span>{device.endpointTransport}</span>
+                      <span>デバイス種別</span>
+                      <span>{device.deviceKind ?? "不明"}</span>
                     </div>
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Role Hint</span>
-                      <span>{roleHintLabels[(draftEndpoints.find((entry) => entry.id === device.endpointId)?.roleHint ?? "auto") as EndpointRoleHint]}</span>
+                      <span>ファームウェア</span>
+                      <span>{device.firmwareVersion ?? "不明"}</span>
                     </div>
-                    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Identifier</span>
-                      <span className="truncate pl-4 text-right">{device.id}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Device Kind</span>
-                      <span>{device.deviceKind ?? "Unknown"}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Device ID</span>
-                      <span className="truncate pl-4 text-right">{device.deviceId ?? "Unknown"}</span>
-                    </div>
-                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <span>Device Roles</span>
-                        <select
-                          value=""
-                          disabled={!device.deviceId || busyAction !== null}
-                          onChange={(event) => void addRole(device.deviceId, event.target.value)}
-                          className="max-w-[190px] rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 disabled:bg-gray-100"
-                        >
-                          <option value="">Role を追加</option>
-                          {roleDefinitions
-                            .filter(
-                              (definition) =>
-                                !deviceRoleAssignments.some(
-                                  (entry) =>
-                                    entry.deviceId === device.deviceId &&
-                                    entry.roleId === definition.roleId,
-                                ),
-                            )
-                            .map((definition) => (
-                              <option key={definition.roleId} value={definition.roleId}>
-                                {deviceRoleLabels[definition.roleId] ?? definition.roleId}
-                              </option>
-                            ))}
-                        </select>
+                    <details className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                      <summary className="cursor-pointer font-medium text-gray-800">技術詳細</summary>
+                      <div className="mt-3 grid gap-3">
+                        <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
+                          <span>トランスポート</span>
+                          <span>{device.endpointTransport}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
+                          <span>Role Hint</span>
+                          <span>{roleHintLabels[(draftEndpoints.find((entry) => entry.id === device.endpointId)?.roleHint ?? "auto") as EndpointRoleHint]}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
+                          <span>識別子</span>
+                          <span className="truncate pl-4 text-right">{device.id}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
+                          <span>Device ID</span>
+                          <span className="truncate pl-4 text-right">{device.deviceId ?? "不明"}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
+                          <span>IMCP アドレス</span>
+                          <span>{device.assignedAddress ?? "—"}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
+                          <span>HCP バージョン</span>
+                          <span>{device.protocolVersion ?? "—"}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
+                          <span>能力</span>
+                          <span className="pl-4 text-right">
+                            {device.displays !== null && device.controls !== null
+                              ? `表示 ${device.displays} / 操作 ${device.controls}`
+                              : "不明"}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
+                          <span>機能</span>
+                          <span className="truncate pl-4 text-right">{device.features ?? "不明"}</span>
+                        </div>
                       </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {deviceRoleAssignments
-                          .filter((entry) => entry.deviceId === device.deviceId)
-                          .map((entry) => (
-                            <span
-                              key={`${entry.deviceId}:${entry.roleId}`}
-                              className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-800"
-                            >
-                              {deviceRoleLabels[entry.roleId] ?? entry.roleId}
-                              <button
-                                type="button"
-                                onClick={() => void removeRole(entry.deviceId, entry.roleId)}
-                                disabled={busyAction !== null}
-                                className="text-blue-500 hover:text-red-600 disabled:opacity-50"
-                                aria-label={`${entry.roleId} の割当を削除`}
-                              >
-                                ×
-                              </button>
-                            </span>
-                          ))}
-                        {deviceRoleAssignments.every((entry) => entry.deviceId !== device.deviceId) && (
-                          <span className="text-xs text-gray-500">未割当</span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Firmware</span>
-                      <span>{device.firmwareVersion ?? "Unknown"}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>IMCP Address</span>
-                      <span>{device.assignedAddress ?? "N/A"}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>HCP Version</span>
-                      <span>{device.protocolVersion ?? "N/A"}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Capabilities</span>
-                      <span className="pl-4 text-right">
-                        {device.displays !== null && device.controls !== null
-                          ? `${device.displays} displays / ${device.controls} controls`
-                          : "Unknown"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Features</span>
-                      <span className="truncate pl-4 text-right">{device.features ?? "Unknown"}</span>
-                    </div>
+                    </details>
                   </div>
                 </section>
               ))

@@ -56,3 +56,13 @@
 - frontend test runner は現在ありません。UI は production build と対象画面の manual smoke test、native behavior は Tauri runtime で確認します。
 - 最終検証は [CI workflow の Manager frontend/backend jobs](../.github/workflows/ci.yml) と同じコマンドを各 working directory で実行します。Linux では Tauri/serialport の native package が必要です。
 - UI の PR には screenshot または screen recording を添えます。network/serial/hardware の検証は環境と観測結果を記載し、実機未確認なら明記してください。
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 
+import { ManagerHelpTip } from "@/components/help-tip";
 import {
   deviceRoleLabels,
   getImplementedRoleControls,
@@ -52,6 +53,21 @@ const eventLabels: Record<EventKind, string> = {
 
 type ContinuousLearnPhase = "arming" | "waiting" | "canceling" | "paused" | "completed";
 
+const continuousLearnPhaseLabel = (phase: ContinuousLearnPhase): string => {
+  switch (phase) {
+    case "arming":
+      return "開始中…";
+    case "waiting":
+      return "入力待ち";
+    case "canceling":
+      return "停止中…";
+    case "paused":
+      return "一時停止";
+    case "completed":
+      return "完了";
+  }
+};
+
 type ContinuousLearnState = {
   runId: number;
   roleId: string;
@@ -81,6 +97,7 @@ export function MappingSettings({
   const [continuousLearn, setContinuousLearn] = useState<ContinuousLearnState | null>(null);
   const [resettingContinuousLearn, setResettingContinuousLearn] = useState(false);
   const [learnNotice, setLearnNotice] = useState<string | null>(null);
+  const [showUnmappedOnly, setShowUnmappedOnly] = useState(false);
   const continuousLearnRunId = useRef(0);
   const armingRequestKey = useRef<string | null>(null);
   const resetInProgress = useRef(false);
@@ -115,6 +132,24 @@ export function MappingSettings({
     () => getImplementedRoleControls(roleDefinition, roleControlCapacity),
     [roleControlCapacity, roleDefinition],
   );
+  const visibleRoleControls = useMemo(() => {
+    if (!showUnmappedOnly) {
+      return roleControls;
+    }
+
+    if (roleAssignments.length === 0) {
+      return [];
+    }
+
+    return roleControls.filter((control) =>
+      roleAssignments.some(
+        (assignment) =>
+          !assignment.bindings.some(
+            (binding) => binding.logicalControlId === control.logicalControlId,
+          ),
+      ),
+    );
+  }, [roleAssignments, roleControls, showUnmappedOnly]);
 
   const continuousLearnAssignment = roleAssignments.find(
     (assignment) => assignment.deviceId === continuousLearnDeviceId,
@@ -621,8 +656,7 @@ export function MappingSettings({
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
         <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
           <aside className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-            <p className="text-sm font-medium text-gray-500">論理 Role</p>
-            <h3 className="mt-1 text-xl font-semibold text-gray-900">Role 一覧</h3>
+            <h3 className="text-xl font-semibold text-gray-900">Role 一覧</h3>
             <div className="mt-5 space-y-3">
               {roleDefinitions.map((definition) => {
                 const isSelected = definition.roleId === selectedRoleId;
@@ -666,10 +700,10 @@ export function MappingSettings({
                         <p className="mt-1 text-sm text-gray-500">{definition.roleId}</p>
                         <div className="mt-3 flex items-center justify-between">
                           <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-600">
-                            {assignmentCount} device(s)
+                            {assignmentCount} デバイス
                           </span>
                           <span className="text-xs text-gray-400">
-                            {implementedControlCount(definition.roleId)} implemented controls
+                            実装 Control {implementedControlCount(definition.roleId)} 件
                           </span>
                         </div>
                       </div>
@@ -690,31 +724,23 @@ export function MappingSettings({
                 <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div>
-                      <p className="text-sm font-medium text-gray-500">Role 論理インターフェース</p>
-                      <h3 className="mt-1 text-3xl font-semibold tracking-tight text-gray-900">
+                      <h3 className="text-3xl font-semibold tracking-tight text-gray-900">
                         {deviceRoleLabels[selectedRoleId] ?? selectedRoleId}
                       </h3>
-                      <p className="mt-2 text-sm text-gray-500">
-                        論理コントロールはゲームや物理デバイスを知りません。下の全デバイス結線へ fan-out します。
-                      </p>
                     </div>
                     <div className="rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm text-gray-700">
-                      {roleAssignments.length} device(s) / {roleControls.length} logical control(s)
+                      {roleAssignments.length} デバイス / 論理 Control {roleControls.length} 件
                     </div>
                   </div>
-                  <p className="mt-4 rounded-md border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-                    この画面は物理Control IDとRoleのLogical Controlだけを結線します。ゲームやAdapterの設定は「Adapter設定」タブで管理します。
-                  </p>
                 </section>
 
                 <section className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-6 shadow-sm">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div>
-                      <p className="text-sm font-medium text-indigo-700">一括登録</p>
-                      <h3 className="mt-1 text-xl font-semibold text-gray-900">連続学習</h3>
-                      <p className="mt-1 text-sm text-gray-600">
-                        対象 Device の未結線項目を学習するか、既存結線をクリアして全項目を学習し直します。
-                      </p>
+                      <h3 className="inline-flex items-center gap-2 text-xl font-semibold text-gray-900">
+                        連続学習
+                        <ManagerHelpTip tipKey="mappingContinuousLearn" />
+                      </h3>
                     </div>
                     <div className="rounded-full border border-indigo-200 bg-white px-4 py-2 text-sm text-indigo-800">
                       {continuousLearn
@@ -780,11 +806,13 @@ export function MappingSettings({
 
                         {continuousLearnCandidates.length === 0 ? (
                           <p className="mt-3 rounded-md border border-green-200 bg-green-50 p-4 text-sm text-green-800">
-                            この Device には未登録の logical control がありません。
+                            未登録項目はありません。
                           </p>
                         ) : (
-                          <div className="mt-4 rounded-md border border-indigo-100 bg-white p-4">
-                            <p className="text-xs font-medium text-gray-500">登録対象の順序（{continuousLearnCandidates.length}件）</p>
+                          <details className="mt-4 rounded-md border border-indigo-100 bg-white p-4">
+                            <summary className="cursor-pointer list-none text-xs font-medium text-gray-500 [&::-webkit-details-marker]:hidden">
+                              登録対象の順序（{continuousLearnCandidates.length}件）を表示
+                            </summary>
                             <ol className="mt-3 grid gap-2 sm:grid-cols-2">
                               {continuousLearnCandidates.map((control, index) => (
                                 <li key={control.logicalControlId} className="flex items-center gap-2 text-sm text-gray-700">
@@ -796,7 +824,7 @@ export function MappingSettings({
                                 </li>
                               ))}
                             </ol>
-                          </div>
+                          </details>
                         )}
                       </>
                     )
@@ -811,16 +839,9 @@ export function MappingSettings({
                               {continuousLearnTargetDevice?.displayName ?? continuousLearn.targetDeviceId}
                             </span>
                           </p>
-                          <p className="mt-1 text-xs text-gray-500">
-                            {continuousLearn.phase === "arming"
-                              ? "次の学習を開始しています…"
-                              : continuousLearn.phase === "waiting"
-                                ? "物理入力を待っています。"
-                                : continuousLearn.phase === "canceling"
-                                  ? "学習を停止しています…"
-                                  : continuousLearn.phase === "paused"
-                                    ? "停止中。現在の項目から再開できます。"
-                                    : "すべての学習が完了しました。"}
+                          <p className="mt-1 flex items-center gap-1 text-xs text-gray-500">
+                            <span>{continuousLearnPhaseLabel(continuousLearn.phase)}</span>
+                            <ManagerHelpTip tipKey="mappingContinuousLearnPhase" />
                           </p>
                         </div>
                         <div className="flex flex-wrap gap-2 text-xs">
@@ -942,14 +963,20 @@ export function MappingSettings({
                   <div className="flex flex-wrap items-center justify-between gap-4">
                     <div>
                       <h3 className="text-xl font-semibold text-gray-900">物理 → 論理結線</h3>
-                      <p className="mt-1 text-sm text-gray-500">
-                        1つの物理入力を複数Role／論理コントロールへ登録できます。重複は警告だけで拒否しません。
-                      </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-3">
                       <span className="rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
-                        {roleBindingCount} binding(s)
+                        結線 {roleBindingCount} 件
                       </span>
+                      <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={showUnmappedOnly}
+                          onChange={(event) => setShowUnmappedOnly(event.target.checked)}
+                          disabled={roleControls.length === 0}
+                        />
+                        未結線のみ表示
+                      </label>
                       <button
                         type="button"
                         onClick={() => void removeAllRoleBindings()}
@@ -962,23 +989,22 @@ export function MappingSettings({
                   </div>
 
                   {!hasRoleAssignments && roleControls.length > 0 && (
-                    <div className="mt-5 rounded-lg border border-dashed border-blue-200 bg-blue-50 p-6 text-sm text-blue-800">
-                      デバイス設定タブで、このRoleに1台以上のデバイスを割り当ててください。論理Controlの一覧は先に確認できます。
+                    <div className="mt-5 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600">
+                      デバイスが未割当です。
                     </div>
                   )}
 
                   {roleControls.length === 0 ? (
                     <div className="mt-5 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
-                      <p>このRoleには表示可能な論理Controlがありません。</p>
-                      <p className="mt-1">
-                        {hasRoleAssignments
-                          ? "割り当て済みデバイスのControl数が0、または未対応のDevice kindです。"
-                          : "Role定義に論理Controlが定義されていません。"}
-                      </p>
+                      表示可能な論理 Control がありません。
+                    </div>
+                  ) : visibleRoleControls.length === 0 ? (
+                    <div className="mt-5 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
+                      未結線の項目はありません。
                     </div>
                   ) : (
                     <div className="mt-5 space-y-3">
-                      {roleControls.map((control) => {
+                      {visibleRoleControls.map((control) => {
                         const bindings = roleAssignments.flatMap((assignment) => {
                           const device = devices.find((entry) => entry.deviceId === assignment.deviceId);
                           return assignment.bindings

@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  ArrowRightLeft,
   CheckCircle2,
+  ChevronRight,
   FileJson,
   Plane,
   RefreshCw,
@@ -11,7 +13,8 @@ import {
   ShieldCheck,
 } from "lucide-react";
 
-import { findAdapterProfileForAircraft } from "@/lib/control-catalog";
+import { ManagerHelpTip, LabelWithHelp } from "@/components/help-tip";
+import { deviceRoleLabels, findAdapterProfileForAircraft } from "@/lib/control-catalog";
 import { RoleIoMapping } from "@/components/role-io-mapping";
 import type {
   AdapterCatalog,
@@ -106,7 +109,7 @@ function ProfileSummary({
 
       <div className="mt-4 flex flex-wrap gap-2">
         {profile.roleBindings.length === 0 ? (
-          <span className="text-sm text-amber-700">Role結線がないため入力マッピングは生成されません。</span>
+          <span className="text-sm text-amber-700">Role 結線なし</span>
         ) : (
           profile.roleBindings.map((binding) => (
             <span
@@ -208,7 +211,7 @@ export function AdapterSettings({
     try {
       const profile = await onPreviewAdapterProfile(request);
       setPreviewProfile(profile);
-      setNotice(`${profile.controlCount}個のコントロールを読み込みました。Adapter内蔵のRole対応を確認して保存してください。`);
+      setNotice(`${profile.controlCount} controls を読み込みました。`);
     } catch (previewError) {
       setError(String(previewError));
     }
@@ -246,13 +249,12 @@ export function AdapterSettings({
               <h2 className="mt-1 text-3xl font-semibold tracking-tight text-gray-900">
                 航空機プロファイル
               </h2>
-              <p className="mt-2 max-w-3xl text-sm text-gray-500">
-                Adapterは接続先ゲームから現在の航空機を判定し、論理コントロールへ自動マッピングします。RoleとAdapterの対応やメモリアドレスは、Mapping画面では設定しません。
-              </p>
             </div>
             <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
-              <p className="text-xs text-gray-400">接続状態</p>
-              <p className="mt-1 font-medium">{status.connectionState}</p>
+              <div className="text-xs text-gray-400">
+                <LabelWithHelp label="接続状態" tipKey="adapterConnection" className="text-xs text-gray-400" />
+              </div>
+              <p className="mt-1 font-medium capitalize">{status.connectionState}</p>
             </div>
           </div>
 
@@ -260,27 +262,29 @@ export function AdapterSettings({
             <div className="flex items-start gap-3 rounded-lg border border-blue-100 bg-blue-50/60 p-4">
               <Plane className="mt-0.5 text-blue-600" size={19} />
               <div>
-                <p className="text-xs font-medium uppercase tracking-wide text-blue-700">Current aircraft</p>
+                <div className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-blue-700">
+                  現在の機体
+                  <ManagerHelpTip tipKey="adapterCurrentAircraft" />
+                </div>
                 <p className="mt-1 text-lg font-semibold text-gray-900">
                   {status.aircraftName ?? "未検出"}
-                </p>
-                <p className="mt-1 text-xs text-gray-500">
-                  {status.aircraftName
-                    ? "Adapterのプロファイル照合に使用しています。"
-                    : "ゲーム接続後にAdapterが機体名を取得します。"}
                 </p>
               </div>
             </div>
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-              <p className="text-xs font-medium uppercase tracking-wide text-gray-400">Catalog</p>
+              <div className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-gray-400">
+                カタログ
+                <ManagerHelpTip tipKey="adapterCatalog" />
+              </div>
               <p className="mt-1 text-lg font-semibold text-gray-900">
-                {adapterCatalog.adapters.length} adapter(s) / {adapterCatalog.adapters.reduce((count, adapter) => count + adapter.profiles.length, 0)} profile(s)
+                Adapter {adapterCatalog.adapters.length} 件 / プロファイル{" "}
+                {adapterCatalog.adapters.reduce((count, adapter) => count + adapter.profiles.length, 0)} 件
               </p>
-              <p className="mt-1 text-xs text-gray-500">
-                {adapterCatalog.state === "loaded"
-                  ? "内蔵カタログと保存済みプロファイルを使用中"
-                  : adapterCatalog.error ?? "Adapterカタログを利用できません。"}
-              </p>
+              {(adapterCatalog.state !== "loaded" || adapterCatalog.error) && (
+                <p className="mt-1 text-xs text-gray-500">
+                  {adapterCatalog.error ?? "カタログを利用できません。"}
+                </p>
+              )}
             </div>
           </div>
         </section>
@@ -290,9 +294,6 @@ export function AdapterSettings({
             <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
                 <h2 className="text-xl font-semibold text-gray-900">現在の自動マッピング</h2>
-                <p className="mt-1 text-sm text-gray-500">
-                  機体名に一致したプロファイルから、論理コントロールとAdapterアクションを生成しています。
-                </p>
               </div>
               <button
                 type="button"
@@ -313,9 +314,13 @@ export function AdapterSettings({
             <div className="flex items-start gap-3">
               <RefreshCw className="mt-0.5 text-amber-700" size={19} />
               <div>
-                <h2 className="text-xl font-semibold text-amber-950">未知の航空機</h2>
-                <p className="mt-1 text-sm text-amber-900">
-                  一致するプロファイルがないため、Adapterアクションはまだ生成されていません。下のAdapter定義を読み込んでプロファイルを作成してください。
+                <h2 className="inline-flex items-center gap-2 text-xl font-semibold text-amber-950">
+                  未知の航空機
+                  <ManagerHelpTip tipKey="adapterUnknownAircraft" />
+                </h2>
+                <p className="mt-2 text-sm text-amber-950/85">
+                  {status.aircraftName ?? "機体名未取得"}
+                  <span className="text-amber-800/70"> — 一致するプロファイルがありません。</span>
                 </p>
               </div>
             </div>
@@ -323,25 +328,55 @@ export function AdapterSettings({
         )}
 
         {currentProfileMatch && selectedRole && (
-          <>
-            <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-              <h2 className="text-xl font-semibold text-gray-900">Role → Adapterマッピング</h2>
-              <p className="mt-1 text-sm text-gray-500">
-                Roleの論理アクションを、現在の航空機Adapterが提供するInput/Outputへ割り当てます。
-              </p>
-              <label className="mt-4 block max-w-sm space-y-2 text-sm text-gray-700">
-                <span>Role</span>
-                <select
-                  value={selectedRoleId}
-                  onChange={(event) => setSelectedRoleId(event.target.value)}
-                  className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
-                >
-                  {roleDefinitions.map((role) => (
-                    <option key={role.roleId} value={role.roleId}>{role.roleId}</option>
-                  ))}
-                </select>
-              </label>
-            </section>
+          <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+            <aside className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+              <h3 className="text-xl font-semibold text-gray-900">Role 一覧</h3>
+              <div className="mt-5 space-y-3">
+                {roleDefinitions.map((role) => {
+                  const isSelected = role.roleId === selectedRoleId;
+                  const category =
+                    currentProfileMatch.profile.roleBindings.find(
+                      (binding) => binding.roleId === role.roleId,
+                    )?.category ?? null;
+
+                  return (
+                    <button
+                      key={role.roleId}
+                      type="button"
+                      onClick={() => setSelectedRoleId(role.roleId)}
+                      className={`w-full rounded-lg border p-4 text-left transition ${
+                        isSelected
+                          ? "border-blue-200 bg-blue-50"
+                          : "border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50"
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="mt-0.5 flex h-11 w-11 items-center justify-center rounded-lg bg-gray-100 text-blue-600">
+                          <ArrowRightLeft size={18} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="font-semibold text-gray-900">
+                              {deviceRoleLabels[role.roleId] ?? role.roleId}
+                            </p>
+                            <ChevronRight
+                              size={18}
+                              className={isSelected ? "text-blue-600" : "text-gray-400"}
+                            />
+                          </div>
+                          <p className="mt-1 text-sm text-gray-500">{role.roleId}</p>
+                          <div className="mt-3">
+                            <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-600">
+                              {category ?? "プロファイル未対応"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </aside>
             <RoleIoMapping
               roleId={selectedRole.roleId}
               roleControls={selectedRole.controls}
@@ -351,7 +386,7 @@ export function AdapterSettings({
               busyAction={busyAction}
               onSaveAdapterMappings={onSaveAdapterMappings}
             />
-          </>
+          </div>
         )}
 
         {editing && (
@@ -359,9 +394,6 @@ export function AdapterSettings({
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div>
                 <h2 className="text-xl font-semibold text-gray-900">Adapterプロファイルを作成</h2>
-                <p className="mt-1 text-sm text-gray-500">
-                  ゲーム側Adapterが提供するJSON / JSONP定義を読み込みます。Manager PCにゲーム本体がインストールされている必要はありません。
-                </p>
               </div>
               {previewProfile && (
                 <span className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs text-emerald-800">

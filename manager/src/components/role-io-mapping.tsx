@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Save, Trash2 } from "lucide-react";
 
+import { ManagerHelpTip } from "@/components/help-tip";
 import { findAdapterProfileForAircraft, normalizeAircraftName } from "@/lib/control-catalog";
 import type {
   AdapterCatalog,
@@ -552,10 +553,11 @@ export function RoleIoMapping({
   if (!match || !roleBinding || !effectiveConfig) {
     return (
       <section className="rounded-lg border border-amber-200 bg-amber-50 p-5">
-        <h3 className="font-semibold text-amber-950">Role Input / Output</h3>
-        <p className="mt-2 text-sm text-amber-800">
-          {roleControls.length}個のRole I/Oを利用できます。航空機プロファイルが確定すると、ここでAdapter Input/Outputを直接設定できます。
-        </p>
+        <h3 className="inline-flex items-center gap-2 font-semibold text-amber-950">
+          Role Input / Output
+          <ManagerHelpTip tipKey="roleIoPendingProfile" />
+        </h3>
+        <p className="mt-2 text-sm text-amber-800">プロファイル未確定</p>
       </section>
     );
   }
@@ -563,9 +565,9 @@ export function RoleIoMapping({
   return (
     <section className="space-y-4">
       <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-        <h3 className="text-xl font-semibold text-gray-900">Role Input / Output 一覧</h3>
-        <p className="mt-1 text-sm text-gray-500">
-          {match.profile.label} · {roleBinding.category}。各Role I/Oに対してDCS-BIOSのInput/Outputを直接割り当て、Inputを手動操作できます。
+        <h3 className="text-xl font-semibold text-gray-900">Role Input / Output</h3>
+        <p className="mt-1 text-sm text-gray-600">
+          {match.profile.label} · {roleBinding.category}
         </p>
       </div>
       <div className="space-y-3">
