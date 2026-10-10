@@ -22,6 +22,7 @@ members = [
 [dev-dependencies]
 futures = "0.3.31"
 libc = "0.2"
+proptest = "1.11.0"
 
 
 [lints.clippy]

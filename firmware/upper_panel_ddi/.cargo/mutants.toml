@@ -1,0 +1,6 @@
+# Host proofs. CI and local runs must also set CARGO_BUILD_TARGET to the host
+# triple so .cargo/config.toml does not force the thumb target.
+# `cfg(kani)` harnesses are not executed by `cargo test`.
+no_default_features = true
+examine_globs = ["src/packetization.rs"]
+exclude_re = ["proofs::"]

@@ -14,6 +14,9 @@ serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 default = []
 defmt = ["dep:defmt", "heapless/defmt"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
 [lints.clippy]
 unwrap_used = "forbid"
 expect_used = "warn"
@@ -26,3 +29,6 @@ float_cmp = "forbid"
 cast_possible_truncation = "forbid"
 cast_sign_loss = "forbid"
 cast_possible_wrap = "warn"
+
+[dev-dependencies]
+proptest = "1.11.0"

@@ -8,6 +8,8 @@ use hcp::{
 use imcp::frame::{Address, Frame, FramePayload};
 
 pub const IMCP_MASTER_ADDRESS: u8 = 0x01;
+// `1 << 0` and `1 >> 0` are both 1. That operator mutant is excluded in
+// `.cargo/mutants.toml`.
 pub const FEATURE_CONTROL_EVENTS: u32 = 1 << 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,8 @@ pub struct DeviceDescriptor {
 
 impl DeviceDescriptor {
     pub fn protocol_version(&self) -> u8 {
+        // Returning the literal 1 is equivalent while APP_PROTOCOL_VERSION is 1.
+        // That replacement is excluded in .cargo/mutants.toml.
         APP_PROTOCOL_VERSION
     }
 }
@@ -371,5 +375,152 @@ mod tests {
             ),
         );
         assert_eq!(effect, MasterApplicationEffect::none());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn display(seq: u16) -> hcp::DisplayData {
+        hcp::DisplayData {
+            seq,
+            target: hcp::DisplayTarget::Screen(0),
+            payload: hcp::DisplayPayload::Bytes {
+                encoding: hcp::ByteEncoding::Utf8Text,
+                data: Default::default(),
+            },
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn control_sequence_restarts_when_the_address_is_assigned(
+            first_steps in 0u16..64,
+            second_steps in 0u16..64,
+            first_address in 0x02u8..=0xFE,
+            second_address in 0x02u8..=0xFE,
+        ) {
+            let mut state = DeviceRuntimeState::new();
+            prop_assert!(state.take_next_control_seq().is_err());
+
+            state.assign_address(first_address);
+            prop_assert_eq!(state.address(), Some(first_address));
+            for expected in 0..first_steps {
+                prop_assert_eq!(state.take_next_control_seq().unwrap(), expected);
+            }
+
+            state.assign_address(second_address);
+            prop_assert_eq!(state.address(), Some(second_address));
+            for expected in 0..second_steps {
+                prop_assert_eq!(state.take_next_control_seq().unwrap(), expected);
+            }
+        }
+
+        #[test]
+        fn accepted_display_updates_match_sequence_supersedes(
+            first in any::<u16>(),
+            later in prop::collection::vec(any::<u16>(), 0..8),
+        ) {
+            let mut state = DeviceRuntimeState::new();
+            let mut last = None;
+            for seq in std::iter::once(first).chain(later) {
+                let packet = display(seq);
+                let expected = last.is_none_or(|previous| packet.supersedes(previous));
+                prop_assert_eq!(state.accept_display_data(&packet), expected);
+                if expected {
+                    last = Some(seq);
+                }
+            }
+        }
+
+        #[test]
+        fn control_ids_are_row_major(
+            row in 0u8..=40,
+            column in 0u8..=40,
+            columns in 1u8..=40,
+        ) {
+            prop_assume!(u16::from(column) < u16::from(columns));
+            let expected = u32::from(row) * u32::from(columns) + u32::from(column);
+            prop_assume!(expected <= u32::from(u16::MAX));
+            prop_assert_eq!(
+                u32::from(control_id_from_matrix_position(row, column, columns)),
+                expected
+            );
+        }
+
+        #[test]
+        fn only_set_address_frames_assign_a_runtime_address(
+            address in 0x02u8..=0xFE,
+            id in any::<u32>(),
+            other_address in any::<u8>(),
+        ) {
+            let mut state = DeviceRuntimeState::new();
+            let ping = Frame::new(
+                Address::Unicast(0x01),
+                other_address,
+                FramePayload::Ping,
+            );
+            prop_assert_eq!(try_assign_address_from_frame(&mut state, &ping), None);
+            prop_assert_eq!(state.address(), None);
+
+            let set_address = Frame::new(
+                Address::Unicast(0x00),
+                0x01,
+                FramePayload::SetAddress { address, id },
+            );
+            prop_assert_eq!(
+                try_assign_address_from_frame(&mut state, &set_address),
+                Some(address)
+            );
+            prop_assert_eq!(state.address(), Some(address));
+            prop_assert_eq!(state.take_next_control_seq().unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn control_sequence_wraps_to_zero() {
+        let mut state = DeviceRuntimeState::new();
+        state.assign_address(0x02);
+        for expected in 0..=u16::MAX {
+            assert_eq!(state.take_next_control_seq().unwrap(), expected);
+        }
+        assert_eq!(state.take_next_control_seq().unwrap(), 0);
+    }
+
+    #[test]
+    fn device_hello_frame_preserves_the_descriptor() {
+        let descriptor = DeviceDescriptor {
+            device_id: 0x0123_4567_89AB_CDEF,
+            device_kind: DeviceKind::ButtonPanel,
+            firmware_version: Version {
+                major: 1,
+                minor: 2,
+                patch: 3,
+            },
+            capabilities: Capabilities {
+                displays: 1,
+                controls: 8,
+                features: FEATURE_CONTROL_EVENTS,
+            },
+        };
+        assert_eq!(descriptor.protocol_version(), hcp::APP_PROTOCOL_VERSION);
+
+        let frame = encode_set_frame(0x22, &build_device_hello_packet(descriptor)).unwrap();
+        let FramePayload::Set(payload) = frame.payload() else {
+            panic!("device hello is a Set frame");
+        };
+        assert_eq!(
+            hcp::decode_set_packet(payload).unwrap(),
+            hcp::AppPacketKind::DeviceHello(hcp::DeviceHello {
+                device_id: descriptor.device_id,
+                device_kind: descriptor.device_kind,
+                protocol_version: descriptor.protocol_version(),
+                firmware_version: descriptor.firmware_version,
+                capabilities: descriptor.capabilities,
+            })
+        );
     }
 }

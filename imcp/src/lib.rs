@@ -1728,4 +1728,192 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn test_allocate_address_rejects_reserved_addresses() {
+        for next_address in [UNASSIGNED_ADDRESS, MASTER_ADDRESS, BROADCAST_ADDRESS] {
+            let state = MasterState {
+                next_address,
+                pending_assignment: None,
+                pending_assignment_retries: 0,
+            };
+            assert_eq!(
+                state.allocate_address(),
+                Err(ProtocolError::AddressPoolExhausted)
+            );
+        }
+
+        let state = MasterState {
+            next_address: 0x02,
+            pending_assignment: None,
+            pending_assignment_retries: 0,
+        };
+        assert_eq!(state.allocate_address(), Ok(0x02));
+    }
+
+    #[test]
+    fn test_joining_client_ignores_a_frame_that_is_not_its_set_address() {
+        futures::executor::block_on(async {
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let mut imcp = Imcp::new_client(
+                TestReceiver::new(std::iter::empty()),
+                TestSender::default(),
+                &mut rx_buf,
+                &mut frame_buf,
+            );
+            imcp.send_join(0x1234_5678).await.unwrap();
+
+            let ping = Frame::new(Address::Unicast(0x22), 0x02, FramePayload::Ping);
+            let encoded = encode_frame(&ping);
+            assert_eq!(imcp.read_tick(&encoded).await.unwrap(), None);
+            assert_eq!(imcp.address, UNASSIGNED_ADDRESS);
+            assert!(matches!(
+                imcp.node_type,
+                NodeType::Client(ClientState::Joining(0x1234_5678))
+            ));
+            assert_eq!(imcp.tx_sender.sent.len(), 1);
+
+            let set_address = Frame::new(
+                Address::Unicast(0x22),
+                MASTER_ADDRESS,
+                FramePayload::SetAddress {
+                    address: 0x22,
+                    id: 0x1234_5678,
+                },
+            );
+            let encoded = encode_frame(&set_address);
+            assert_eq!(imcp.read_tick(&encoded).await.unwrap(), None);
+            assert_eq!(imcp.address, UNASSIGNED_ADDRESS);
+            assert_eq!(imcp.tx_sender.sent.len(), 1);
+        });
+    }
+
+    #[test]
+    fn test_ready_client_rejects_a_set_address_whose_id_changed() {
+        futures::executor::block_on(async {
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let mut imcp = Imcp::new_client(
+                TestReceiver::new(std::iter::empty()),
+                TestSender::default(),
+                &mut rx_buf,
+                &mut frame_buf,
+            );
+            imcp.address = 0x05;
+            imcp.node_type = NodeType::Client(ClientState::Ready(0x1111_2222));
+
+            let set_address = Frame::new(
+                Address::Unicast(0x05),
+                MASTER_ADDRESS,
+                FramePayload::SetAddress {
+                    address: 0x05,
+                    id: 0x3333_4444,
+                },
+            );
+            let encoded = encode_frame(&set_address);
+            assert_eq!(
+                imcp.read_tick(&encoded).await,
+                Err(ImcpError::ProtocolError(ProtocolError::InvalidFrameType(
+                    FrameType::SetAddress,
+                )))
+            );
+        });
+    }
+
+    #[test]
+    fn test_unicast_ack_from_the_wrong_sender_is_rejected() {
+        futures::executor::block_on(async {
+            let pending_frame = Frame::new(
+                Address::Unicast(0x02),
+                0x01,
+                FramePayload::Set(Vec::from_slice(&[0x10]).unwrap()),
+            );
+            let ack_frame = Frame::new(Address::Unicast(0x01), 0x03, FramePayload::Ack(0x02));
+            let encoded = encode_frame(&ack_frame);
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let mut imcp = Imcp {
+                tx_receiver: TestReceiver::new(std::iter::empty()),
+                tx_sender: TestSender::default(),
+                address: 0x01,
+                node_id: None,
+                pending_frame: Some(pending_frame),
+                frame_parser: FrameParser::new(&mut rx_buf, &mut frame_buf),
+                node_type: NodeType::Master(MasterState {
+                    next_address: 0x02,
+                    pending_assignment: None,
+                    pending_assignment_retries: 0,
+                }),
+            };
+
+            assert_eq!(
+                imcp.read_tick(&encoded).await,
+                Err(ImcpError::ProtocolError(ProtocolError::UnexpectedAck))
+            );
+            assert!(imcp.pending_frame.is_some());
+        });
+    }
+
+    #[test]
+    fn test_imcp_reports_a_frame_still_buffered_after_read_tick() {
+        futures::executor::block_on(async {
+            let frame1 = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ping);
+            let frame2 = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Pong);
+            let mut encoded = encode_frame(&frame1);
+            encoded.extend(encode_frame(&frame2));
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let mut imcp = Imcp::new_master(
+                TestReceiver::new(std::iter::empty()),
+                TestSender::default(),
+                &mut rx_buf,
+                &mut frame_buf,
+            );
+
+            assert!(!imcp.has_complete_frame());
+            assert_eq!(
+                imcp.read_tick(&encoded).await.unwrap().unwrap().payload(),
+                &FramePayload::Ping
+            );
+            assert!(imcp.has_complete_frame());
+            assert_eq!(
+                imcp.read_tick(&[]).await.unwrap().unwrap().payload(),
+                &FramePayload::Pong
+            );
+            assert!(!imcp.has_complete_frame());
+        });
+    }
+
+    #[test]
+    fn test_lookahead_ignores_eof_before_sof() {
+        let mut rx_buf = [0u8; 16];
+        let mut frame_buf = [0u8; 16];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+        parser.write_data(&[0x11, EOF]).unwrap();
+        assert!(!parser.has_complete_frame());
+    }
+
+    #[test]
+    fn test_lookahead_does_not_end_a_frame_on_an_escaped_eof() {
+        let mut rx_buf = [0u8; 16];
+        let mut frame_buf = [0u8; 16];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+        parser.write_data(&[SOF, ESC, EOF]).unwrap();
+        assert!(!parser.has_complete_frame());
+    }
+
+    #[test]
+    fn test_consume_rx_buffer_makes_room_for_the_next_frame() {
+        let frame = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ping);
+        let encoded = encode_frame(&frame);
+        let mut rx_buf = std::vec![0u8; encoded.len()];
+        let mut frame_buf = [0u8; 64];
+        let mut parser = FrameParser::new(&mut rx_buf, &mut frame_buf);
+
+        parser.write_data(&encoded).unwrap();
+        assert_eq!(parser.next_frame(), Some(Ok(frame.clone())));
+        assert_eq!(parser.write_data(&encoded), Ok(encoded.len()));
+        assert_eq!(parser.next_frame(), Some(Ok(frame)));
+    }
 }
