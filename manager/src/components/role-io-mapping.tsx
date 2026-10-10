@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Save, Trash2 } from "lucide-react";
 
+import { HelpTip } from "@/components/help-tip";
 import { findAdapterProfileForAircraft, normalizeAircraftName } from "@/lib/control-catalog";
+import { managerTooltips } from "@/lib/manager-tooltips";
 import type {
   AdapterCatalog,
   AdapterControlDefinition,
@@ -552,8 +554,11 @@ export function RoleIoMapping({
   if (!match || !roleBinding || !effectiveConfig) {
     return (
       <section className="rounded-lg border border-amber-200 bg-amber-50 p-5">
-        <h3 className="font-semibold text-amber-950">Role Input / Output</h3>
-        <p className="mt-2 text-sm text-amber-800">航空機プロファイルが未確定です。</p>
+        <h3 className="inline-flex items-center gap-2 font-semibold text-amber-950">
+          Role Input / Output
+          <HelpTip content={managerTooltips.roleIoPendingProfile} />
+        </h3>
+        <p className="mt-2 text-sm text-amber-800">プロファイル未確定</p>
       </section>
     );
   }

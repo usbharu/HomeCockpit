@@ -13,7 +13,9 @@ import {
   ShieldCheck,
 } from "lucide-react";
 
+import { HelpTip, LabelWithHelp } from "@/components/help-tip";
 import { deviceRoleLabels, findAdapterProfileForAircraft } from "@/lib/control-catalog";
+import { managerTooltips } from "@/lib/manager-tooltips";
 import { RoleIoMapping } from "@/components/role-io-mapping";
 import type {
   AdapterCatalog,
@@ -250,8 +252,10 @@ export function AdapterSettings({
               </h2>
             </div>
             <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
-              <p className="text-xs text-gray-400">接続状態</p>
-              <p className="mt-1 font-medium">{status.connectionState}</p>
+              <p className="inline-flex items-center gap-1 text-xs text-gray-400">
+                <LabelWithHelp label="接続状態" tip={managerTooltips.adapterConnection} className="text-xs text-gray-400" />
+              </p>
+              <p className="mt-1 font-medium capitalize">{status.connectionState}</p>
             </div>
           </div>
 
@@ -259,14 +263,20 @@ export function AdapterSettings({
             <div className="flex items-start gap-3 rounded-lg border border-blue-100 bg-blue-50/60 p-4">
               <Plane className="mt-0.5 text-blue-600" size={19} />
               <div>
-                <p className="text-xs font-medium uppercase tracking-wide text-blue-700">Current aircraft</p>
+                <p className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-blue-700">
+                  Current aircraft
+                  <HelpTip content={managerTooltips.adapterCurrentAircraft} />
+                </p>
                 <p className="mt-1 text-lg font-semibold text-gray-900">
                   {status.aircraftName ?? "未検出"}
                 </p>
               </div>
             </div>
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-              <p className="text-xs font-medium uppercase tracking-wide text-gray-400">Catalog</p>
+              <p className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-gray-400">
+                Catalog
+                <HelpTip content={managerTooltips.adapterCatalog} />
+              </p>
               <p className="mt-1 text-lg font-semibold text-gray-900">
                 {adapterCatalog.adapters.length} adapter(s) / {adapterCatalog.adapters.reduce((count, adapter) => count + adapter.profiles.length, 0)} profile(s)
               </p>
@@ -304,8 +314,10 @@ export function AdapterSettings({
             <div className="flex items-start gap-3">
               <RefreshCw className="mt-0.5 text-amber-700" size={19} />
               <div>
-                <h2 className="text-xl font-semibold text-amber-950">未知の航空機</h2>
-                <p className="mt-1 text-sm text-amber-900">一致するプロファイルがありません。</p>
+                <h2 className="inline-flex items-center gap-2 text-xl font-semibold text-amber-950">
+                  未知の航空機
+                  <HelpTip content={managerTooltips.adapterUnknownAircraft} />
+                </h2>
               </div>
             </div>
           </section>

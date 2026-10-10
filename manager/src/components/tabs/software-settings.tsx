@@ -11,12 +11,14 @@ import {
   Server,
 } from "lucide-react";
 
+import { HelpTip, LabelWithHelp } from "@/components/help-tip";
 import type {
   DcsBiosConnectionConfig,
   DcsBiosStatus,
   McpConfig,
   McpStatus,
 } from "@/lib/manager-types";
+import { managerTooltips } from "@/lib/manager-tooltips";
 
 type SoftwareSettingsProps = {
   config: DcsBiosConnectionConfig;
@@ -327,7 +329,11 @@ export const SoftwareSettings = ({
 
                 <div className="grid gap-4 lg:grid-cols-4">
                   <section className={metricCardClass}>
-                    <p className="text-sm text-gray-500">接続状態</p>
+                    <LabelWithHelp
+                      label="接続状態"
+                      tip={managerTooltips.dcsMetricConnection}
+                      className="text-sm text-gray-500"
+                    />
                     <p className="mt-3 text-3xl font-semibold capitalize text-gray-900">
                       {status.connectionState}
                     </p>
@@ -336,7 +342,11 @@ export const SoftwareSettings = ({
                     </p>
                   </section>
                   <section className={metricCardClass}>
-                    <p className="text-sm text-gray-500">受信レート</p>
+                    <LabelWithHelp
+                      label="受信レート"
+                      tip={managerTooltips.dcsMetricRate}
+                      className="text-sm text-gray-500"
+                    />
                     <p className="mt-3 text-3xl font-semibold text-gray-900">
                       {status.packetsPerSecond}/s
                     </p>
@@ -345,7 +355,11 @@ export const SoftwareSettings = ({
                     </p>
                   </section>
                   <section className={metricCardClass}>
-                    <p className="text-sm text-gray-500">最終受信</p>
+                    <LabelWithHelp
+                      label="最終受信"
+                      tip={managerTooltips.dcsMetricLastSeen}
+                      className="text-sm text-gray-500"
+                    />
                     <p className="mt-3 text-xl font-semibold text-gray-900">
                       {status.lastSeenAt
                         ? new Date(status.lastSeenAt).toLocaleTimeString()
@@ -357,7 +371,11 @@ export const SoftwareSettings = ({
                     </p>
                   </section>
                   <section className={metricCardClass}>
-                    <p className="text-sm text-gray-500">状態情報</p>
+                    <LabelWithHelp
+                      label="状態情報"
+                      tip={managerTooltips.dcsMetricAircraft}
+                      className="text-sm text-gray-500"
+                    />
                     <div className="mt-3 flex items-center gap-3 text-gray-900">
                       <Plane className="text-sky-600" size={24} />
                       <p className="text-xl font-semibold">
@@ -369,7 +387,10 @@ export const SoftwareSettings = ({
 
                 <details className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
                   <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-                    <h4 className="text-xl font-semibold text-gray-900">接続診断</h4>
+                    <span className="inline-flex items-center gap-2">
+                      <h4 className="text-xl font-semibold text-gray-900">接続診断</h4>
+                      <HelpTip content={managerTooltips.dcsDiagnostics} />
+                    </span>
                   </summary>
 
                   <div className="mt-5 grid gap-3">
@@ -389,7 +410,10 @@ export const SoftwareSettings = ({
           </section>
         </div>
         <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-          <h3 className="text-lg font-semibold text-gray-900">外部連携（MCP サーバー）</h3>
+          <h3 className="inline-flex items-center gap-2 text-lg font-semibold text-gray-900">
+            外部連携（MCP サーバー）
+            <HelpTip content={managerTooltips.mcpServer} />
+          </h3>
           <div className="mt-4 flex flex-wrap items-end gap-4">
             <label className="flex items-center gap-2 text-sm text-gray-700">
               <input

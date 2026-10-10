@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Cable, Cpu, Plus, RefreshCw, Trash2, Waypoints } from "lucide-react";
 
+import { HelpTip, LabelWithHelp } from "@/components/help-tip";
 import { deviceRoleLabels } from "@/lib/control-catalog";
+import { managerTooltips } from "@/lib/manager-tooltips";
 import type {
   DeviceRoleAssignment,
   DeviceEndpointConfig,
@@ -176,7 +178,9 @@ const DeviceSettings = ({
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h2 className="text-2xl font-semibold text-gray-800">デバイス接続先</h2>
-              <p className="mt-1 text-xs text-gray-400">自動保存</p>
+              <p className="mt-1 inline-flex items-center gap-1 text-xs text-gray-400">
+                <LabelWithHelp label="自動保存" tip={managerTooltips.deviceAutoSave} className="text-xs text-gray-400" />
+              </p>
             </div>
 
             <div className="flex flex-wrap gap-3">
@@ -202,7 +206,10 @@ const DeviceSettings = ({
           </div>
 
           <div className="mt-6 border-t border-gray-200 pt-6">
-            <h3 className="text-sm font-semibold text-gray-800">接続候補</h3>
+            <h3 className="inline-flex items-center gap-1.5 text-sm font-semibold text-gray-800">
+              接続候補
+              <HelpTip content={managerTooltips.deviceCandidates} />
+            </h3>
             {serialPortScanError ? (
               <p role="alert" className="mt-3 text-sm text-red-700">走査できませんでした: {serialPortScanError}</p>
             ) : isScanningSerialPorts ? (
@@ -281,7 +288,7 @@ const DeviceSettings = ({
               </select>
             </label>
             <label className="flex flex-col gap-2 text-sm text-gray-700">
-              <span>Role Hint</span>
+              <LabelWithHelp label="Role Hint" tip={managerTooltips.endpointRoleHint} />
               <select
                 value={newEndpoint.roleHint}
                 onChange={(event) =>

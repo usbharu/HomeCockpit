@@ -12,12 +12,14 @@ import {
   Trash2,
 } from "lucide-react";
 
+import { HelpTip } from "@/components/help-tip";
 import {
   deviceRoleLabels,
   getImplementedRoleControls,
   getPhysicalControlCatalog,
   getRoleDefinition,
 } from "@/lib/control-catalog";
+import { managerTooltips } from "@/lib/manager-tooltips";
 import type {
   DeviceRoleAssignment,
   EventKind,
@@ -51,6 +53,21 @@ const eventLabels: Record<EventKind, string> = {
 };
 
 type ContinuousLearnPhase = "arming" | "waiting" | "canceling" | "paused" | "completed";
+
+const continuousLearnPhaseLabel = (phase: ContinuousLearnPhase): string => {
+  switch (phase) {
+    case "arming":
+      return "開始中…";
+    case "waiting":
+      return "入力待ち";
+    case "canceling":
+      return "停止中…";
+    case "paused":
+      return "一時停止";
+    case "completed":
+      return "完了";
+  }
+};
 
 type ContinuousLearnState = {
   runId: number;
@@ -717,7 +734,10 @@ export function MappingSettings({
                 <section className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-6 shadow-sm">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div>
-                      <h3 className="text-xl font-semibold text-gray-900">連続学習</h3>
+                      <h3 className="inline-flex items-center gap-2 text-xl font-semibold text-gray-900">
+                        連続学習
+                        <HelpTip content={managerTooltips.mappingContinuousLearn} />
+                      </h3>
                     </div>
                     <div className="rounded-full border border-indigo-200 bg-white px-4 py-2 text-sm text-indigo-800">
                       {continuousLearn
@@ -816,16 +836,9 @@ export function MappingSettings({
                               {continuousLearnTargetDevice?.displayName ?? continuousLearn.targetDeviceId}
                             </span>
                           </p>
-                          <p className="mt-1 text-xs text-gray-500">
-                            {continuousLearn.phase === "arming"
-                              ? "次の学習を開始しています…"
-                              : continuousLearn.phase === "waiting"
-                                ? "物理入力を待っています。"
-                                : continuousLearn.phase === "canceling"
-                                  ? "学習を停止しています…"
-                                  : continuousLearn.phase === "paused"
-                                    ? "停止中。現在の項目から再開できます。"
-                                    : "すべての学習が完了しました。"}
+                          <p className="mt-1 flex items-center gap-1 text-xs text-gray-500">
+                            <span>{continuousLearnPhaseLabel(continuousLearn.phase)}</span>
+                            <HelpTip content={managerTooltips.mappingContinuousLearnPhase} />
                           </p>
                         </div>
                         <div className="flex flex-wrap gap-2 text-xs">
