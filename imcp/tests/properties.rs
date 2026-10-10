@@ -130,15 +130,19 @@ proptest! {
     ) {
         let encoded = encode_frame(&frame);
         let mut stream = vec![0x11u8; noise_len];
-        // SOF, a header whose length cannot match the short body, then EOF.
-        stream.extend_from_slice(&[SOF, 0x01, 0x02, 0x00, 0xFF, 0xFF, 0x5A, EOF]);
+        // Header says the payload is 1 byte, but the body ends at the checksum.
+        // The checksum matches, and none of the body bytes are SOF, EOF, or ESC.
+        stream.extend_from_slice(&[SOF, 0x01, 0x02, 0x00, 0x01, 0x00, 0x02, EOF]);
         stream.extend_from_slice(&encoded);
 
         let frames = parse_chunks(&stream, &[stream.len()]);
-        let errors = frames.iter().filter(|frame| frame.is_err()).count();
-        let ok: Vec<&Frame> = frames.iter().filter_map(|frame| frame.as_ref().ok()).collect();
-        prop_assert!(errors >= 1);
-        prop_assert_eq!(ok, vec![&frame]);
+        prop_assert_eq!(
+            frames,
+            vec![
+                Err(imcp::error::DecodeError::InvalidPayloadLength),
+                Ok(frame),
+            ]
+        );
     }
 
     #[test]
