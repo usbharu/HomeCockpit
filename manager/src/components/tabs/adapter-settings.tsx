@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  ArrowRightLeft,
   CheckCircle2,
+  ChevronRight,
   FileJson,
   Plane,
   RefreshCw,
@@ -11,7 +13,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 
-import { findAdapterProfileForAircraft } from "@/lib/control-catalog";
+import { deviceRoleLabels, findAdapterProfileForAircraft } from "@/lib/control-catalog";
 import { RoleIoMapping } from "@/components/role-io-mapping";
 import type {
   AdapterCatalog,
@@ -323,25 +325,59 @@ export function AdapterSettings({
         )}
 
         {currentProfileMatch && selectedRole && (
-          <>
-            <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-              <h2 className="text-xl font-semibold text-gray-900">Role → Adapterマッピング</h2>
-              <p className="mt-1 text-sm text-gray-500">
-                Roleの論理アクションを、現在の航空機Adapterが提供するInput/Outputへ割り当てます。
+          <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+            <aside className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
+              <p className="text-sm font-medium text-gray-500">論理 Role</p>
+              <h3 className="mt-1 text-xl font-semibold text-gray-900">Role 一覧</h3>
+              <p className="mt-2 text-sm text-gray-500">
+                選択した Role の論理アクションを、現在の航空機 Adapter の Input/Output へ割り当てます。
               </p>
-              <label className="mt-4 block max-w-sm space-y-2 text-sm text-gray-700">
-                <span>Role</span>
-                <select
-                  value={selectedRoleId}
-                  onChange={(event) => setSelectedRoleId(event.target.value)}
-                  className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 outline-none transition focus:border-blue-500"
-                >
-                  {roleDefinitions.map((role) => (
-                    <option key={role.roleId} value={role.roleId}>{role.roleId}</option>
-                  ))}
-                </select>
-              </label>
-            </section>
+              <div className="mt-5 space-y-3">
+                {roleDefinitions.map((role) => {
+                  const isSelected = role.roleId === selectedRoleId;
+                  const category =
+                    currentProfileMatch.profile.roleBindings.find(
+                      (binding) => binding.roleId === role.roleId,
+                    )?.category ?? null;
+
+                  return (
+                    <button
+                      key={role.roleId}
+                      type="button"
+                      onClick={() => setSelectedRoleId(role.roleId)}
+                      className={`w-full rounded-lg border p-4 text-left transition ${
+                        isSelected
+                          ? "border-blue-200 bg-blue-50"
+                          : "border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50"
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="mt-0.5 flex h-11 w-11 items-center justify-center rounded-lg bg-gray-100 text-blue-600">
+                          <ArrowRightLeft size={18} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="font-semibold text-gray-900">
+                              {deviceRoleLabels[role.roleId] ?? role.roleId}
+                            </p>
+                            <ChevronRight
+                              size={18}
+                              className={isSelected ? "text-blue-600" : "text-gray-400"}
+                            />
+                          </div>
+                          <p className="mt-1 text-sm text-gray-500">{role.roleId}</p>
+                          <div className="mt-3">
+                            <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-600">
+                              {category ?? "プロファイル未対応"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </aside>
             <RoleIoMapping
               roleId={selectedRole.roleId}
               roleControls={selectedRole.controls}
@@ -351,7 +387,7 @@ export function AdapterSettings({
               busyAction={busyAction}
               onSaveAdapterMappings={onSaveAdapterMappings}
             />
-          </>
+          </div>
         )}
 
         {editing && (
