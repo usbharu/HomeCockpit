@@ -2,9 +2,8 @@
 
 import React from 'react';
 
-import { HelpTip } from "@/components/help-tip";
+import { ManagerHelpTip } from "@/components/help-tip";
 import type { DcsBiosStatus, ManagerLogEntry } from "@/lib/manager-types";
-import { managerTooltips } from "@/lib/manager-tooltips";
 
 type StatusPageProps = {
     logs: ManagerLogEntry[];
@@ -33,7 +32,7 @@ export const StatusPage = ({ logs, status }: StatusPageProps) => {
                     <p className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-700 shadow-sm">
                         <span className="inline-flex items-center gap-1 font-medium text-gray-900">
                           DCS-BIOS サマリー
-                          <HelpTip content={managerTooltips.logDcsSummary} />
+                          <ManagerHelpTip tipKey="logDcsSummary" />
                         </span>
                         <span className="text-gray-400">·</span>
                         {" "}

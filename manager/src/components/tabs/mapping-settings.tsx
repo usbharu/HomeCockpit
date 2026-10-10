@@ -12,14 +12,13 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { HelpTip } from "@/components/help-tip";
+import { ManagerHelpTip } from "@/components/help-tip";
 import {
   deviceRoleLabels,
   getImplementedRoleControls,
   getPhysicalControlCatalog,
   getRoleDefinition,
 } from "@/lib/control-catalog";
-import { managerTooltips } from "@/lib/manager-tooltips";
 import type {
   DeviceRoleAssignment,
   EventKind,
@@ -138,8 +137,12 @@ export function MappingSettings({
       return roleControls;
     }
 
+    if (roleAssignments.length === 0) {
+      return [];
+    }
+
     return roleControls.filter((control) =>
-      roleAssignments.every(
+      roleAssignments.some(
         (assignment) =>
           !assignment.bindings.some(
             (binding) => binding.logicalControlId === control.logicalControlId,
@@ -736,7 +739,7 @@ export function MappingSettings({
                     <div>
                       <h3 className="inline-flex items-center gap-2 text-xl font-semibold text-gray-900">
                         連続学習
-                        <HelpTip content={managerTooltips.mappingContinuousLearn} />
+                        <ManagerHelpTip tipKey="mappingContinuousLearn" />
                       </h3>
                     </div>
                     <div className="rounded-full border border-indigo-200 bg-white px-4 py-2 text-sm text-indigo-800">
@@ -838,7 +841,7 @@ export function MappingSettings({
                           </p>
                           <p className="mt-1 flex items-center gap-1 text-xs text-gray-500">
                             <span>{continuousLearnPhaseLabel(continuousLearn.phase)}</span>
-                            <HelpTip content={managerTooltips.mappingContinuousLearnPhase} />
+                            <ManagerHelpTip tipKey="mappingContinuousLearnPhase" />
                           </p>
                         </div>
                         <div className="flex flex-wrap gap-2 text-xs">

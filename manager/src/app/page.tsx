@@ -17,8 +17,7 @@ import DeviceSettings from "@/components/tabs/device-settings";
 import MappingSettings from "@/components/tabs/mapping-settings";
 import AdapterSettings from "@/components/tabs/adapter-settings";
 import StatusPage from "@/components/tabs/status-page";
-import { HelpTip } from "@/components/help-tip";
-import { managerTooltips } from "@/lib/manager-tooltips";
+import { ManagerHelpTip } from "@/components/help-tip";
 
 
 export default function ManagerTabs() {
@@ -140,7 +139,7 @@ export default function ManagerTabs() {
                     </div>
                     <div className="flex items-center gap-1.5 rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
                         <span className="capitalize">{snapshot.dcsbiosStatus.connectionState}</span>
-                        <HelpTip content={managerTooltips.headerDcsConnection} side="left" />
+                        <ManagerHelpTip tipKey="headerDcsConnection" side="left" />
                     </div>
                 </div>
                 <Tabs.List className="flex px-6 pt-2 -mb-px">

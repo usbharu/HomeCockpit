@@ -32,4 +32,25 @@ export const managerTooltips = {
   roleIoPendingProfile: "機体プロファイルが確定すると Role ごとの DCS-BIOS I/O を設定できます。",
 } as const;
 
+export const managerTooltipAriaLabels: Record<keyof typeof managerTooltips, string> = {
+  headerDcsConnection: "ヘッダー DCS 接続状態の説明",
+  logDcsSummary: "ログ DCS サマリーの説明",
+  dcsMetricConnection: "接続状態メトリクスの説明",
+  dcsMetricRate: "受信レートメトリクスの説明",
+  dcsMetricLastSeen: "最終受信メトリクスの説明",
+  dcsMetricAircraft: "機体名メトリクスの説明",
+  dcsDiagnostics: "接続診断の説明",
+  mcpServer: "MCP 外部連携の説明",
+  deviceAutoSave: "自動保存の説明",
+  deviceCandidates: "接続候補の説明",
+  endpointRoleHint: "Role Hint の説明",
+  mappingContinuousLearn: "連続学習の説明",
+  mappingContinuousLearnPhase: "連続学習フェーズの説明",
+  adapterConnection: "Adapter 接続状態の説明",
+  adapterCurrentAircraft: "現在機体の説明",
+  adapterCatalog: "Adapter カタログの説明",
+  adapterUnknownAircraft: "未知の航空機の説明",
+  roleIoPendingProfile: "Role I/O 未確定の説明",
+};
+
 export type ManagerTooltipKey = keyof typeof managerTooltips;
