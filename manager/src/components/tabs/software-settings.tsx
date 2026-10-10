@@ -255,6 +255,94 @@ export const SoftwareSettings = ({
                   </section>
                 )}
 
+                <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+                  <div>
+                    <h4 className="text-xl font-semibold text-gray-900">接続設定</h4>
+                    <p className="mt-1 text-sm text-gray-500">
+                      DCS-BIOS の受信先と送信先を設定します。変更後は保存または保存して開始を実行してください。
+                    </p>
+                  </div>
+
+                  <div className="mt-5 space-y-5">
+                    <div>
+                      <p className="text-sm font-medium text-gray-700">受信設定</p>
+                      <div className="mt-3 grid gap-4 md:grid-cols-2">
+                        <label className="space-y-2 text-sm text-gray-600">
+                          <span>受信ホスト</span>
+                          <input
+                            value={draft.exportHost}
+                            onChange={(event) =>
+                              setDraft({ ...draft, exportHost: event.target.value })
+                            }
+                            className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-gray-900 outline-none focus:border-blue-500"
+                          />
+                        </label>
+                        <label className="space-y-2 text-sm text-gray-600">
+                          <span>受信ポート</span>
+                          <input
+                            type="number"
+                            value={draft.exportPort}
+                            onChange={(event) =>
+                              setDraft({
+                                ...draft,
+                                exportPort: Number(event.target.value),
+                              })
+                            }
+                            className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-gray-900 outline-none focus:border-blue-500"
+                          />
+                        </label>
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-sm font-medium text-gray-700">送信設定</p>
+                      <div className="mt-3 grid gap-4 md:grid-cols-3">
+                        <label className="space-y-2 text-sm text-gray-600">
+                          <span>送信ホスト</span>
+                          <input
+                            value={draft.commandHost}
+                            onChange={(event) =>
+                              setDraft({ ...draft, commandHost: event.target.value })
+                            }
+                            className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-gray-900 outline-none focus:border-blue-500"
+                          />
+                        </label>
+                        <label className="space-y-2 text-sm text-gray-600">
+                          <span>送信ポート</span>
+                          <input
+                            type="number"
+                            value={draft.commandPort}
+                            onChange={(event) =>
+                              setDraft({
+                                ...draft,
+                                commandPort: Number(event.target.value),
+                              })
+                            }
+                            className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-gray-900 outline-none focus:border-blue-500"
+                          />
+                        </label>
+                        <label className="space-y-2 text-sm text-gray-600">
+                          <span>プロトコル</span>
+                          <select
+                            value={draft.commandTransport}
+                            onChange={(event) =>
+                              setDraft({
+                                ...draft,
+                                commandTransport:
+                                  event.target.value as DcsBiosConnectionConfig["commandTransport"],
+                              })
+                            }
+                            className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-gray-900 outline-none focus:border-blue-500"
+                          >
+                            <option value="udp">UDP</option>
+                            <option value="tcp">TCP</option>
+                          </select>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
                 <div className="grid gap-4 lg:grid-cols-4">
                   <section className={metricCardClass}>
                     <p className="text-sm text-gray-500">接続状態</p>
@@ -300,120 +388,34 @@ export const SoftwareSettings = ({
                   </section>
                 </div>
 
-                <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-                  <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-                    <div>
-                      <h4 className="text-xl font-semibold text-gray-900">接続診断</h4>
-                      <p className="mt-1 text-sm text-gray-500">
-                        現在の DCS-BIOS ランタイム状態と診断メッセージを表示します。
-                      </p>
-                    </div>
+                <details className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+                  <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+                    <h4 className="text-xl font-semibold text-gray-900">接続診断</h4>
+                    <p className="mt-1 text-sm text-gray-500">
+                      現在の DCS-BIOS ランタイム状態と診断メッセージを表示します。
+                    </p>
+                  </summary>
 
-                    <div className="mt-5 grid gap-3">
-                      {status.diagnostics.map((diagnostic) => (
+                  <div className="mt-5 grid gap-3">
+                    {status.diagnostics.length === 0 ? (
+                      <p className="text-sm text-gray-500">診断メッセージはありません。</p>
+                    ) : (
+                      status.diagnostics.map((diagnostic) => (
                         <div key={diagnostic} className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
                           {diagnostic}
                         </div>
-                      ))}
-                    </div>
-                  </section>
-
-                  <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-                    <div>
-                      <h4 className="text-xl font-semibold text-gray-900">接続設定</h4>
-                      <p className="mt-1 text-sm text-gray-500">
-                        DCS-BIOS の受信先と送信先を設定します。
-                      </p>
-                    </div>
-
-                    <div className="mt-5 space-y-5">
-                      <div>
-                        <p className="text-sm font-medium text-gray-700">受信設定</p>
-                        <div className="mt-3 grid gap-4 md:grid-cols-2">
-                          <label className="space-y-2 text-sm text-gray-600">
-                            <span>受信ホスト</span>
-                            <input
-                              value={draft.exportHost}
-                              onChange={(event) =>
-                                setDraft({ ...draft, exportHost: event.target.value })
-                              }
-                              className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-gray-900 outline-none focus:border-blue-500"
-                            />
-                          </label>
-                          <label className="space-y-2 text-sm text-gray-600">
-                            <span>受信ポート</span>
-                            <input
-                              type="number"
-                              value={draft.exportPort}
-                              onChange={(event) =>
-                                setDraft({
-                                  ...draft,
-                                  exportPort: Number(event.target.value),
-                                })
-                              }
-                              className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-gray-900 outline-none focus:border-blue-500"
-                            />
-                          </label>
-                        </div>
-                      </div>
-
-                      <div>
-                        <p className="text-sm font-medium text-gray-700">送信設定</p>
-                        <div className="mt-3 grid gap-4 md:grid-cols-3">
-                          <label className="space-y-2 text-sm text-gray-600">
-                            <span>送信ホスト</span>
-                            <input
-                              value={draft.commandHost}
-                              onChange={(event) =>
-                                setDraft({ ...draft, commandHost: event.target.value })
-                              }
-                              className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-gray-900 outline-none focus:border-blue-500"
-                            />
-                          </label>
-                          <label className="space-y-2 text-sm text-gray-600">
-                            <span>送信ポート</span>
-                            <input
-                              type="number"
-                              value={draft.commandPort}
-                              onChange={(event) =>
-                                setDraft({
-                                  ...draft,
-                                  commandPort: Number(event.target.value),
-                                })
-                              }
-                              className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-gray-900 outline-none focus:border-blue-500"
-                            />
-                          </label>
-                          <label className="space-y-2 text-sm text-gray-600">
-                            <span>プロトコル</span>
-                            <select
-                              value={draft.commandTransport}
-                              onChange={(event) =>
-                                setDraft({
-                                  ...draft,
-                                  commandTransport:
-                                    event.target.value as DcsBiosConnectionConfig["commandTransport"],
-                                })
-                              }
-                              className="w-full rounded-md border border-gray-300 bg-white px-4 py-3 text-gray-900 outline-none focus:border-blue-500"
-                            >
-                              <option value="udp">UDP</option>
-                              <option value="tcp">TCP</option>
-                            </select>
-                          </label>
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-                </div>
+                      ))
+                    )}
+                  </div>
+                </details>
               </div>
             )}
           </section>
         </div>
         <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-          <h3 className="text-lg font-semibold text-gray-900">MCP サーバー</h3>
+          <h3 className="text-lg font-semibold text-gray-900">外部連携（MCP サーバー）</h3>
           <p className="mt-1 text-sm text-gray-600">
-            ローカルの MCP クライアントから Manager と接続デバイスを操作します。認証はありません。
+            ゲーム接続（DCS-BIOS）とは別経路です。ローカルの MCP クライアントから Manager と接続デバイスを操作します。認証はありません。
           </p>
           <div className="mt-4 flex flex-wrap items-end gap-4">
             <label className="flex items-center gap-2 text-sm text-gray-700">
