@@ -19,28 +19,30 @@ export const StatusPage = ({ logs, status }: StatusPageProps) => {
         }
     };
 
+    const lastPacketLabel = status.lastPacketAt
+        ? new Date(status.lastPacketAt).toLocaleTimeString()
+        : "なし";
+
     return (
         <div className="h-full overflow-y-auto p-8">
             <div className="mx-auto flex max-w-7xl flex-col gap-6">
-                <div className="grid gap-4 lg:grid-cols-3">
-                    <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-                        <p className="text-sm text-gray-500">状態</p>
-                        <p className="mt-3 text-3xl font-semibold capitalize text-gray-900">{status.connectionState}</p>
-                    </div>
-                    <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-                        <p className="text-sm text-gray-500">受信パケット</p>
-                        <p className="mt-3 text-3xl font-semibold text-gray-900">{status.totalPackets}</p>
-                    </div>
-                    <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
-                        <p className="text-sm text-gray-500">最終更新</p>
-                        <p className="mt-3 text-3xl font-semibold text-gray-900">
-                            {status.lastPacketAt ? new Date(status.lastPacketAt).toLocaleTimeString() : "なし"}
-                        </p>
-                    </div>
-                </div>
                 <div>
-                    <h3 className="mb-3 text-lg font-semibold text-gray-800">リアルタイムログ</h3>
-                    <div className="h-[32rem] overflow-y-auto rounded-lg border border-gray-200 bg-gray-900 p-4 font-mono text-sm text-white shadow-sm">
+                    <h3 className="text-lg font-semibold text-gray-800">リアルタイムログ</h3>
+                    <p className="mt-1 text-sm text-gray-500">
+                        Manager と接続まわりのイベントを時系列で表示します。DCS-BIOS の詳細な接続状態と診断は「ソフトウェア接続」タブを参照してください。
+                    </p>
+                    <p className="mt-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-700 shadow-sm">
+                        <span className="font-medium text-gray-900">DCS-BIOS サマリー:</span>
+                        {" "}
+                        <span className="capitalize">{status.connectionState}</span>
+                        {" · "}
+                        受信 {status.totalPackets} パケット
+                        {" · "}
+                        最終受信 {lastPacketLabel}
+                    </p>
+                </div>
+                <div className="min-h-[32rem] flex-1">
+                    <div className="h-[calc(100vh-16rem)] min-h-[32rem] overflow-y-auto rounded-lg border border-gray-200 bg-gray-900 p-4 font-mono text-sm text-white shadow-sm">
                         {logs.length === 0 ? (
                             <p className="text-gray-500">ログはまだありません。</p>
                         ) : (
