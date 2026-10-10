@@ -81,6 +81,7 @@ export function MappingSettings({
   const [continuousLearn, setContinuousLearn] = useState<ContinuousLearnState | null>(null);
   const [resettingContinuousLearn, setResettingContinuousLearn] = useState(false);
   const [learnNotice, setLearnNotice] = useState<string | null>(null);
+  const [showUnmappedOnly, setShowUnmappedOnly] = useState(false);
   const continuousLearnRunId = useRef(0);
   const armingRequestKey = useRef<string | null>(null);
   const resetInProgress = useRef(false);
@@ -115,6 +116,20 @@ export function MappingSettings({
     () => getImplementedRoleControls(roleDefinition, roleControlCapacity),
     [roleControlCapacity, roleDefinition],
   );
+  const visibleRoleControls = useMemo(() => {
+    if (!showUnmappedOnly) {
+      return roleControls;
+    }
+
+    return roleControls.filter((control) =>
+      roleAssignments.every(
+        (assignment) =>
+          !assignment.bindings.some(
+            (binding) => binding.logicalControlId === control.logicalControlId,
+          ),
+      ),
+    );
+  }, [roleAssignments, roleControls, showUnmappedOnly]);
 
   const continuousLearnAssignment = roleAssignments.find(
     (assignment) => assignment.deviceId === continuousLearnDeviceId,
@@ -783,8 +798,10 @@ export function MappingSettings({
                             この Device には未登録の logical control がありません。
                           </p>
                         ) : (
-                          <div className="mt-4 rounded-md border border-indigo-100 bg-white p-4">
-                            <p className="text-xs font-medium text-gray-500">登録対象の順序（{continuousLearnCandidates.length}件）</p>
+                          <details className="mt-4 rounded-md border border-indigo-100 bg-white p-4">
+                            <summary className="cursor-pointer list-none text-xs font-medium text-gray-500 [&::-webkit-details-marker]:hidden">
+                              登録対象の順序（{continuousLearnCandidates.length}件）を表示
+                            </summary>
                             <ol className="mt-3 grid gap-2 sm:grid-cols-2">
                               {continuousLearnCandidates.map((control, index) => (
                                 <li key={control.logicalControlId} className="flex items-center gap-2 text-sm text-gray-700">
@@ -796,7 +813,7 @@ export function MappingSettings({
                                 </li>
                               ))}
                             </ol>
-                          </div>
+                          </details>
                         )}
                       </>
                     )
@@ -950,6 +967,15 @@ export function MappingSettings({
                       <span className="rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
                         {roleBindingCount} binding(s)
                       </span>
+                      <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={showUnmappedOnly}
+                          onChange={(event) => setShowUnmappedOnly(event.target.checked)}
+                          disabled={roleControls.length === 0}
+                        />
+                        未結線のみ表示
+                      </label>
                       <button
                         type="button"
                         onClick={() => void removeAllRoleBindings()}
@@ -976,9 +1002,13 @@ export function MappingSettings({
                           : "Role定義に論理Controlが定義されていません。"}
                       </p>
                     </div>
+                  ) : visibleRoleControls.length === 0 ? (
+                    <div className="mt-5 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
+                      未結線の論理コントロールはありません。フィルタを解除するか、すべて結線済みです。
+                    </div>
                   ) : (
                     <div className="mt-5 space-y-3">
-                      {roleControls.map((control) => {
+                      {visibleRoleControls.map((control) => {
                         const bindings = roleAssignments.flatMap((assignment) => {
                           const device = devices.find((entry) => entry.deviceId === assignment.deviceId);
                           return assignment.bindings
