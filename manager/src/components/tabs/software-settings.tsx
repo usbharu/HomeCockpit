@@ -368,26 +368,28 @@ export const SoftwareSettings = ({
                   </section>
                 </div>
 
-                <details className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-                  <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-                    <span className="inline-flex items-center gap-2">
-                      <h4 className="text-xl font-semibold text-gray-900">接続診断</h4>
-                      <ManagerHelpTip tipKey="dcsDiagnostics" />
-                    </span>
-                  </summary>
+                <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+                  <div className="flex items-start gap-2">
+                    <details className="min-w-0 flex-1">
+                      <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+                        <h4 className="text-xl font-semibold text-gray-900">接続診断</h4>
+                      </summary>
 
-                  <div className="mt-5 grid gap-3">
-                    {status.diagnostics.length === 0 ? (
-                      <p className="text-sm text-gray-500">診断メッセージはありません。</p>
-                    ) : (
-                      status.diagnostics.map((diagnostic) => (
-                        <div key={diagnostic} className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
-                          {diagnostic}
-                        </div>
-                      ))
-                    )}
+                      <div className="mt-5 grid gap-3">
+                        {status.diagnostics.length === 0 ? (
+                          <p className="text-sm text-gray-500">診断メッセージはありません。</p>
+                        ) : (
+                          status.diagnostics.map((diagnostic) => (
+                            <div key={diagnostic} className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
+                              {diagnostic}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </details>
+                    <ManagerHelpTip tipKey="dcsDiagnostics" side="left" />
                   </div>
-                </details>
+                </section>
               </div>
             )}
           </section>

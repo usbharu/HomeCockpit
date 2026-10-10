@@ -500,7 +500,7 @@ const DeviceSettings = ({
               <h3 className="text-xl font-semibold text-gray-800">検出されたデバイス</h3>
             </div>
             <div className="rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
-              {devices.length} device(s)
+              {devices.length} デバイス
             </div>
           </div>
 
@@ -531,7 +531,7 @@ const DeviceSettings = ({
                         </p>
                         {device.gatewayDisplayName && (
                           <p className="mt-1 text-xs font-medium text-blue-600">
-                            Via {device.gatewayDisplayName}
+                            経由: {device.gatewayDisplayName}
                           </p>
                         )}
                       </div>
@@ -543,29 +543,29 @@ const DeviceSettings = ({
 
                   <div className="mt-5 grid gap-3 text-sm text-gray-700">
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Connection</span>
+                      <span>接続</span>
                       <span className="capitalize">{device.connectionKind}</span>
                     </div>
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Protocol</span>
+                      <span>プロトコル</span>
                       <span className="inline-flex items-center gap-2">
                         <Cable size={14} />
                         {device.protocol}
                       </span>
                     </div>
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Device Kind</span>
-                      <span>{device.deviceKind ?? "Unknown"}</span>
+                      <span>デバイス種別</span>
+                      <span>{device.deviceKind ?? "不明"}</span>
                     </div>
                     <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-                      <span>Firmware</span>
-                      <span>{device.firmwareVersion ?? "Unknown"}</span>
+                      <span>ファームウェア</span>
+                      <span>{device.firmwareVersion ?? "不明"}</span>
                     </div>
                     <details className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
                       <summary className="cursor-pointer font-medium text-gray-800">技術詳細</summary>
                       <div className="mt-3 grid gap-3">
                         <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
-                          <span>Transport</span>
+                          <span>トランスポート</span>
                           <span>{device.endpointTransport}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
@@ -573,32 +573,32 @@ const DeviceSettings = ({
                           <span>{roleHintLabels[(draftEndpoints.find((entry) => entry.id === device.endpointId)?.roleHint ?? "auto") as EndpointRoleHint]}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
-                          <span>Identifier</span>
+                          <span>識別子</span>
                           <span className="truncate pl-4 text-right">{device.id}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
                           <span>Device ID</span>
-                          <span className="truncate pl-4 text-right">{device.deviceId ?? "Unknown"}</span>
+                          <span className="truncate pl-4 text-right">{device.deviceId ?? "不明"}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
-                          <span>IMCP Address</span>
-                          <span>{device.assignedAddress ?? "N/A"}</span>
+                          <span>IMCP アドレス</span>
+                          <span>{device.assignedAddress ?? "—"}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
-                          <span>HCP Version</span>
-                          <span>{device.protocolVersion ?? "N/A"}</span>
+                          <span>HCP バージョン</span>
+                          <span>{device.protocolVersion ?? "—"}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
-                          <span>Capabilities</span>
+                          <span>能力</span>
                           <span className="pl-4 text-right">
                             {device.displays !== null && device.controls !== null
-                              ? `${device.displays} displays / ${device.controls} controls`
-                              : "Unknown"}
+                              ? `表示 ${device.displays} / 操作 ${device.controls}`
+                              : "不明"}
                           </span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3">
-                          <span>Features</span>
-                          <span className="truncate pl-4 text-right">{device.features ?? "Unknown"}</span>
+                          <span>機能</span>
+                          <span className="truncate pl-4 text-right">{device.features ?? "不明"}</span>
                         </div>
                       </div>
                     </details>

@@ -2,7 +2,7 @@
 
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { CircleHelp } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 
 import {
   managerTooltipAriaLabels,
@@ -22,10 +22,23 @@ const contentClassName =
 
 export function HelpTip({ content, ariaLabel, side = "top", children }: HelpTipProps) {
   const [open, setOpen] = useState(false);
+  const pinnedRef = useRef(false);
   const contentId = useId();
 
+  const dismiss = () => {
+    pinnedRef.current = false;
+    setOpen(false);
+  };
+
+  const handleOpenChange = (next: boolean) => {
+    if (pinnedRef.current && !next) {
+      return;
+    }
+    setOpen(next);
+  };
+
   return (
-    <Tooltip.Root open={open} onOpenChange={setOpen}>
+    <Tooltip.Root open={open} onOpenChange={handleOpenChange}>
       <Tooltip.Trigger asChild>
         {children ?? (
           <button
@@ -37,7 +50,12 @@ export function HelpTip({ content, ariaLabel, side = "top", children }: HelpTipP
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
-              setOpen((current) => !current);
+              if (open) {
+                dismiss();
+                return;
+              }
+              pinnedRef.current = true;
+              setOpen(true);
             }}
           >
             <CircleHelp size={15} aria-hidden />
@@ -45,7 +63,18 @@ export function HelpTip({ content, ariaLabel, side = "top", children }: HelpTipP
         )}
       </Tooltip.Trigger>
       <Tooltip.Portal>
-        <Tooltip.Content id={contentId} side={side} sideOffset={6} className={contentClassName}>
+        <Tooltip.Content
+          id={contentId}
+          side={side}
+          sideOffset={6}
+          className={contentClassName}
+          onEscapeKeyDown={dismiss}
+          onPointerDownOutside={() => {
+            if (pinnedRef.current) {
+              dismiss();
+            }
+          }}
+        >
           {content}
           <Tooltip.Arrow className="fill-gray-900" />
         </Tooltip.Content>

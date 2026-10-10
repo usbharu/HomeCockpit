@@ -263,7 +263,7 @@ export function AdapterSettings({
               <Plane className="mt-0.5 text-blue-600" size={19} />
               <div>
                 <div className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-blue-700">
-                  Current aircraft
+                  現在の機体
                   <ManagerHelpTip tipKey="adapterCurrentAircraft" />
                 </div>
                 <p className="mt-1 text-lg font-semibold text-gray-900">
@@ -273,11 +273,12 @@ export function AdapterSettings({
             </div>
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
               <div className="inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-gray-400">
-                Catalog
+                カタログ
                 <ManagerHelpTip tipKey="adapterCatalog" />
               </div>
               <p className="mt-1 text-lg font-semibold text-gray-900">
-                {adapterCatalog.adapters.length} adapter(s) / {adapterCatalog.adapters.reduce((count, adapter) => count + adapter.profiles.length, 0)} profile(s)
+                Adapter {adapterCatalog.adapters.length} 件 / プロファイル{" "}
+                {adapterCatalog.adapters.reduce((count, adapter) => count + adapter.profiles.length, 0)} 件
               </p>
               {(adapterCatalog.state !== "loaded" || adapterCatalog.error) && (
                 <p className="mt-1 text-xs text-gray-500">
@@ -317,6 +318,10 @@ export function AdapterSettings({
                   未知の航空機
                   <ManagerHelpTip tipKey="adapterUnknownAircraft" />
                 </h2>
+                <p className="mt-2 text-sm text-amber-950/85">
+                  {status.aircraftName ?? "機体名未取得"}
+                  <span className="text-amber-800/70"> — 一致するプロファイルがありません。</span>
+                </p>
               </div>
             </div>
           </section>

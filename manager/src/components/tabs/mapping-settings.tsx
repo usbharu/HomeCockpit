@@ -700,10 +700,10 @@ export function MappingSettings({
                         <p className="mt-1 text-sm text-gray-500">{definition.roleId}</p>
                         <div className="mt-3 flex items-center justify-between">
                           <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-600">
-                            {assignmentCount} device(s)
+                            {assignmentCount} デバイス
                           </span>
                           <span className="text-xs text-gray-400">
-                            {implementedControlCount(definition.roleId)} implemented controls
+                            実装 Control {implementedControlCount(definition.roleId)} 件
                           </span>
                         </div>
                       </div>
@@ -729,7 +729,7 @@ export function MappingSettings({
                       </h3>
                     </div>
                     <div className="rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm text-gray-700">
-                      {roleAssignments.length} device(s) / {roleControls.length} logical control(s)
+                      {roleAssignments.length} デバイス / 論理 Control {roleControls.length} 件
                     </div>
                   </div>
                 </section>
@@ -966,7 +966,7 @@ export function MappingSettings({
                     </div>
                     <div className="flex flex-wrap items-center gap-3">
                       <span className="rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
-                        {roleBindingCount} binding(s)
+                        結線 {roleBindingCount} 件
                       </span>
                       <label className="inline-flex items-center gap-2 text-sm text-gray-700">
                         <input
