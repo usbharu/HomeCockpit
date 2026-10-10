@@ -103,6 +103,8 @@ probe-rs run --chip RP2040 --always-print-stacktrace `
 Manager などのホストから HCP の `RequestDeviceHello` を受信した場合、デバイスは
 現在の IMCP address から `DeviceHello` を再送します。これにより、デバイスが既に
 `Ready` 状態で起動した Manager に接続された場合も再発見できます。
+表示 Data の適用とこの再送は、送信元が IMCP マスター `0x01` のフレームだけです。
+直接接続には送信元を書き換えるハブがないためです。
 送信キューには ACK と `DeviceHello` 用の 2 枠を予約しており、通常のボタンイベントが
 この予約枠を消費しないようにしています。Manager 側も取りこぼしに備え、100ms 間隔で
 最大 4 回（初回を含む）`RequestDeviceHello` を送信します。

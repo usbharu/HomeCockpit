@@ -5,13 +5,11 @@ use std::{
 };
 
 use futures_executor::block_on;
-use hcp::{
-    AppPacketKind, Capabilities, DeviceKind, DisplayData, Version, decode_data_packet,
-    decode_set_packet,
-};
+use hcp::{Capabilities, DeviceKind, DisplayData, Version};
 use homecockpit_firmware_base::{
-    DeviceDescriptor, DeviceRuntimeState, FEATURE_CONTROL_EVENTS, build_button_control_event,
-    build_device_hello_packet, encode_set_frame, try_assign_address_from_frame,
+    DeviceDescriptor, DeviceRuntimeState, FEATURE_CONTROL_EVENTS, apply_master_application_frame,
+    build_button_control_event, build_device_hello_packet, encode_set_frame,
+    try_assign_address_from_frame,
 };
 #[cfg(test)]
 use imcp::frame::MAX_ENCODED_FRAME_SIZE;
@@ -370,28 +368,18 @@ impl<'a> MockDevice<'a> {
             return Ok(Some(DeviceNotice::AddressAssigned(address)));
         }
 
-        match frame.payload() {
-            imcp::frame::FramePayload::Data(payload) => {
-                let Ok(data) = decode_data_packet(payload.as_slice()) else {
-                    return Ok(None);
-                };
-                let accepted = self.runtime.accept_display_data(&data);
-                Ok(Some(DeviceNotice::DisplayData { data, accepted }))
-            }
-            imcp::frame::FramePayload::Set(payload) => {
-                let Ok(AppPacketKind::ControlEvent(event)) = decode_set_packet(payload.as_slice())
-                else {
-                    return Ok(None);
-                };
-                if matches!(event.event, hcp::ControlValue::RequestDeviceHello) {
-                    self.enqueue_device_hello()?;
-                    Ok(Some(DeviceNotice::DeviceHelloRequested))
-                } else {
-                    Ok(None)
-                }
-            }
-            _ => Ok(None),
+        let effect = apply_master_application_frame(&mut self.runtime, frame);
+        if effect.queue_device_hello {
+            self.enqueue_device_hello()?;
+            return Ok(Some(DeviceNotice::DeviceHelloRequested));
         }
+        if let Some(applied) = effect.display {
+            return Ok(Some(DeviceNotice::DisplayData {
+                data: applied.data,
+                accepted: applied.accepted,
+            }));
+        }
+        Ok(None)
     }
 
     fn enqueue_device_hello(&self) -> Result<(), MockError> {
@@ -621,6 +609,92 @@ mod tests {
                 accepted: false,
             }]
         );
+    }
+
+    #[test]
+    fn non_master_display_and_hello_do_not_apply() {
+        let mut device = device();
+        assign_address(&mut device, 0x22);
+        let _assignment_ack = device.next_wire_frame().unwrap().unwrap();
+        let _hello = device.next_wire_frame().unwrap().unwrap();
+        let hello_ack = Frame::new(Address::Unicast(0x22), 0x01, FramePayload::Ack(0x01));
+        assert!(
+            device
+                .receive_bytes(&encode_frame(&hello_ack).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+
+        let display = DisplayData {
+            seq: 4,
+            target: DisplayTarget::Screen(0),
+            payload: DisplayPayload::Bytes {
+                encoding: ByteEncoding::Utf8Text,
+                data: Default::default(),
+            },
+        };
+        let payload = encode_data_packet(&display).unwrap();
+        let foreign_display = Frame::new(
+            Address::Unicast(0x22),
+            0x02,
+            FramePayload::Data(payload.clone()),
+        );
+        assert!(
+            device
+                .receive_bytes(&encode_frame(&foreign_display).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(device.next_wire_frame().unwrap().is_none());
+
+        let master_display = Frame::new(Address::Unicast(0x22), 0x01, FramePayload::Data(payload));
+        assert_eq!(
+            device
+                .receive_bytes(&encode_frame(&master_display).unwrap())
+                .unwrap(),
+            vec![DeviceNotice::DisplayData {
+                data: display,
+                accepted: true,
+            }]
+        );
+
+        let request = encode_set_packet(&AppPacketKind::ControlEvent(ControlEvent {
+            seq: 1,
+            control_id: hcp::CONTROL_ID_REQUEST_DEVICE_HELLO,
+            event: ControlValue::RequestDeviceHello,
+        }))
+        .unwrap();
+        let foreign_hello =
+            Frame::new(Address::Broadcast, 0x02, FramePayload::Set(request.clone()));
+        assert!(
+            device
+                .receive_bytes(&encode_frame(&foreign_hello).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        let ack = decode_frame(&device.next_wire_frame().unwrap().unwrap());
+        assert_eq!(
+            ack,
+            Frame::new(Address::Unicast(0x02), 0x22, FramePayload::Ack(0xFF))
+        );
+        assert!(device.next_wire_frame().unwrap().is_none());
+
+        let master_hello = Frame::new(Address::Unicast(0x22), 0x01, FramePayload::Set(request));
+        assert_eq!(
+            device
+                .receive_bytes(&encode_frame(&master_hello).unwrap())
+                .unwrap(),
+            vec![DeviceNotice::DeviceHelloRequested]
+        );
+        let ack = decode_frame(&device.next_wire_frame().unwrap().unwrap());
+        assert_eq!(
+            ack,
+            Frame::new(Address::Unicast(0x01), 0x22, FramePayload::Ack(0x22))
+        );
+        let hello = decode_frame(&device.next_wire_frame().unwrap().unwrap());
+        assert_eq!(hello.to_address(), Address::Unicast(0x01));
+        assert_eq!(hello.from_address(), 0x22);
+        assert!(matches!(hello.payload(), FramePayload::Set(_)));
     }
 
     #[test]

@@ -21,7 +21,10 @@ HomeCockpit の各 firmware crate で共通利用するランタイム補助 cra
 - `build_button_control_event`
 - `encode_set_frame`
 - `try_assign_address_from_frame`
+- `apply_master_application_frame`
 - `control_id_from_matrix_position`
+
+表示 Data の適用と `RequestDeviceHello` への応答は、`apply_master_application_frame` が送信元マスター `0x01` のフレームだけに行います。直接接続には送信元を書き換えるハブがないためです。IMCP の Data / Set 配送自体はマスター限定ではありません。
 
 ## 含めないもの
 

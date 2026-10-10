@@ -2,7 +2,8 @@
 
 use hcp::{
     APP_PROTOCOL_VERSION, AppPacketError, AppPacketKind, Capabilities, ControlEvent, ControlValue,
-    DeviceHello, DeviceKind, DisplayData, Version, encode_set_packet,
+    DeviceHello, DeviceKind, DisplayData, Version, decode_data_packet, decode_set_packet,
+    encode_set_packet,
 };
 use imcp::frame::{Address, Frame, FramePayload};
 
@@ -134,6 +135,64 @@ pub fn encode_set_frame(
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct AppliedDisplay {
+    pub data: DisplayData,
+    pub accepted: bool,
+}
+
+/// Result of applying a display update or `RequestDeviceHello` from one frame.
+///
+/// Direct connections have no hub that rewrites the source address, so these
+/// application commands apply only when the frame comes from the IMCP master.
+/// IMCP itself still delivers `Data` and `Set` from other stations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct MasterApplicationEffect {
+    pub display: Option<AppliedDisplay>,
+    pub queue_device_hello: bool,
+}
+
+impl MasterApplicationEffect {
+    pub const fn none() -> Self {
+        Self {
+            display: None,
+            queue_device_hello: false,
+        }
+    }
+}
+
+pub fn apply_master_application_frame(
+    state: &mut DeviceRuntimeState,
+    frame: &Frame,
+) -> MasterApplicationEffect {
+    if frame.from_address() != IMCP_MASTER_ADDRESS {
+        return MasterApplicationEffect::none();
+    }
+
+    let mut effect = MasterApplicationEffect::none();
+    if let FramePayload::Set(payload) = frame.payload()
+        && let Ok(AppPacketKind::ControlEvent(ControlEvent {
+            control_id: hcp::CONTROL_ID_REQUEST_DEVICE_HELLO,
+            event: ControlValue::RequestDeviceHello,
+            ..
+        })) = decode_set_packet(payload.as_slice())
+        && state.address().is_some()
+    {
+        effect.queue_device_hello = true;
+    }
+
+    if let FramePayload::Data(payload) = frame.payload()
+        && let Ok(data) = decode_data_packet(payload.as_slice())
+    {
+        let accepted = state.accept_display_data(&data);
+        effect.display = Some(AppliedDisplay { data, accepted });
+    }
+
+    effect
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -211,5 +270,106 @@ mod tests {
         assert_eq!(frame.to_address(), Address::Unicast(IMCP_MASTER_ADDRESS));
         assert_eq!(frame.from_address(), 0x22);
         assert!(matches!(frame.payload(), FramePayload::Set(_)));
+    }
+
+    fn display_frame(to: Address, from: u8, seq: u16) -> Frame {
+        let display = hcp::DisplayData {
+            seq,
+            target: hcp::DisplayTarget::Screen(0),
+            payload: hcp::DisplayPayload::Bytes {
+                encoding: hcp::ByteEncoding::Utf8Text,
+                data: Default::default(),
+            },
+        };
+        let payload = hcp::encode_data_packet(&display).unwrap();
+        Frame::new(to, from, FramePayload::Data(payload))
+    }
+
+    fn hello_request_frame(to: Address, from: u8, control_id: u16) -> Frame {
+        let payload = encode_set_packet(&AppPacketKind::ControlEvent(ControlEvent {
+            seq: 1,
+            control_id,
+            event: ControlValue::RequestDeviceHello,
+        }))
+        .unwrap();
+        Frame::new(to, from, FramePayload::Set(payload))
+    }
+
+    #[test]
+    fn non_master_frames_do_not_update_display_or_queue_hello() {
+        let mut state = DeviceRuntimeState::new();
+        state.assign_address(0x22);
+        let assigned = Address::Unicast(0x22);
+
+        assert_eq!(
+            apply_master_application_frame(&mut state, &display_frame(assigned, 0x02, 4)),
+            MasterApplicationEffect::none()
+        );
+        let accepted =
+            apply_master_application_frame(&mut state, &display_frame(assigned, 0x01, 4));
+        assert_eq!(
+            accepted.display.as_ref().map(|display| display.accepted),
+            Some(true)
+        );
+        assert!(!accepted.queue_device_hello);
+
+        let repeated =
+            apply_master_application_frame(&mut state, &display_frame(assigned, 0x01, 4));
+        assert_eq!(
+            repeated.display.as_ref().map(|display| display.accepted),
+            Some(false)
+        );
+
+        assert_eq!(
+            apply_master_application_frame(&mut state, &display_frame(Address::Broadcast, 0x02, 5)),
+            MasterApplicationEffect::none()
+        );
+        let newer = apply_master_application_frame(
+            &mut state,
+            &display_frame(Address::Broadcast, IMCP_MASTER_ADDRESS, 5),
+        );
+        assert_eq!(
+            newer.display.as_ref().map(|display| display.accepted),
+            Some(true)
+        );
+
+        assert_eq!(
+            apply_master_application_frame(
+                &mut state,
+                &hello_request_frame(assigned, 0x02, hcp::CONTROL_ID_REQUEST_DEVICE_HELLO)
+            ),
+            MasterApplicationEffect::none()
+        );
+        let hello = apply_master_application_frame(
+            &mut state,
+            &hello_request_frame(
+                assigned,
+                IMCP_MASTER_ADDRESS,
+                hcp::CONTROL_ID_REQUEST_DEVICE_HELLO,
+            ),
+        );
+        assert!(hello.queue_device_hello);
+        assert!(hello.display.is_none());
+        assert_eq!(
+            apply_master_application_frame(
+                &mut state,
+                &hello_request_frame(assigned, 0x01, 0x0001)
+            ),
+            MasterApplicationEffect::none()
+        );
+    }
+
+    #[test]
+    fn request_device_hello_without_address_does_not_queue() {
+        let mut state = DeviceRuntimeState::new();
+        let effect = apply_master_application_frame(
+            &mut state,
+            &hello_request_frame(
+                Address::Unicast(0x22),
+                IMCP_MASTER_ADDRESS,
+                hcp::CONTROL_ID_REQUEST_DEVICE_HELLO,
+            ),
+        );
+        assert_eq!(effect, MasterApplicationEffect::none());
     }
 }

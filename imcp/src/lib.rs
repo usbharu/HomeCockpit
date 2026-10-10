@@ -1495,6 +1495,43 @@ mod tests {
     }
 
     #[test]
+    fn test_read_tick_delivers_data_and_set_from_non_master() {
+        futures::executor::block_on(async {
+            let payload = Vec::from_slice(&[0x10, 0x20, 0x30]).unwrap();
+            let assigned = 0x22u8;
+            let destinations = [Address::Unicast(assigned), Address::Broadcast];
+            let payloads = [
+                FramePayload::Data(payload.clone()),
+                FramePayload::Set(payload),
+            ];
+
+            for to in destinations {
+                for payload in &payloads {
+                    let frame = Frame::new(to, 0x02, payload.clone());
+                    let encoded = encode_frame(&frame);
+                    let mut rx_buf = [0u8; 64];
+                    let mut frame_buf = [0u8; 64];
+                    let mut imcp = Imcp {
+                        tx_receiver: TestReceiver::new(std::iter::empty()),
+                        tx_sender: TestSender::default(),
+                        address: assigned,
+                        node_id: Some(0x1111_2222),
+                        pending_frame: None,
+                        frame_parser: FrameParser::new(&mut rx_buf, &mut frame_buf),
+                        node_type: NodeType::Client(ClientState::Ready(0x1111_2222)),
+                    };
+
+                    let seen = imcp.read_tick(&encoded).await.unwrap().unwrap();
+
+                    assert_eq!(seen.from_address(), 0x02);
+                    assert_eq!(seen.to_address(), to);
+                    assert_eq!(seen.payload(), payload);
+                }
+            }
+        });
+    }
+
+    #[test]
     fn test_read_tick_rejects_set_address_for_master() {
         futures::executor::block_on(async {
             let set_address = Frame::new(

@@ -28,14 +28,11 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channe
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcState};
 use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
-use hcp::{
-    AppPacketKind, CONTROL_ID_REQUEST_DEVICE_HELLO, Capabilities, ControlEvent, ControlValue,
-    DeviceKind, Version, decode_data_packet, decode_set_packet,
-};
+use hcp::{Capabilities, DeviceKind, Version};
 use homecockpit_firmware_base::{
-    DeviceDescriptor, DeviceRuntimeState, FEATURE_CONTROL_EVENTS, build_button_control_event,
-    build_device_hello_packet, control_id_from_matrix_position, encode_set_frame,
-    try_assign_address_from_frame,
+    DeviceDescriptor, DeviceRuntimeState, FEATURE_CONTROL_EVENTS, MasterApplicationEffect,
+    apply_master_application_frame, build_button_control_event, build_device_hello_packet,
+    control_id_from_matrix_position, encode_set_frame, try_assign_address_from_frame,
 };
 use imcp::{Imcp, channel::Receiver as ImcpReceiver, frame::Frame};
 use imcp_embassy::{EmbassyReceiver, EmbassySender, new};
@@ -504,50 +501,30 @@ fn handle_incoming_frame(
     frame: &Frame,
     device_id: u64,
 ) {
-    let address = if let Ok(mut state) = DEVICE_STATE.try_lock() {
-        try_assign_address_from_frame(&mut state, frame)
+    let (assigned_address, effect, hello_address) = if let Ok(mut state) = DEVICE_STATE.try_lock() {
+        let assigned_address = try_assign_address_from_frame(&mut state, frame);
+        let effect = apply_master_application_frame(&mut state, frame);
+        let hello_address = if effect.queue_device_hello {
+            state.address()
+        } else {
+            None
+        };
+        (assigned_address, effect, hello_address)
     } else {
-        None
+        (None, MasterApplicationEffect::none(), None)
     };
 
-    if let Some(address) = address {
+    if let Some(address) = assigned_address {
         enqueue_device_hello(sender, deferred_hello, address, device_id);
     }
-
-    let hello_requested = matches!(
-        frame.payload(),
-        imcp::frame::FramePayload::Set(payload)
-            if matches!(
-                decode_set_packet(payload.as_slice()),
-                Ok(AppPacketKind::ControlEvent(ControlEvent {
-                    control_id: CONTROL_ID_REQUEST_DEVICE_HELLO,
-                    event: ControlValue::RequestDeviceHello,
-                    ..
-                }))
-            )
-    );
-    if hello_requested {
-        let address = DEVICE_STATE
-            .try_lock()
-            .ok()
-            .and_then(|state| state.address());
-        if let Some(address) = address {
-            enqueue_device_hello(sender, deferred_hello, address, device_id);
-        }
+    if let Some(address) = hello_address {
+        enqueue_device_hello(sender, deferred_hello, address, device_id);
     }
-
-    if let imcp::frame::FramePayload::Data(payload) = frame.payload()
-        && let Ok(display_data) = decode_data_packet(payload.as_slice())
-    {
-        let accepted = if let Ok(mut state) = DEVICE_STATE.try_lock() {
-            state.accept_display_data(&display_data)
+    if let Some(applied) = effect.display {
+        if applied.accepted {
+            debug!("accepted display update seq={}", applied.data.seq);
         } else {
-            false
-        };
-        if accepted {
-            debug!("accepted display update seq={}", display_data.seq);
-        } else {
-            debug!("ignored stale display update seq={}", display_data.seq);
+            debug!("ignored stale display update seq={}", applied.data.seq);
         }
     }
 }
