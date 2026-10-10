@@ -176,10 +176,7 @@ const DeviceSettings = ({
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <h2 className="text-2xl font-semibold text-gray-800">デバイス接続先</h2>
-              <p className="mt-1 text-sm text-gray-500">
-                応答した IMCP/HCP デバイスを接続候補に表示します。接続先として登録した endpoint だけを継続的な探索対象にします。
-              </p>
-              <p className="mt-1 text-xs text-gray-400">変更は自動保存されます。</p>
+              <p className="mt-1 text-xs text-gray-400">自動保存</p>
             </div>
 
             <div className="flex flex-wrap gap-3">
@@ -206,13 +203,12 @@ const DeviceSettings = ({
 
           <div className="mt-6 border-t border-gray-200 pt-6">
             <h3 className="text-sm font-semibold text-gray-800">接続候補</h3>
-            <p className="mt-1 text-xs text-gray-500">115200 baud で応答した未登録のポートです。候補を選んでも、追加するまでは登録されません。</p>
             {serialPortScanError ? (
               <p role="alert" className="mt-3 text-sm text-red-700">走査できませんでした: {serialPortScanError}</p>
             ) : isScanningSerialPorts ? (
               <p role="status" className="mt-3 text-sm text-gray-500">COM ポートを確認しています…</p>
             ) : availableCandidates.length === 0 ? (
-              <p className="mt-3 text-sm text-gray-500">応答する未登録のポートはありません。認識されない場合は下の COM ポート欄へ直接入力できます。</p>
+              <p className="mt-3 text-sm text-gray-500">未登録のポートはありません。</p>
             ) : (
               <div className="mt-3 grid gap-3 md:grid-cols-2">
                 {availableCandidates.map((candidate) => (
@@ -325,7 +321,7 @@ const DeviceSettings = ({
           <div className="mt-6 space-y-3">
             {draftEndpoints.length === 0 ? (
               <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
-                まだ endpoint がありません。COM ポートを追加してから保存してください。
+                endpoint がありません。
               </div>
             ) : (
               draftEndpoints.map((endpoint) => (
@@ -415,14 +411,11 @@ const DeviceSettings = ({
         <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
           <div>
             <h3 className="text-xl font-semibold text-gray-800">Role 割当</h3>
-            <p className="mt-1 text-sm text-gray-500">
-              マッピングタブで物理→論理結線を行う前に、検出済みデバイスへ論理 Role を割り当てます。
-            </p>
           </div>
           <div className="mt-6 space-y-3">
             {devices.length === 0 ? (
               <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
-                検出されたデバイスがないため、Role を割り当てられません。接続先を登録し、デバイスが応答するのを待ってください。
+                検出されたデバイスがありません。
               </div>
             ) : (
               devices.map((device) => (
@@ -499,9 +492,6 @@ const DeviceSettings = ({
           <div className="flex items-center justify-between gap-4">
             <div>
               <h3 className="text-xl font-semibold text-gray-800">検出されたデバイス</h3>
-              <p className="mt-1 text-sm text-gray-500">
-                保存済み endpoint に対して応答した直結デバイスと IMCP Hub 配下デバイスを表示します。
-              </p>
             </div>
             <div className="rounded-full border border-gray-200 bg-gray-100 px-4 py-2 text-sm text-gray-700">
               {devices.length} device(s)

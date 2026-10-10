@@ -98,8 +98,7 @@ export const SoftwareSettings = ({
           <aside className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="text-sm font-medium text-gray-500">追加済みソフトウェア</p>
-                <h3 className="mt-1 text-xl font-semibold text-gray-900">接続リスト</h3>
+                <h3 className="text-xl font-semibold text-gray-900">接続リスト</h3>
               </div>
               <div className="relative">
                 <button
@@ -125,7 +124,6 @@ export const SoftwareSettings = ({
                         >
                           <div>
                             <p className="font-medium text-gray-900">{software.name}</p>
-                            <p className="mt-1 text-sm text-gray-500">{software.shortDescription}</p>
                           </div>
                           <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-600">
                             {isAdded ? "追加済み" : "追加"}
@@ -165,13 +163,9 @@ export const SoftwareSettings = ({
                             className={isSelected ? "text-blue-600" : "text-gray-400"}
                           />
                         </div>
-                        <p className="mt-1 text-sm text-gray-500">{software.shortDescription}</p>
-                        <div className="mt-3 flex items-center justify-between">
+                        <div className="mt-3">
                           <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs text-gray-600">
                             {status.connectionState}
-                          </span>
-                          <span className="text-xs text-gray-400">
-                            {isSelected ? "詳細を表示中" : "クリックで選択"}
                           </span>
                         </div>
                       </div>
@@ -186,12 +180,7 @@ export const SoftwareSettings = ({
             {!selectedSoftware ? (
               <div className="flex h-full min-h-[420px] flex-col items-center justify-center rounded-lg border border-dashed border-gray-300 bg-gray-50 px-8 text-center">
                 <Server className="text-gray-400" size={28} />
-                <h3 className="mt-4 text-xl font-semibold text-gray-900">
-                  ソフトウェアを追加してください
-                </h3>
-                <p className="mt-2 max-w-md text-sm text-gray-500">
-                  追加ボタンから接続対象を登録すると、このエリアに詳細設定が表示されます。
-                </p>
+                <h3 className="mt-4 text-xl font-semibold text-gray-900">接続対象なし</h3>
               </div>
             ) : (
               <div className="space-y-6">
@@ -201,13 +190,9 @@ export const SoftwareSettings = ({
                       <Cable size={24} />
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-gray-600">選択中の接続ソフト</p>
-                      <h3 className="mt-1 text-3xl font-semibold tracking-tight text-gray-900">
+                      <h3 className="text-3xl font-semibold tracking-tight text-gray-900">
                         {selectedSoftware.name}
                       </h3>
-                      <p className="mt-2 text-sm text-gray-500">
-                        {selectedSoftware.shortDescription}
-                      </p>
                     </div>
                   </div>
 
@@ -258,9 +243,6 @@ export const SoftwareSettings = ({
                 <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
                   <div>
                     <h4 className="text-xl font-semibold text-gray-900">接続設定</h4>
-                    <p className="mt-1 text-sm text-gray-500">
-                      DCS-BIOS の受信先と送信先を設定します。変更後は保存または保存して開始を実行してください。
-                    </p>
                   </div>
 
                   <div className="mt-5 space-y-5">
@@ -382,18 +364,12 @@ export const SoftwareSettings = ({
                         {status.aircraftName ?? "未取得"}
                       </p>
                     </div>
-                    <p className="mt-2 text-sm text-gray-500">
-                      接続先が公開する可読メタデータを表示します。
-                    </p>
                   </section>
                 </div>
 
                 <details className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
                   <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
                     <h4 className="text-xl font-semibold text-gray-900">接続診断</h4>
-                    <p className="mt-1 text-sm text-gray-500">
-                      現在の DCS-BIOS ランタイム状態と診断メッセージを表示します。
-                    </p>
                   </summary>
 
                   <div className="mt-5 grid gap-3">
@@ -414,9 +390,6 @@ export const SoftwareSettings = ({
         </div>
         <section className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
           <h3 className="text-lg font-semibold text-gray-900">外部連携（MCP サーバー）</h3>
-          <p className="mt-1 text-sm text-gray-600">
-            ゲーム接続（DCS-BIOS）とは別経路です。ローカルの MCP クライアントから Manager と接続デバイスを操作します。認証はありません。
-          </p>
           <div className="mt-4 flex flex-wrap items-end gap-4">
             <label className="flex items-center gap-2 text-sm text-gray-700">
               <input

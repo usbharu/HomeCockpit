@@ -28,9 +28,6 @@ export const StatusPage = ({ logs, status }: StatusPageProps) => {
             <div className="mx-auto flex max-w-7xl flex-col gap-6">
                 <div>
                     <h3 className="text-lg font-semibold text-gray-800">リアルタイムログ</h3>
-                    <p className="mt-1 text-sm text-gray-500">
-                        Manager と接続まわりのイベントを時系列で表示します。DCS-BIOS の詳細な接続状態と診断は「ソフトウェア接続」タブを参照してください。
-                    </p>
                     <p className="mt-3 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-700 shadow-sm">
                         <span className="font-medium text-gray-900">DCS-BIOS サマリー:</span>
                         {" "}
