@@ -422,7 +422,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache Kani
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.kani
           key: kani-0.68.0-${{ runner.os }}-${{ runner.arch }}
