@@ -449,13 +449,65 @@ impl Frame {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use crate::frame::Frame;
+    use super::{
+        Address, Frame, FramePayload, MAX_ENCODED_FRAME_SIZE, MAX_FRAME_SIZE, MAX_PAYLOAD_SIZE,
+    };
+    use crate::SOF;
+    use heapless::Vec;
 
     #[test]
     fn test_checksum_calculation() {
         assert_eq!(Frame::calculate_xor_checksum(&[0x01, 0x02, 0x03]), 0x00);
         assert_eq!(Frame::calculate_xor_checksum(&[0xFF, 0x01]), 0xFE);
         assert_eq!(Frame::calculate_xor_checksum(&[]), 0x00);
+    }
+
+    #[test]
+    fn address_bytes_roundtrip_for_every_u8() {
+        for byte in 0u8..=255 {
+            let address = Address::from_byte(byte);
+            assert_eq!(address.as_byte(), byte);
+            if byte == 0xFF {
+                assert_eq!(address, Address::Broadcast);
+            } else {
+                assert_eq!(address, Address::Unicast(byte));
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_size_limits_match_the_worst_case_stuffed_frame() {
+        assert_eq!(MAX_FRAME_SIZE, 5 + MAX_PAYLOAD_SIZE + 1);
+        assert_eq!(MAX_ENCODED_FRAME_SIZE, 2 + (MAX_FRAME_SIZE * 2));
+
+        let payload = [SOF; MAX_PAYLOAD_SIZE];
+        let frame = Frame::new(
+            Address::Broadcast,
+            SOF,
+            FramePayload::Data(Vec::from_slice(&payload).unwrap()),
+        );
+        let mut buffer = [0u8; MAX_ENCODED_FRAME_SIZE];
+        let encoded_len = frame.encode(&mut buffer).unwrap();
+        assert_eq!(encoded_len, frame.encoded_len());
+        assert!(encoded_len <= MAX_ENCODED_FRAME_SIZE);
+    }
+
+    #[test]
+    fn payload_is_empty_only_when_the_length_is_zero() {
+        assert!(FramePayload::Ping.is_empty());
+        assert!(FramePayload::Pong.is_empty());
+        assert!(!FramePayload::Ack(0x02).is_empty());
+        assert!(!FramePayload::Data(Vec::from_slice(&[0x01]).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn decode_rejects_a_buffer_shorter_than_header_plus_checksum() {
+        let buffer = [0u8; Frame::HEADER_LEN + Frame::CHECKSUM_LEN - 1];
+        assert_eq!(
+            Frame::decode(&buffer),
+            Err(crate::DecodeError::InvalidPayloadLength)
+        );
     }
 }

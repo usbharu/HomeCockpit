@@ -394,6 +394,97 @@ jobs:
         working-directory: firmware/upper_panel_ddi
         run: cargo clippy --locked --no-default-features --features rp235x --target thumbv8m.main-none-eabihf --bin upper_panel_ddi -- -D warnings
 
+  firmware-upper-host-test:
+    name: Upper panel host tests
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_upper == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test packetization on the host
+        working-directory: firmware/upper_panel_ddi
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | awk '/^host:/ { print $2 }')"
+          CARGO_BUILD_TARGET="$host" cargo test --locked --lib --no-default-features
+
+  protocol-kani:
+    name: Protocol Kani proofs
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.firmware_hcp == 'true' || needs.changes.outputs.firmware_upper == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Kani
+        uses: actions/cache@v4
+        with:
+          path: ~/.kani
+          key: kani-0.68.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+      - name: Prove HCP sequence ordering
+        working-directory: firmware/hcp
+        run: cargo kani
+      - name: Prove packetization
+        working-directory: firmware/upper_panel_ddi
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | awk '/^host:/ { print $2 }')"
+          CARGO_BUILD_TARGET="$host" cargo kani --lib --no-default-features
+
+  protocol-mutants:
+    name: Protocol mutation diff
+    needs: changes
+    if: ${{ needs.changes.outputs.all == 'true' || needs.changes.outputs.imcp == 'true' || needs.changes.outputs.firmware_hcp == 'true' || needs.changes.outputs.firmware_base == 'true' || needs.changes.outputs.firmware_upper == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+      - name: Test mutants in the pull request diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | awk '/^host:/ { print $2 }')"
+
+          run_mutants() {
+            local dir="$1"
+            shift
+            local diff
+            diff="$(mktemp)"
+            if [[ -z "${BASE_SHA}" || "${BASE_SHA}" == "0000000000000000000000000000000000000000" ]]; then
+              echo "No diff base for ${dir}; running the configured mutant set"
+              (cd "${dir}" && env -u CARGO_TARGET_DIR "$@")
+              return
+            fi
+            git -C "${dir}" diff --relative "${BASE_SHA}" "${HEAD_SHA}" -- . > "${diff}"
+            if [[ ! -s "${diff}" ]]; then
+              echo "No diff in ${dir}"
+              return
+            fi
+            (cd "${dir}" && env -u CARGO_TARGET_DIR "$@" --in-diff "${diff}")
+          }
+
+          run_mutants imcp cargo mutants -j 4
+          run_mutants firmware/hcp cargo mutants -j 2
+          run_mutants firmware/homecockpit_firmware_base cargo mutants -j 2
+          run_mutants firmware/upper_panel_ddi env CARGO_BUILD_TARGET="${host}" cargo mutants -j 2
+
   manager-frontend-build:
     name: Manager frontend build
     needs: changes
@@ -1021,6 +1112,9 @@ jobs:
       - firmware-upper-fmt
       - firmware-upper-clippy
       - firmware-upper-rp235x
+      - firmware-upper-host-test
+      - protocol-kani
+      - protocol-mutants
       - manager-frontend-build
       - manager-backend-test
       - manager-backend-fmt

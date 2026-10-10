@@ -1,0 +1,19 @@
+# PTY E2E is slow and does not inspect frame, parser, or state mutants.
+# Unit tests and tests/core_logic.rs do.
+features = ["test-utils"]
+additional_cargo_test_args = ["--lib", "--test", "core_logic", "--test", "properties"]
+examine_globs = ["src/frame.rs", "src/parser.rs", "src/lib.rs"]
+exclude_re = [
+    "Format for",
+    "imcp_test::",
+    # Valid escaped bytes are `reserved ^ ESC_XOR`, which clears bit 0x20.
+    # OR sets that same bit, so the two operators match on every accepted byte.
+    'replace \^ with \| in .*unstuff',
+    # A SOF seen while already receiving does nothing in the lookahead, matching the wildcard arm.
+    "delete match arm SOF in .*has_complete_frame",
+    # `rx_scan_pos` is a usize. At 0 the body copies the buffer onto itself and subtracts 0.
+    'replace > with >= in .*consume_rx_buffer',
+    # The scan index starts at 0, so `*= 1` never advances and `next_frame` loops.
+    'replace \+= with \*= in .*next_frame',
+]
+test_workspace = false

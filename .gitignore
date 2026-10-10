@@ -1,4 +1,5 @@
 **/target
+**/mutants.out
 **/production/**
 **/fp-info-cache
 **/fp-lib-table

@@ -46,6 +46,7 @@ runtime や board 固有の型を core に持ち込まず、adapter 側で chann
 - Join/SetAddress の変更では、該当する wrong ID/address/sender、reserved address、duplicate、retry exhaustion、address exhaustion を検討してください。
 - PTY test は Unix 固有です。platform gate を維持し、timing-sensitive な E2E だけで unit test を置き換えないでください。
 - 最終検証は [CI workflow の IMCP jobs](../.github/workflows/ci.yml) と同じコマンドを `imcp/` で実行します。局所的な `cargo test -p ...` だけで完了にしないでください。
+- フレーム、パーサ、アドレス割り当ての性質テストは [`tests/properties.rs`](tests/properties.rs) です。`cargo mutants` は `imcp/` で実行し、PTY E2E は [`.cargo/mutants.toml`](.cargo/mutants.toml) で対象外です。kani の harness は `cargo test` では走りません。
 
 ## 下流への影響
 

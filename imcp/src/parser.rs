@@ -103,7 +103,7 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
                             return Some(Err(DecodeError::InvalidEscapeSequence));
                         }
 
-                        if let Err(error) = self.push_frame_byte(byte ^ ESC_XOR) {
+                        if let Err(error) = self.push_frame_byte(Self::unstuff(byte)) {
                             return Some(Err(error));
                         }
                         continue;
@@ -176,6 +176,12 @@ impl<'rx_buf, 'frame_buf> FrameParser<'rx_buf, 'frame_buf> {
         }
 
         false
+    }
+
+    /// Valid escaped bytes are `reserved ^ ESC_XOR`, which clears bit 0x20.
+    /// Replacing `^` with `|` sets that same bit, so the mutant is excluded.
+    fn unstuff(byte: u8) -> u8 {
+        byte ^ ESC_XOR
     }
 
     fn push_frame_byte(&mut self, byte: u8) -> Result<(), DecodeError> {

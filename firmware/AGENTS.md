@@ -63,6 +63,7 @@
 ## Buildと変更時の注意
 
 - 各firmware crateは独立しており、repository rootはCargo workspaceではありません。working directoryとCI commandは [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) を正とします。
+- HCP、firmware base、Upper Panel の packetization はホスト上の proptest で性質を検査します。Upper Panel のホストテストは board feature を外し、`CARGO_BUILD_TARGET` をホスト triple にして `cargo test --lib --no-default-features` を `firmware/upper_panel_ddi/` で実行します。kani の harness は `cargo kani` で実行し、通常の `cargo test` には含まれません。
 - `upper_panel_ddi`の依存先にはgit submoduleがあります。欠けている場合は内容を代替実装せず、[`../.gitmodules`](../.gitmodules) に従って初期化状況を確認してください。
 - HCP/IMCPのwire value、payload、address、ACK/retryを変更する場合は、[`../.agents/skills/imcp-protocol/SKILL.md`](../.agents/skills/imcp-protocol/SKILL.md) と下流componentを確認してください。
 - board固有のpin、matrix scan、USB/UART setupは実機firmwareに置き、[`homecockpit_firmware_base/`](homecockpit_firmware_base/)へ持ち込まないでください。
