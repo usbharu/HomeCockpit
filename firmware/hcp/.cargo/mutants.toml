@@ -1,2 +1,0 @@
-# `cfg(kani)` harnesses are not executed by `cargo test`.
-exclude_re = ["proofs::"]
