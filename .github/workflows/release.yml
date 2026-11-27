@@ -222,6 +222,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # actions/upload-artifact keeps each artifact's common-path
+          # subdirectories (for example msi/ and nsis/). Flatten them so the
+          # checks below, the checksums, and gh release upload all operate on
+          # regular files.
+          find . -mindepth 2 -type f -exec mv -f {} . \;
+          find . -mindepth 1 -depth -type d -empty -exec rmdir {} \;
+
           ls -l
 
           for pattern in '*.dmg' '*.msi' '*-setup.exe' '*.AppImage' '*.deb' '*.rpm'; do
