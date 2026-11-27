@@ -1,0 +1,313 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  PNPM_VERSION: 12.23.0
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag, versions, and branch
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::Release tags must look like v1.2.3 or v1.2.3-rc.1 (got ${tag})"
+            exit 1
+          fi
+          version="${tag#v}"
+
+          conf_version="$(jq -r '.version' manager/src-tauri/tauri.conf.json)"
+          package_version="$(jq -r '.version' manager/package.json)"
+          cargo_version="$(
+            awk '
+              /^\[package\]/ { in_package = 1; next }
+              in_package && /^\[/ { in_package = 0 }
+              in_package && /^version[[:space:]]*=/ {
+                sub(/^version[[:space:]]*=[[:space:]]*"/, "")
+                sub(/".*$/, "")
+                print
+                exit
+              }
+            ' manager/src-tauri/Cargo.toml
+          )"
+          lock_version="$(
+            awk '
+              $0 == "name = \"manager\"" { found = 1; next }
+              found && /^version = "/ {
+                sub(/^version = "/, "")
+                sub(/"$/, "")
+                print
+                exit
+              }
+            ' manager/src-tauri/Cargo.lock
+          )"
+
+          mismatch=0
+          check_version() {
+            local label="$1"
+            local actual="$2"
+            if [[ "$actual" != "$version" ]]; then
+              echo "::error::${label} is ${actual:-<missing>}, but tag ${tag} requires ${version}"
+              mismatch=1
+            fi
+          }
+          check_version "manager/src-tauri/tauri.conf.json" "$conf_version"
+          check_version "manager/src-tauri/Cargo.toml" "$cargo_version"
+          check_version "manager/src-tauri/Cargo.lock (manager)" "$lock_version"
+          check_version "manager/package.json" "$package_version"
+          if [[ "$mismatch" -ne 0 ]]; then
+            exit 1
+          fi
+
+          git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/master; then
+            echo "::error::Tag ${tag} points at a commit that is not on master"
+            exit 1
+          fi
+
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "prerelease=${prerelease}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS universal
+            os: macos-latest
+            bundles: dmg
+            args: --target universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            artifact: manager-macos-universal
+            paths: |
+              manager/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          - name: Windows x64
+            os: windows-latest
+            bundles: msi,nsis
+            args: ''
+            rust_targets: ''
+            artifact: manager-windows-x64
+            paths: |
+              manager/src-tauri/target/release/bundle/msi/*.msi
+              manager/src-tauri/target/release/bundle/nsis/*.exe
+          - name: Linux x64
+            os: ubuntu-22.04
+            bundles: appimage,deb,rpm
+            args: ''
+            rust_targets: ''
+            artifact: manager-linux-x64
+            paths: |
+              manager/src-tauri/target/release/bundle/appimage/*.AppImage
+              manager/src-tauri/target/release/bundle/deb/*.deb
+              manager/src-tauri/target/release/bundle/rpm/*.rpm
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install --no-install-recommends -y
+          build-essential curl wget file libxdo-dev libssl-dev libudev-dev libfuse2
+          libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: manager/pnpm-lock.yaml
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: manager/src-tauri -> target
+          key: release-${{ matrix.artifact }}
+          cache-on-failure: true
+
+      - name: Install frontend dependencies
+        working-directory: manager
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure ad-hoc macOS signing
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+
+      - name: Build desktop app
+        working-directory: manager
+        shell: bash
+        run: pnpm tauri build --bundles "${{ matrix.bundles }}" ${{ matrix.args }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.paths }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v8
+        with:
+          pattern: manager-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify installers and create checksums
+        working-directory: dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l
+
+          for pattern in '*.dmg' '*.msi' '*-setup.exe' '*.AppImage' '*.deb' '*.rpm'; do
+            if ! compgen -G "$pattern" > /dev/null; then
+              echo "::error::Missing expected installer: ${pattern}"
+              exit 1
+            fi
+          done
+
+          shopt -s nullglob
+          files=()
+          for file in *; do
+            if [[ ! -f "$file" || "$file" == "SHA256SUMS" ]]; then
+              continue
+            fi
+            files+=("$file")
+          done
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "::error::No release assets found"
+            exit 1
+          fi
+          sha256sum -- "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create draft release
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if existing_is_draft="$(gh release view "$TAG" --json isDraft -q '.isDraft' 2>/dev/null)"; then
+            if [[ "$existing_is_draft" != "true" ]]; then
+              echo "::error::Release ${TAG} is already published; bump the version and push a new tag"
+              exit 1
+            fi
+            echo "Reusing existing draft release ${TAG}"
+            exit 0
+          fi
+
+          notes_file="$RUNNER_TEMP/install-notes.md"
+          cat > "$notes_file" <<'EOF'
+          ## インストール
+
+          | プラットフォーム | ファイル |
+          | --- | --- |
+          | macOS (Intel / Apple Silicon) | `manager_*_universal.dmg` |
+          | Windows x64 | `manager_*_x64_en-US.msi` または `manager_*_x64-setup.exe` |
+          | Linux x64 | `.AppImage` / `.deb` / `.rpm` |
+
+          - macOS: dmg を開いて Applications にドラッグしてください。Apple の Developer ID で署名・公証されていないため、初回起動時に右クリック →「開く」を選ぶか、システム設定 → プライバシーとセキュリティから許可してください。
+          - Windows: SmartScreen の警告が表示された場合は「詳細情報」→「実行」を選択してください。
+          - Linux: AppImage は実行権限を付けて起動してください (`chmod +x *.AppImage`)。Ubuntu 22.04 以降で `libfuse2` が無い場合はインストールしてください。
+          - 添付の `SHA256SUMS` でダウンロードしたファイルを検証できます。
+
+          > このリリースノートは、前回のリリース以降にマージされた PR から自動生成されています。
+          EOF
+
+          args=(
+            --draft
+            --verify-tag
+            --title "HomeCockpit Manager ${TAG}"
+            --generate-notes
+            --notes "$(cat "$notes_file")"
+          )
+          if [[ "$PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$TAG" "${args[@]}"
+
+      - name: Upload installers
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+        shell: bash
+        run: gh release upload "$TAG" dist/* --clobber
+
+      - name: Publish release
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PRERELEASE" == "true" ]]; then
+            gh release edit "$TAG" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi
