@@ -221,8 +221,12 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
                     && let NodeType::Master(state) = &mut self.node_type
                 {
                     if state.pending_assignment_retries >= MAX_SET_ADDRESS_RETRIES {
+                        // Retire the address together with the assignment so a late
+                        // ACK from a station that adopted this SetAddress cannot
+                        // match a future assignment that reuses the same address.
                         state.pending_assignment = None;
                         state.pending_assignment_retries = 0;
+                        let _ = state.advance_address();
                         continue;
                     }
                     state.pending_assignment_retries =
@@ -1367,11 +1371,68 @@ mod tests {
             assert!(matches!(
                 imcp.node_type,
                 NodeType::Master(MasterState {
-                    next_address: 0x02,
+                    next_address: 0x03,
                     pending_assignment: None,
                     pending_assignment_retries: 0,
                 })
             ));
+        });
+    }
+
+    #[test]
+    fn test_set_address_retry_exhaustion_at_last_address_exhausts_pool() {
+        futures::executor::block_on(async {
+            let retry_exhausted = Frame::new(
+                Address::Unicast(0x00),
+                0x01,
+                FramePayload::SetAddress {
+                    address: 0xFE,
+                    id: 0xAA55_AA55,
+                },
+            );
+            let fallback = Frame::new(Address::Broadcast, 0x01, FramePayload::Ping);
+
+            let receiver = TestReceiver::new([fallback]);
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let mut imcp = Imcp {
+                tx_receiver: receiver,
+                tx_sender: TestSender::default(),
+                address: 0x01,
+                node_id: None,
+                pending_frame: Some(retry_exhausted),
+                frame_parser: FrameParser::new(&mut rx_buf, &mut frame_buf),
+                node_type: NodeType::Master(MasterState {
+                    next_address: 0xFE,
+                    pending_assignment: Some((0xAA55_AA55, 0xFE)),
+                    pending_assignment_retries: MAX_SET_ADDRESS_RETRIES,
+                }),
+            };
+
+            imcp.write_tick().await.unwrap();
+
+            assert!(matches!(
+                imcp.node_type,
+                NodeType::Master(MasterState {
+                    next_address: 0xFF,
+                    pending_assignment: None,
+                    pending_assignment_retries: 0,
+                })
+            ));
+
+            let join = Frame::new(
+                Address::Unicast(0x01),
+                0x00,
+                FramePayload::Join(0x1234_5678),
+            );
+            let encoded = encode_frame(&join);
+
+            assert_eq!(
+                imcp.read_tick(&encoded).await,
+                Err(ImcpError::ProtocolError(
+                    ProtocolError::AddressPoolExhausted
+                ))
+            );
         });
     }
 
