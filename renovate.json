@@ -3,6 +3,7 @@
   "extends": [
     "config:recommended"
   ],
+  "platformAutomerge": true,
   "internalChecksFilter": "strict",
   "minimumReleaseAgeBuffer": "30 minutes",
   "packageRules": [
@@ -12,6 +13,18 @@
         "npm"
       ],
       "minimumReleaseAge": "1 day"
+    },
+    {
+      "description": "Auto-merge patch and minor updates once required checks pass.",
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest",
+        "pinDigest"
+      ],
+      "automerge": true,
+      "automergeStrategy": "squash"
     }
   ]
 }
