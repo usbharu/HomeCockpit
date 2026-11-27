@@ -353,7 +353,7 @@ jobs:
           components: rustfmt
       - name: Check upper panel firmware formatting
         working-directory: firmware/upper_panel_ddi
-        run: cargo fmt --all -- --check
+        run: cargo fmt --package upper_panel_ddi -- --check
 
   firmware-upper-clippy:
     name: Upper panel firmware Clippy
