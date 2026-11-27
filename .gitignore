@@ -9,3 +9,4 @@
 **/*-backups/*.zip
 
 .pnpm-store
+*.solidcraft.bak
