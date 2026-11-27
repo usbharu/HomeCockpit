@@ -221,8 +221,16 @@ impl<'rx_buf, 'parser_frame_buffer, R: Receiver, S: Sender>
                     && let NodeType::Master(state) = &mut self.node_type
                 {
                     if state.pending_assignment_retries >= MAX_SET_ADDRESS_RETRIES {
-                        state.pending_assignment = None;
+                        // Retire the address together with the assignment so a late
+                        // ACK from a station that adopted this SetAddress cannot
+                        // match a future assignment that reuses the same address.
+                        // A SetAddress injected outside the assignment transaction
+                        // is dropped without consuming an address.
+                        let abandoned_assignment = state.pending_assignment.take();
                         state.pending_assignment_retries = 0;
+                        if abandoned_assignment.is_some() {
+                            let _ = state.advance_address();
+                        }
                         continue;
                     }
                     state.pending_assignment_retries =
@@ -1367,11 +1375,131 @@ mod tests {
             assert!(matches!(
                 imcp.node_type,
                 NodeType::Master(MasterState {
+                    next_address: 0x03,
+                    pending_assignment: None,
+                    pending_assignment_retries: 0,
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn test_write_tick_drops_external_set_address_without_consuming_address() {
+        futures::executor::block_on(async {
+            let injected = Frame::new(
+                Address::Unicast(0x00),
+                0x01,
+                FramePayload::SetAddress {
+                    address: 0x02,
+                    id: 0xAA55_AA55,
+                },
+            );
+            let fallback = Frame::new(Address::Broadcast, 0x01, FramePayload::Ping);
+
+            let receiver = TestReceiver::new([injected.clone(), fallback.clone()]);
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let mut imcp = Imcp {
+                tx_receiver: receiver,
+                tx_sender: TestSender::default(),
+                address: 0x01,
+                node_id: None,
+                pending_frame: None,
+                frame_parser: FrameParser::new(&mut rx_buf, &mut frame_buf),
+                node_type: NodeType::Master(MasterState {
+                    next_address: 0x02,
+                    pending_assignment: None,
+                    pending_assignment_retries: 0,
+                }),
+            };
+
+            for _ in 0..MAX_SET_ADDRESS_RETRIES {
+                let encoded = imcp.write_tick().await.unwrap();
+
+                let mut parser_rx = [0u8; 64];
+                let mut parser_frame = [0u8; 64];
+                let mut parser = FrameParser::new(&mut parser_rx, &mut parser_frame);
+                parser.write_data(&encoded).unwrap();
+                let frame = parser.next_frame().unwrap().unwrap();
+
+                assert_eq!(frame.payload(), injected.payload());
+            }
+
+            let encoded = imcp.write_tick().await.unwrap();
+
+            let mut parser_rx = [0u8; 64];
+            let mut parser_frame = [0u8; 64];
+            let mut parser = FrameParser::new(&mut parser_rx, &mut parser_frame);
+            parser.write_data(&encoded).unwrap();
+            let frame = parser.next_frame().unwrap().unwrap();
+
+            assert_eq!(frame.payload(), fallback.payload());
+            assert!(imcp.pending_frame.is_none());
+            assert!(matches!(
+                imcp.node_type,
+                NodeType::Master(MasterState {
                     next_address: 0x02,
                     pending_assignment: None,
                     pending_assignment_retries: 0,
                 })
             ));
+        });
+    }
+
+    #[test]
+    fn test_set_address_retry_exhaustion_at_last_address_exhausts_pool() {
+        futures::executor::block_on(async {
+            let retry_exhausted = Frame::new(
+                Address::Unicast(0x00),
+                0x01,
+                FramePayload::SetAddress {
+                    address: 0xFE,
+                    id: 0xAA55_AA55,
+                },
+            );
+            let fallback = Frame::new(Address::Broadcast, 0x01, FramePayload::Ping);
+
+            let receiver = TestReceiver::new([fallback]);
+            let mut rx_buf = [0u8; 64];
+            let mut frame_buf = [0u8; 64];
+            let mut imcp = Imcp {
+                tx_receiver: receiver,
+                tx_sender: TestSender::default(),
+                address: 0x01,
+                node_id: None,
+                pending_frame: Some(retry_exhausted),
+                frame_parser: FrameParser::new(&mut rx_buf, &mut frame_buf),
+                node_type: NodeType::Master(MasterState {
+                    next_address: 0xFE,
+                    pending_assignment: Some((0xAA55_AA55, 0xFE)),
+                    pending_assignment_retries: MAX_SET_ADDRESS_RETRIES,
+                }),
+            };
+
+            imcp.write_tick().await.unwrap();
+
+            assert!(matches!(
+                imcp.node_type,
+                NodeType::Master(MasterState {
+                    next_address: 0xFF,
+                    pending_assignment: None,
+                    pending_assignment_retries: 0,
+                })
+            ));
+
+            let join = Frame::new(
+                Address::Unicast(0x01),
+                0x00,
+                FramePayload::Join(0x1234_5678),
+            );
+            let encoded = encode_frame(&join);
+
+            assert_eq!(
+                imcp.read_tick(&encoded).await,
+                Err(ImcpError::ProtocolError(
+                    ProtocolError::AddressPoolExhausted
+                ))
+            );
         });
     }
 

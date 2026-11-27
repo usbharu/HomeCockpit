@@ -287,6 +287,159 @@ fn different_join_is_ignored_while_assignment_is_pending_on_os() {
 }
 
 #[test]
+fn late_ack_from_abandoned_address_does_not_complete_next_assignment_on_os() {
+    block_on(async {
+        let mut harness = new_harness();
+
+        // The first station joins, but no ACK ever arrives.
+        harness.client.send_join(0x1111_1111).await.unwrap();
+        let join_bytes = harness.client.write_tick().await.unwrap();
+        harness.master.read_tick(&join_bytes).await.unwrap();
+
+        // Transmit the initial SetAddress and every retry.
+        for _ in 0..3 {
+            let set_bytes = harness.master.write_tick().await.unwrap();
+            let set = decode_single_encoded_frame(&set_bytes).unwrap();
+            assert_eq!(
+                set.payload(),
+                &FramePayload::SetAddress {
+                    address: 0x02,
+                    id: 0x1111_1111,
+                }
+            );
+        }
+
+        // The next write_tick sees the exhausted retry count, discards the
+        // assignment, and proceeds to the next queued frame.
+        harness
+            .master_injector
+            .send(Frame::new(Address::Broadcast, 0x01, FramePayload::Ping))
+            .await
+            .unwrap();
+        let fallback_bytes = harness.master.write_tick().await.unwrap();
+        assert_eq!(
+            decode_single_encoded_frame(&fallback_bytes)
+                .unwrap()
+                .payload(),
+            &FramePayload::Ping
+        );
+
+        // A new station must not receive the abandoned address 0x02.
+        let mut second_client = new_harness().client;
+        second_client.send_join(0x2222_2222).await.unwrap();
+        let second_join_bytes = second_client.write_tick().await.unwrap();
+        harness.master.read_tick(&second_join_bytes).await.unwrap();
+        let set_bytes = harness.master.write_tick().await.unwrap();
+        let set = decode_single_encoded_frame(&set_bytes).unwrap();
+        assert_eq!(
+            set.payload(),
+            &FramePayload::SetAddress {
+                address: 0x03,
+                id: 0x2222_2222,
+            }
+        );
+
+        // A late ACK from the station that adopted the abandoned SetAddress
+        // must not complete the new assignment.
+        let stale_ack = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ack(0x00));
+        let mut raw = [0u8; 32];
+        let len = stale_ack.encode(&mut raw).unwrap();
+        assert_eq!(
+            harness.master.read_tick(&raw[..len]).await,
+            Err(ImcpError::ProtocolError(ProtocolError::UnexpectedAck))
+        );
+
+        // The new assignment is still pending, so its retry continues.
+        let retried_bytes = harness.master.write_tick().await.unwrap();
+        let retried = decode_single_encoded_frame(&retried_bytes).unwrap();
+        assert_eq!(
+            retried.payload(),
+            &FramePayload::SetAddress {
+                address: 0x03,
+                id: 0x2222_2222,
+            }
+        );
+
+        // The station at 0x03 completes the assignment.
+        let ack = Frame::new(Address::Unicast(0x01), 0x03, FramePayload::Ack(0x00));
+        let mut raw = [0u8; 32];
+        let len = ack.encode(&mut raw).unwrap();
+        let seen = harness
+            .master
+            .read_tick(&raw[..len])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(seen.payload(), &FramePayload::Ack(0x00));
+
+        // A successful assignment still advances the pool for the next join.
+        let mut third_client = new_harness().client;
+        third_client.send_join(0x3333_3333).await.unwrap();
+        let third_join_bytes = third_client.write_tick().await.unwrap();
+        harness.master.read_tick(&third_join_bytes).await.unwrap();
+        let next_set_bytes = harness.master.write_tick().await.unwrap();
+        let next_set = decode_single_encoded_frame(&next_set_bytes).unwrap();
+        assert_eq!(
+            next_set.payload(),
+            &FramePayload::SetAddress {
+                address: 0x04,
+                id: 0x3333_3333,
+            }
+        );
+    });
+}
+
+#[test]
+fn late_ack_without_pending_assignment_is_ignored_on_os() {
+    block_on(async {
+        let mut harness = new_harness();
+
+        // Exhaust the assignment to 0x02 without ever delivering an ACK.
+        harness.client.send_join(0x1111_1111).await.unwrap();
+        let join_bytes = harness.client.write_tick().await.unwrap();
+        harness.master.read_tick(&join_bytes).await.unwrap();
+        for _ in 0..3 {
+            harness.master.write_tick().await.unwrap();
+        }
+
+        // A fallback frame makes the next write_tick observe the exhausted
+        // retry count and discard the assignment.
+        harness
+            .master_injector
+            .send(Frame::new(Address::Broadcast, 0x01, FramePayload::Ping))
+            .await
+            .unwrap();
+        harness.master.write_tick().await.unwrap();
+
+        // With no SetAddress pending, the late ACK is a duplicate and must not
+        // fail the master or advance the pool a second time.
+        let stale_ack = Frame::new(Address::Unicast(0x01), 0x02, FramePayload::Ack(0x00));
+        let mut raw = [0u8; 32];
+        let len = stale_ack.encode(&mut raw).unwrap();
+        let ignored = harness.master.read_tick(&raw[..len]).await.unwrap();
+        assert!(matches!(
+            ignored,
+            Some(ref frame) if frame.payload() == &FramePayload::Ack(0x00)
+        ));
+
+        // The next join still receives the address after the retired 0x02.
+        let mut second_client = new_harness().client;
+        second_client.send_join(0x2222_2222).await.unwrap();
+        let second_join_bytes = second_client.write_tick().await.unwrap();
+        harness.master.read_tick(&second_join_bytes).await.unwrap();
+        let set_bytes = harness.master.write_tick().await.unwrap();
+        let set = decode_single_encoded_frame(&set_bytes).unwrap();
+        assert_eq!(
+            set.payload(),
+            &FramePayload::SetAddress {
+                address: 0x03,
+                id: 0x2222_2222,
+            }
+        );
+    });
+}
+
+#[test]
 fn broadcast_ping_is_ponged_on_os() {
     block_on(async {
         let mut harness = new_harness();

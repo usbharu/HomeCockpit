@@ -97,7 +97,7 @@ Checksum = To ^ From ^ Type ^ LengthLo ^ LengthHi ^ Payload[0] ^ ... ^ Payload[n
 - Ping には ACK ではなく Pong を返す。
 - Join は通常の ACK を返さず、Master が SetAddress を送ることで割り当てトランザクションを進める。
 - Master が処理中に保持できるアドレス割り当ては 1 件で、別の Join は保留中の処理を妨げない。保留中の Join と同じ `id` の再送は同じ割り当て要求の再送として扱う。
-- 現行の割り当てトランザクションでは、SetAddress の送信試行は最大 3 回。ACK が得られなければその割り当てを破棄し、クライアントは再度 Join できる。
+- 現行の割り当てトランザクションでは、SetAddress の送信試行は最大 3 回。ACK が得られなければその割り当てを破棄し、クライアントは再度 Join できる。再送切れで破棄した割り当て先アドレスは再利用せず、次の割り当ては次のアドレスを使う。
 
 ## 状態遷移
 
@@ -121,11 +121,12 @@ Ready(id) -- 再 Join --> Joining(id)
 ```text
 Join(id) -- 割り当て可能 --> pending assignment(id, address)
 pending assignment -- Ack(0x00) --> 次の割り当て先へ進む
-pending assignment -- 期限内に ACK なし --> 破棄
+pending assignment -- 期限内に ACK なし --> 破棄し、そのアドレスも消費する
 ```
 
 - Join は `From=0x00` である場合だけ割り当て対象とする。
 - 割り当て先は `0x02` から順に選び、`0xFE` の次は枯渇として扱う。
+- 再送切れで破棄したアドレスは再利用しない。次の SetAddress が保留中のときに遅れて届いた `Ack(0x00)` は、期待する送信元アドレスと一致しないため Unexpected ACK となる。保留がないときは次の項のとおり無視する。
 - SetAddress の ACK は、ペイロード `0x00` と、割り当てたアドレスからの送信元を組み合わせて検証する。
 - 保留がないときの `Ack(0x00)` は、完了済み SetAddress の重複 ACK として無視できる。その他の対象不明 ACK は Unexpected ACK とする。
 
